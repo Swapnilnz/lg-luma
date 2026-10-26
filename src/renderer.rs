@@ -1108,7 +1108,7 @@ impl Renderer {
             self.quad(
                 rect,
                 [(1. - u) / 2., (1. - v) / 2., (1. + u) / 2., (1. + v) / 2.],
-                plain_radius(19.2),
+                plain_radius(crate::feeds::CARD_RADIUS),
                 0.,
                 tint,
                 id,

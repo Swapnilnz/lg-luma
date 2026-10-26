@@ -487,7 +487,8 @@ fn feeds_tick(
             feeds_service::Response::Rows(rows) => state.set_feed_rows(rows),
             feeds_service::Response::Image { url, image } => {
                 if state.feeds.wanted_images().contains(&url) {
-                    state.feeds.images.insert(url, image);
+                    let reduced_motion = state.preferences.reduced_motion;
+                    state.feeds.image_arrived(url, image, reduced_motion);
                     state.dirty = true;
                 }
             }
@@ -697,6 +698,7 @@ fn run() -> Result<(), String> {
             eprintln!("Luma feeds: {error}");
             state.set_feed_rows(vec![feeds::Row {
                 title: "Feeds".into(),
+                pinned: false,
                 status: feeds::Status::Error(error),
                 items: vec![],
             }]);

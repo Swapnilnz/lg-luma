@@ -1031,28 +1031,12 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     }
 }
 
-const FEED_CARD_HEIGHT: f32 = 144.;
-const FEED_CAPTION: f32 = 56.;
+const FEED_PANEL_HEIGHT: f32 = 144.;
 
-/// Shortens `value` with "..." to fit `width` on one line.
-fn fit(assets: &Assets, value: &str, style: TextStyle, width: f32) -> String {
-    if assets.width(value, style) <= width {
-        return value.to_owned();
-    }
-    let mut out = String::new();
-    for character in value.chars() {
-        out.push(character);
-        if assets.width(&format!("{out}..."), style) > width {
-            out.pop();
-            break;
-        }
-    }
-    format!("{}...", out.trim_end())
-}
-
-/// Trakt and MDBList rows between favourites and inputs. Returns where the next section starts.
+/// Trakt and MDBList rows between favourites and inputs: Apple TV-style portrait posters with
+/// no captions. Returns where the next section starts.
 fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32 {
-    use crate::feeds::Status;
+    use crate::feeds::{CARD_HEIGHT, CARD_PITCH, CARD_RADIUS, CARD_WIDTH, Status};
     for (row_index, row) in state.feeds.rows.iter().enumerate() {
         if !row.shown() {
             continue;
@@ -1065,11 +1049,17 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
             false,
         );
         let cards_y = y + 58.4;
-        y = cards_y + FEED_CARD_HEIGHT + FEED_CAPTION + 41.6;
+        // Only Continue Watching episodes carry a caption ("S1, E4") under the poster.
+        let caption = if row.items.iter().any(|item| !item.subtitle.is_empty()) {
+            36.
+        } else {
+            0.
+        };
+        y = cards_y + CARD_HEIGHT + caption + 52.;
         if row.items.is_empty() {
             match &row.status {
                 Status::SignIn { url, code } => {
-                    let panel = Rect::new(84., cards_y, 1664., FEED_CARD_HEIGHT);
+                    let panel = Rect::new(84., cards_y, 1664., FEED_PANEL_HEIGHT);
                     out.draw.push(Draw::RoundedGradient(
                         panel,
                         19.2,
@@ -1098,6 +1088,7 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
                         WHITE,
                         false,
                     );
+                    y = cards_y + FEED_PANEL_HEIGHT + 41.6;
                 }
                 Status::Error(error) => {
                     let panel = Rect::new(84., cards_y, 1664., 64.);
@@ -1119,15 +1110,15 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
                     y = cards_y + 64. + 41.6;
                 }
                 Status::Loading | Status::Ready => {
-                    for index in 0..6 {
+                    for index in 0..7 {
                         out.shape(
                             Rect::new(
-                                84. + index as f32 * HOME_TILE_PITCH,
+                                84. + index as f32 * CARD_PITCH,
                                 cards_y,
-                                HOME_TILE_WIDTH,
-                                FEED_CARD_HEIGHT,
+                                CARD_WIDTH,
+                                CARD_HEIGHT,
                             ),
-                            19.2,
+                            CARD_RADIUS,
                             c(0xffffff, 0.06),
                         );
                     }
@@ -1157,18 +1148,18 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
         ])));
         for (index, item) in row.items.iter().enumerate() {
             let rect = Rect::new(
-                84. + index as f32 * HOME_TILE_PITCH - scroll,
+                84. + index as f32 * CARD_PITCH - scroll,
                 cards_y,
-                HOME_TILE_WIDTH,
-                FEED_CARD_HEIGHT,
+                CARD_WIDTH,
+                CARD_HEIGHT,
             );
             let target = Target::Feed(row_index, index);
             out.control(
                 target.clone(),
-                Rect::new(rect.x, rect.y, rect.w, rect.h + FEED_CAPTION),
+                Rect::new(rect.x, rect.y, rect.w, rect.h + caption),
                 true,
             );
-            if rect.y + rect.h + FEED_CAPTION < MAIN_TOP
+            if rect.y + rect.h + caption < MAIN_TOP
                 || rect.y > 1054.
                 || rect.x + rect.w + 40. < 0.
                 || rect.x - 40. > 1920.
@@ -1179,34 +1170,34 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
             let focused = state.focus == target;
             out.shadow(
                 rect,
-                19.2,
+                CARD_RADIUS,
                 if focused { 34. } else { 22. },
                 if focused { 14. } else { 9. },
-                if focused { 0.4 } else { 0.165 },
+                if focused { 0.45 } else { 0.2 },
             );
-            let artwork = item
-                .image
-                .as_ref()
-                .and_then(|url| state.feeds.images.get(url));
-            if let Some(image) = artwork {
-                out.shape(rect, 19.2, c(0x1b1f24, 1.));
-                out.draw.push(Draw::AppImage(image.clone(), rect, [1.; 4]));
-            } else {
+            let artwork = item.image.as_ref().and_then(|url| {
+                Some((
+                    state.feeds.images.get(url)?,
+                    state.feeds.reveal(url, state.preferences.reduced_motion),
+                ))
+            });
+            // The title card stays beneath a poster that is still fading in.
+            if artwork.is_none_or(|(_, reveal)| reveal < 1.) {
                 out.draw.push(Draw::RoundedGradient(
                     rect,
-                    19.2,
+                    CARD_RADIUS,
                     c(0x3a4048, 1.),
                     c(0x22272d, 1.),
                 ));
                 let style = text(20.8, 550, -0.02).leading(1.25);
-                let lines = assets.lines(&item.title, style, rect.w - 40.).min(3) as f32;
+                let lines = assets.lines(&item.title, style, rect.w - 36.).min(4) as f32;
                 let height = lines * style.size * style.line_height;
                 out.text(
                     &item.title,
                     Rect::new(
-                        rect.x + 20.,
+                        rect.x + 18.,
                         rect.y + (rect.h - height) / 2.,
-                        rect.w - 40.,
+                        rect.w - 36.,
                         height,
                     ),
                     style,
@@ -1214,10 +1205,19 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
                     true,
                 );
             }
-            out.border(rect, 19.2, 1., c(0xffffff, 0.063));
+            if let Some((image, reveal)) = artwork {
+                // Develops in: fades up from dim, like Apple TV's artwork.
+                let light = 0.55 + 0.45 * reveal;
+                out.draw.push(Draw::AppImage(
+                    image.clone(),
+                    rect,
+                    [light, light, light, reveal],
+                ));
+            }
+            out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
             if let Some(progress) = item.progress {
-                let track = Rect::new(rect.x + 18., rect.y + rect.h - 18., rect.w - 36., 5.);
-                out.shape(track, 2.5, c(0x000000, 0.45));
+                let track = Rect::new(rect.x + 16., rect.y + rect.h - 20., rect.w - 32., 5.);
+                out.shape(track, 2.5, c(0x000000, 0.5));
                 out.shape(
                     Rect::new(
                         track.x,
@@ -1230,30 +1230,21 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
                 );
             }
             if focused {
-                out.ring(rect, 19.2);
+                out.ring(rect, CARD_RADIUS);
             }
             if state.pressed.as_ref() == Some(&target) {
                 out.fade(start, 1., 0.85);
             }
-            let title_style = text(17.6, if focused { 550 } else { 450 }, -0.02);
-            out.text(
-                fit(assets, &item.title, title_style, rect.w - 8.),
-                Rect::new(rect.x + 4., rect.y + rect.h + 14., rect.w - 8., 24.),
-                title_style,
-                if focused {
-                    c(0xffffff, 1.)
-                } else {
-                    c(0xececec, 0.66)
-                },
-                false,
-            );
             if !item.subtitle.is_empty() {
-                let subtitle_style = text(13.12, 400, 0.);
                 out.text(
-                    fit(assets, &item.subtitle, subtitle_style, rect.w - 8.),
-                    Rect::new(rect.x + 4., rect.y + rect.h + 38., rect.w - 8., 18.),
-                    subtitle_style,
-                    c(0xe8e8e8, 0.48),
+                    &item.subtitle,
+                    Rect::new(rect.x + 2., rect.y + rect.h + 12., rect.w - 4., 20.),
+                    text(15.2, if focused { 550 } else { 500 }, 0.),
+                    if focused {
+                        c(0xffffff, 1.)
+                    } else {
+                        c(0xececec, 0.6)
+                    },
                     false,
                 );
             }

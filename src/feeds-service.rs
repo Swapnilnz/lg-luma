@@ -24,7 +24,11 @@ const STATE_LIMIT: usize = 4 * 1024 * 1024;
 const TRAKT: &str = "https://api.trakt.tv";
 const MDBLIST: &str = "https://api.mdblist.com";
 const TMDB: &str = "https://api.themoviedb.org/3";
-const TMDB_IMAGES: &str = "https://image.tmdb.org/t/p/w300";
+/// Portrait posters, which carry the title artwork.
+const TMDB_IMAGES: &str = "https://image.tmdb.org/t/p/w342";
+/// Saved state from before portrait posters holds backdrop URLs and old captions; it is
+/// dropped once.
+const STATE_VERSION: u32 = 3;
 const USER_AGENT: &str = "LumaNative-Feeds/1.0";
 const DEFAULT_APP: &str = "space.nuvio.webos";
 /// Recently watched shows checked for a next episode.
@@ -163,6 +167,7 @@ pub struct SavedRow {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Saved {
+    version: u32,
     token: Option<Token>,
     rows: HashMap<String, SavedRow>,
     artwork: HashMap<String, Option<String>>,
@@ -207,7 +212,20 @@ pub fn load_state(path: &Path) -> Saved {
         .ok()
         .flatten()
         .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
-        .unwrap_or_default()
+        .map(|mut saved| {
+            // Older rows and lookups point at landscape artwork: load them again as posters,
+            // keeping the Trakt sign-in.
+            if saved.version != STATE_VERSION {
+                saved.rows.clear();
+                saved.artwork.clear();
+                saved.version = STATE_VERSION;
+            }
+            saved
+        })
+        .unwrap_or(Saved {
+            version: STATE_VERSION,
+            ..Saved::default()
+        })
 }
 
 fn save_state(path: &Path, saved: &Saved) -> Result<(), String> {
@@ -231,11 +249,13 @@ pub fn initial_rows(config: &Config, saved: &Saved) -> Vec<Row> {
         .map(|row| match saved.rows.get(&row.source) {
             Some(saved) => Row {
                 title: row.title.clone(),
+                pinned: is_trakt(&row.source),
                 status: Status::Ready,
                 items: saved.items.clone(),
             },
             None => Row {
                 title: row.title.clone(),
+                pinned: is_trakt(&row.source),
                 status: Status::Loading,
                 items: vec![],
             },
@@ -468,17 +488,9 @@ fn text(value: &Value, key: &str) -> String {
         .to_owned()
 }
 
-fn year(value: &Value) -> String {
-    value
-        .get("year")
-        .or_else(|| value.get("release_year"))
-        .and_then(Value::as_u64)
-        .map_or(String::new(), |year| year.to_string())
-}
-
 fn episode_code(episode: &Value) -> String {
     let number = |key: &str| episode.get(key).and_then(Value::as_u64).unwrap_or(0);
-    format!("S{:02}E{:02}", number("season"), number("number"))
+    format!("S{}, E{}", number("season"), number("number"))
 }
 
 fn link(kind: Kind, imdb: Option<&str>, tmdb: Option<u64>) -> Option<String> {
@@ -488,9 +500,9 @@ fn link(kind: Kind, imdb: Option<&str>, tmdb: Option<u64>) -> Option<String> {
     tmdb.map(|id| format!("nuvio://tmdb/{}/{id}", kind.nuvio()))
 }
 
-/// TMDB's landscape artwork, else its poster.
+/// TMDB's poster (with the title on it), else its landscape artwork.
 fn image_path(value: &Value) -> Option<String> {
-    ["backdrop_path", "poster_path"]
+    ["poster_path", "backdrop_path"]
         .iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str))
         .filter(|path| path.starts_with('/'))
@@ -507,8 +519,9 @@ fn decode(url: &str, bytes: &[u8]) -> Option<Artwork> {
     limits.max_alloc = Some(32 * 1024 * 1024);
     reader.limits(limits);
     let image = reader.decode().ok()?;
-    let image = if image.width() > 320 || image.height() > 320 {
-        image.thumbnail(320, 320)
+    // The card's own size: 216 x 324 for a 2:3 poster.
+    let image = if image.width() > 216 || image.height() > 324 {
+        image.thumbnail(216, 324)
     } else {
         image
     };
@@ -653,7 +666,9 @@ impl Worker {
                         .iter()
                         .zip(&self.items)
                         .enumerate()
-                        .filter(|(index, _)| self.near.contains(index))
+                        .filter(|(index, (row, _))| {
+                            self.near.contains(index) || is_trakt(&row.source)
+                        })
                         .flat_map(|(_, (_, items))| items)
                         .filter_map(|item| item.image.clone())
                         .collect();
@@ -796,6 +811,7 @@ impl Worker {
                 };
                 Row {
                     title: row.title.clone(),
+                    pinned: is_trakt(&row.source),
                     status,
                     items,
                 }
@@ -820,7 +836,9 @@ impl Worker {
             .zip(&self.items)
             .enumerate()
             .filter(|(index, (row, _))| {
-                self.near.contains(index) && (signed_in || !is_trakt(&row.source))
+                // Trakt rows (Continue Watching) keep their posters wherever Home is scrolled.
+                (self.near.contains(index) || is_trakt(&row.source))
+                    && (signed_in || !is_trakt(&row.source))
             })
             .flat_map(|(_, (_, items))| items)
             .filter_map(|item| item.image.clone())
@@ -1061,7 +1079,7 @@ impl Worker {
                 Some(Entry {
                     kind,
                     title: text(item, "title"),
-                    subtitle: year(item),
+                    subtitle: String::new(),
                     imdb,
                     tmdb,
                     trakt: None,
@@ -1335,7 +1353,6 @@ impl Worker {
                 continue;
             }
             let at = text(item, "paused_at");
-            let percent = format!("{}% watched", progress.round() as u32);
             match item.get("type").and_then(Value::as_str) {
                 Some("movie") => {
                     let Some(movie) = item.get("movie") else {
@@ -1345,7 +1362,7 @@ impl Worker {
                     entries.push(Entry {
                         kind: Kind::Movie,
                         title: text(movie, "title"),
-                        subtitle: percent,
+                        subtitle: String::new(),
                         imdb: ids.imdb,
                         tmdb: ids.tmdb,
                         trakt: ids.trakt,
@@ -1362,7 +1379,7 @@ impl Worker {
                     entries.push(Entry {
                         kind: Kind::Series,
                         title: text(show, "title"),
-                        subtitle: format!("{} · {percent}", episode_code(episode)),
+                        subtitle: episode_code(episode),
                         imdb: ids.imdb,
                         tmdb: ids.tmdb,
                         trakt: ids.trakt,
@@ -1452,7 +1469,7 @@ impl Worker {
             entries.push(Entry {
                 kind,
                 title: text(media, "title"),
-                subtitle: year(media),
+                subtitle: String::new(),
                 imdb: ids.imdb,
                 tmdb: ids.tmdb,
                 trakt: ids.trakt,

@@ -4,14 +4,22 @@
 //! rows.
 use crate::app_artwork::Artwork;
 use crate::state::{
-    Control, Direction, Effect, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, HOME_TILE_PITCH,
-    HOME_TILE_WIDTH, Rect, State, Target,
+    Control, Direction, Effect, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, Rect, State, Target,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
+    time::{Duration, Instant},
 };
+
+/// Portrait poster cards, Apple TV style.
+pub const CARD_WIDTH: f32 = 216.;
+pub const CARD_HEIGHT: f32 = 324.;
+pub const CARD_PITCH: f32 = 240.;
+pub const CARD_RADIUS: f32 = 14.4;
+/// How long a poster takes to fade in once it arrives.
+const REVEAL: Duration = Duration::from_millis(450);
 
 /// One card: what it shows and the deep link it opens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -41,6 +49,9 @@ pub enum Status {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub title: String,
+    /// Trakt rows keep their artwork in memory wherever Home is scrolled.
+    #[serde(default)]
+    pub pinned: bool,
     pub status: Status,
     pub items: Vec<Item>,
 }
@@ -65,15 +76,18 @@ pub struct Feeds {
     /// Rows on or near the screen. Only their artwork is kept, so a long list of rows does
     /// not hold hundreds of images.
     pub near: BTreeSet<usize>,
+    /// When each poster arrived, while it is still fading in.
+    pub arrived: HashMap<String, Instant>,
 }
 
 impl Feeds {
-    /// Artwork URLs of the rows near the screen.
+    /// Artwork URLs of the rows near the screen, and of pinned rows.
     pub fn wanted_images(&self) -> HashSet<&String> {
-        self.near
+        self.rows
             .iter()
-            .filter_map(|row| self.rows.get(*row))
-            .flat_map(|row| &row.items)
+            .enumerate()
+            .filter(|(index, row)| row.pinned || self.near.contains(index))
+            .flat_map(|(_, row)| &row.items)
             .filter_map(|item| item.image.as_ref())
             .collect()
     }
@@ -82,6 +96,41 @@ impl Feeds {
     pub fn prune_images(&mut self) {
         let wanted: HashSet<String> = self.wanted_images().into_iter().cloned().collect();
         self.images.retain(|url, _| wanted.contains(url));
+        self.arrived.retain(|url, _| wanted.contains(url));
+    }
+
+    /// A poster finished downloading: it fades in from now.
+    pub fn image_arrived(&mut self, url: String, image: Arc<Artwork>, reduced_motion: bool) {
+        if !reduced_motion {
+            self.arrived.insert(url.clone(), Instant::now());
+        }
+        self.images.insert(url, image);
+    }
+
+    /// How far a poster has faded in, 0 to 1, eased out.
+    pub fn reveal(&self, url: &str, reduced_motion: bool) -> f32 {
+        if reduced_motion {
+            return 1.;
+        }
+        let Some(arrived) = self.arrived.get(url) else {
+            return 1.;
+        };
+        let t = (arrived.elapsed().as_secs_f32() / REVEAL.as_secs_f32()).clamp(0., 1.);
+        1. - (1. - t).powi(3)
+    }
+
+    /// Whether a poster is still fading in, so Home keeps redrawing.
+    pub fn fading(&self) -> bool {
+        self.arrived
+            .values()
+            .any(|arrived| arrived.elapsed() < REVEAL)
+    }
+
+    /// Forgets finished fades. True when one just finished and needs its last frame.
+    pub fn finish_fades(&mut self) -> bool {
+        let before = self.arrived.len();
+        self.arrived.retain(|_, arrived| arrived.elapsed() < REVEAL);
+        self.arrived.len() != before
     }
 
     /// The rows whose cards lie within about two rows of the screen, from the last scene.
@@ -102,7 +151,7 @@ impl Feeds {
         if count == 0 {
             return 0.;
         }
-        let content = (count - 1) as f32 * HOME_TILE_PITCH + HOME_TILE_WIDTH;
+        let content = (count - 1) as f32 * CARD_PITCH + CARD_WIDTH;
         (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.)
     }
 }

@@ -242,6 +242,9 @@ impl State {
     }
 
     pub fn tick(&mut self) {
+        if self.feeds.fading() || self.feeds.finish_fades() {
+            self.dirty = true;
+        }
         let recents_open = self.recents_open();
         if recents_open || self.recents.visibility > 0. {
             self.dirty |= self.recents.animate(
@@ -297,6 +300,7 @@ impl State {
                 || self.recents.cards_animating(self.pointer)))
             || self.previous_background.is_some()
             || self.panel_started.is_some()
+            || self.feeds.fading()
             || (!self.preferences.reduced_motion
                 && self
                     .notice
