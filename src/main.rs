@@ -8,6 +8,9 @@ mod branding;
 mod damage;
 mod diagnostics;
 mod egl_damage;
+mod feeds;
+#[path = "feeds-service.rs"]
+mod feeds_service;
 mod font;
 mod i18n;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
@@ -317,6 +320,23 @@ fn effects(
                     }
                 }
             }
+            Effect::LaunchTitle(target) => {
+                if !state.launching {
+                    if platform.webos {
+                        state.launching = true;
+                        state.notify(state.preferences.language.t("opening"));
+                        platform.send(Request::LaunchTitle {
+                            id: state.feeds.app_id.clone(),
+                            target,
+                        });
+                    } else {
+                        state.notify(format!(
+                            "Desktop preview: {} would open {target}",
+                            state.feeds.app_id
+                        ));
+                    }
+                }
+            }
             Effect::Quit => return false,
             Effect::Recent {
                 generation,
@@ -435,6 +455,40 @@ fn weather_tick(state: &mut State, service: &weather_service::Service, visible: 
                 state.dirty |= changed;
                 if let Some(command) = command {
                     service.send(command);
+                }
+            }
+        }
+    }
+}
+
+/// Feed rows from their worker; coming back to Home asks it for fresh Trakt rows.
+fn feeds_tick(
+    state: &mut State,
+    service: &feeds_service::Service,
+    visible: bool,
+    controls: &[state::Control],
+) {
+    let home = visible && state.page == state::Page::Home;
+    if home && !state.feeds.visible {
+        service.refresh();
+    }
+    state.feeds.visible = home;
+    // Artwork follows the rows on screen; other pages keep the last set.
+    if home {
+        let near = feeds::Feeds::near_rows(controls);
+        if !near.is_empty() && near != state.feeds.near {
+            service.near(near.iter().copied().collect());
+            state.feeds.near = near;
+            state.feeds.prune_images();
+        }
+    }
+    while let Ok(response) = service.receiver.try_recv() {
+        match response {
+            feeds_service::Response::Rows(rows) => state.set_feed_rows(rows),
+            feeds_service::Response::Image { url, image } => {
+                if state.feeds.wanted_images().contains(&url) {
+                    state.feeds.images.insert(url, image);
+                    state.dirty = true;
                 }
             }
         }
@@ -618,6 +672,38 @@ fn run() -> Result<(), String> {
         weather_service::Client::new(options.weather_test_server.as_deref())?,
         weather_cache,
     );
+    // Home feed rows (Trakt, MDBList) are configured by feeds.json beside the preferences.
+    let feeds_config_path = feeds_service::config_path(&preferences_path);
+    let feeds_state_path = feeds_service::state_path(&preferences_path);
+    let feeds_saved = feeds_service::load_state(&feeds_state_path);
+    let feeds_config = match feeds_service::load_config(&feeds_config_path) {
+        Ok(Some(config)) => {
+            eprintln!(
+                "Luma feeds: {} rows from {}",
+                config.rows.len(),
+                feeds_config_path.display()
+            );
+            state.feeds.app_id = config.app_id.clone();
+            // The same first rows the worker fetches artwork for, until Home reports its own.
+            state.feeds.near = (0..4).collect();
+            state.set_feed_rows(feeds_service::initial_rows(&config, &feeds_saved));
+            Some(config)
+        }
+        Ok(None) => {
+            eprintln!("Luma feeds: off (no {})", feeds_config_path.display());
+            None
+        }
+        Err(error) => {
+            eprintln!("Luma feeds: {error}");
+            state.set_feed_rows(vec![feeds::Row {
+                title: "Feeds".into(),
+                status: feeds::Status::Error(error),
+                items: vec![],
+            }]);
+            None
+        }
+    };
+    let feeds_service = feeds_service::Service::new(feeds_config, feeds_saved, feeds_state_path);
     let platform = Platform::new(
         webos,
         options.preferences.is_none() && options.test_extra_apps == 0,
@@ -973,6 +1059,7 @@ fn run() -> Result<(), String> {
             }
         }
         weather_tick(&mut state, &weather_service, visible);
+        feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
         // Rebuild hit regions before input whenever inventory/layout changed.
         if state.dirty {
             scene = compose(&mut state, &assets, pill, pill_width, now);

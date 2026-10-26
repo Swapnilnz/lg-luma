@@ -1,0 +1,20 @@
+{
+  "app_id": "space.nuvio.webos",
+  "limit": 15,
+  "refresh_minutes": 360,
+  "trakt_refresh_minutes": 30,
+  "trakt": {
+    "client_id": "YOUR_TRAKT_CLIENT_ID"
+  },
+  "mdblist": {
+    "api_key": "YOUR_MDBLIST_API_KEY"
+  },
+  "tmdb": {
+    "api_key": "YOUR_TMDB_API_KEY_OR_READ_TOKEN"
+  },
+  "rows": [
+    { "title": "Continue Watching", "source": "trakt:continue" },
+    { "title": "Watchlist", "source": "trakt:watchlist" },
+    { "title": "Popular Movies", "source": "mdblist:USERNAME/LIST-SLUG" }
+  ]
+}

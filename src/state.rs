@@ -37,6 +37,8 @@ pub enum Target {
     Nav(usize),
     TvSettings,
     Recent(String),
+    /// A card in a Home feed row: row index, card index.
+    Feed(usize, usize),
     RecentEmpty,
     RecentRetry,
     App(String),
@@ -149,6 +151,8 @@ pub enum Effect {
     /// Refresh apps: read the inventory and every app icon again.
     Reload,
     Launch(String),
+    /// Open the feeds app on a title: the `contentTarget` deep link.
+    LaunchTitle(String),
     Recent {
         generation: u64,
         command: crate::recents::Command,
@@ -194,6 +198,7 @@ pub struct State {
     pub greeting_name_draft: String,
     pub input_name: String,
     pub recents: crate::recents::Recents,
+    pub feeds: crate::feeds::Feeds,
 }
 
 impl State {
@@ -227,6 +232,7 @@ impl State {
             greeting_name_draft: String::new(),
             input_name: String::new(),
             recents: crate::recents::Recents::default(),
+            feeds: crate::feeds::Feeds::default(),
         }
     }
 
@@ -533,6 +539,7 @@ impl State {
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
         let previous = self.scroll;
         let previous_home = self.home_scroll;
+        let previous_feeds = self.feeds.scroll.clone();
         if let Some(control) = controls.iter().find(|c| c.target == self.focus) {
             if self.page == Page::Home && matches!(self.focus, Target::App(_)) {
                 if control.rect.x < HOME_STRIP_LEFT {
@@ -540,6 +547,11 @@ impl State {
                 } else if control.rect.x + control.rect.w > HOME_STRIP_RIGHT {
                     self.home_scroll += control.rect.x + control.rect.w - HOME_STRIP_RIGHT;
                 }
+            }
+            if self.page == Page::Home
+                && let Target::Feed(row, _) = self.focus
+            {
+                self.reveal_feed(row, control.rect);
             }
             if matches!(
                 self.focus,
@@ -573,10 +585,13 @@ impl State {
         if self.page == Page::Home {
             self.scroll_favorites(0.);
         }
-        if self.scroll != previous || self.home_scroll != previous_home {
+        let moved = self.scroll != previous
+            || self.home_scroll != previous_home
+            || self.feeds.scroll != previous_feeds;
+        if moved {
             self.dirty = true;
         }
-        self.scroll != previous || self.home_scroll != previous_home
+        moved
     }
 
     /// Hover and pointer-down must not move the control before pointer-up.
@@ -693,6 +708,11 @@ impl State {
             return vec![];
         }
         if self.overlay.is_none() {
+            if self.page == Page::Home
+                && let Some(effects) = self.feed_direction(direction, controls)
+            {
+                return effects;
+            }
             if self.page == Page::Home
                 && let Target::App(id) = &self.focus
             {
@@ -1041,7 +1061,7 @@ impl State {
             .filter(|candidate| candidate.target != self.focus)
             .filter(|candidate| {
                 self.page != Page::Home
-                    || !matches!(candidate.target, Target::App(_))
+                    || !matches!(candidate.target, Target::App(_) | Target::Feed(..))
                     || (candidate.rect.x >= HOME_STRIP_LEFT - 0.1
                         && candidate.rect.x + candidate.rect.w <= HOME_STRIP_RIGHT + 0.1)
             })
@@ -1342,6 +1362,16 @@ impl State {
             Target::DismissNotice => self.notice = None,
             Target::CloseDialog => return self.back(),
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
+            Target::Feed(row, index) if !self.launching => {
+                if let Some(item) = self
+                    .feeds
+                    .rows
+                    .get(row)
+                    .and_then(|row| row.items.get(index))
+                {
+                    return vec![Effect::LaunchTitle(item.link.clone())];
+                }
+            }
             Target::App(id) | Target::Input(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }

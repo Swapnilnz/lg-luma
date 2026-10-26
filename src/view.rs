@@ -938,7 +938,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     }
     out.draw.push(Draw::EdgeFadeX(None));
     out.draw.push(Draw::Clip(Some(state.content_viewport())));
-    let input_y = 544.8 + grid_height + 41.6 - s;
+    let input_y = feed_rows(out, state, assets, 544.8 + grid_height + 41.6 - s);
     let inputs: Vec<_> = state
         .inventory
         .inputs
@@ -1029,6 +1029,239 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         }
         out.control(Target::Input(input.id.clone()), rect, true);
     }
+}
+
+const FEED_CARD_HEIGHT: f32 = 144.;
+const FEED_CAPTION: f32 = 56.;
+
+/// Shortens `value` with "..." to fit `width` on one line.
+fn fit(assets: &Assets, value: &str, style: TextStyle, width: f32) -> String {
+    if assets.width(value, style) <= width {
+        return value.to_owned();
+    }
+    let mut out = String::new();
+    for character in value.chars() {
+        out.push(character);
+        if assets.width(&format!("{out}..."), style) > width {
+            out.pop();
+            break;
+        }
+    }
+    format!("{}...", out.trim_end())
+}
+
+/// Trakt and MDBList rows between favourites and inputs. Returns where the next section starts.
+fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32 {
+    use crate::feeds::Status;
+    for (row_index, row) in state.feeds.rows.iter().enumerate() {
+        if !row.shown() {
+            continue;
+        }
+        out.text(
+            &row.title,
+            Rect::new(84., y + 3.3, 1200., 31.),
+            text(23.2, 550, -0.035).leading(1.3),
+            WHITE,
+            false,
+        );
+        let cards_y = y + 58.4;
+        y = cards_y + FEED_CARD_HEIGHT + FEED_CAPTION + 41.6;
+        if row.items.is_empty() {
+            match &row.status {
+                Status::SignIn { url, code } => {
+                    let panel = Rect::new(84., cards_y, 1664., FEED_CARD_HEIGHT);
+                    out.draw.push(Draw::RoundedGradient(
+                        panel,
+                        19.2,
+                        c(0x30363c, 0.70),
+                        c(0x20252b, 0.60),
+                    ));
+                    out.border(panel, 19.2, 1., c(0xffffff, 0.12));
+                    out.text(
+                        "Sign in to Trakt",
+                        Rect::new(panel.x + 36., panel.y + 28., 900., 32.),
+                        text(26., 600, -0.02),
+                        WHITE,
+                        false,
+                    );
+                    out.text(
+                        format!("On your phone, open {url} and enter this code:"),
+                        Rect::new(panel.x + 36., panel.y + 72., 900., 24.),
+                        text(17.6, 400, 0.),
+                        c(0xe8e8e8, 0.72),
+                        false,
+                    );
+                    out.text(
+                        code,
+                        Rect::new(panel.x + 1000., panel.y + 38., 620., 70.),
+                        text(56., 650, 0.08),
+                        WHITE,
+                        false,
+                    );
+                }
+                Status::Error(error) => {
+                    let panel = Rect::new(84., cards_y, 1664., 64.);
+                    out.shape(panel, 11.2, c(0xad7c3e, 0.07));
+                    out.border(panel, 11.2, 1., c(0xedc596, 0.19));
+                    out.icon(
+                        assets,
+                        "alert",
+                        Rect::new(panel.x + 20., panel.y + 23., 18., 18.),
+                        c(0xf3ddbd, 1.),
+                    );
+                    out.text(
+                        error,
+                        Rect::new(panel.x + 54., panel.y + 21., 1580., 24.),
+                        text(15.2, 400, 0.),
+                        c(0xf3ddbd, 1.),
+                        false,
+                    );
+                    y = cards_y + 64. + 41.6;
+                }
+                Status::Loading | Status::Ready => {
+                    for index in 0..6 {
+                        out.shape(
+                            Rect::new(
+                                84. + index as f32 * HOME_TILE_PITCH,
+                                cards_y,
+                                HOME_TILE_WIDTH,
+                                FEED_CARD_HEIGHT,
+                            ),
+                            19.2,
+                            c(0xffffff, 0.06),
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+        let scroll = state.feeds.scroll.get(row_index).copied().unwrap_or(0.);
+        let content = state.content_viewport();
+        let left = if scroll > 0. { HOME_FADE_LEFT } else { 0. };
+        out.draw.push(Draw::Clip(Some(Rect::new(
+            left,
+            content.y,
+            HOME_FADE_RIGHT - left,
+            content.h,
+        ))));
+        let fade_in = if scroll > 0. {
+            [HOME_FADE_LEFT, HOME_STRIP_LEFT]
+        } else {
+            [0., 0.]
+        };
+        out.draw.push(Draw::EdgeFadeX(Some([
+            fade_in[0],
+            fade_in[1],
+            HOME_STRIP_RIGHT,
+            HOME_FADE_RIGHT,
+        ])));
+        for (index, item) in row.items.iter().enumerate() {
+            let rect = Rect::new(
+                84. + index as f32 * HOME_TILE_PITCH - scroll,
+                cards_y,
+                HOME_TILE_WIDTH,
+                FEED_CARD_HEIGHT,
+            );
+            let target = Target::Feed(row_index, index);
+            out.control(
+                target.clone(),
+                Rect::new(rect.x, rect.y, rect.w, rect.h + FEED_CAPTION),
+                true,
+            );
+            if rect.y + rect.h + FEED_CAPTION < MAIN_TOP
+                || rect.y > 1054.
+                || rect.x + rect.w + 40. < 0.
+                || rect.x - 40. > 1920.
+            {
+                continue;
+            }
+            let start = out.draw.len();
+            let focused = state.focus == target;
+            out.shadow(
+                rect,
+                19.2,
+                if focused { 34. } else { 22. },
+                if focused { 14. } else { 9. },
+                if focused { 0.4 } else { 0.165 },
+            );
+            let artwork = item
+                .image
+                .as_ref()
+                .and_then(|url| state.feeds.images.get(url));
+            if let Some(image) = artwork {
+                out.shape(rect, 19.2, c(0x1b1f24, 1.));
+                out.draw.push(Draw::AppImage(image.clone(), rect, [1.; 4]));
+            } else {
+                out.draw.push(Draw::RoundedGradient(
+                    rect,
+                    19.2,
+                    c(0x3a4048, 1.),
+                    c(0x22272d, 1.),
+                ));
+                let style = text(20.8, 550, -0.02).leading(1.25);
+                let lines = assets.lines(&item.title, style, rect.w - 40.).min(3) as f32;
+                let height = lines * style.size * style.line_height;
+                out.text(
+                    &item.title,
+                    Rect::new(
+                        rect.x + 20.,
+                        rect.y + (rect.h - height) / 2.,
+                        rect.w - 40.,
+                        height,
+                    ),
+                    style,
+                    c(0xffffff, 0.92),
+                    true,
+                );
+            }
+            out.border(rect, 19.2, 1., c(0xffffff, 0.063));
+            if let Some(progress) = item.progress {
+                let track = Rect::new(rect.x + 18., rect.y + rect.h - 18., rect.w - 36., 5.);
+                out.shape(track, 2.5, c(0x000000, 0.45));
+                out.shape(
+                    Rect::new(
+                        track.x,
+                        track.y,
+                        (track.w * progress.clamp(0., 1.)).max(5.),
+                        track.h,
+                    ),
+                    2.5,
+                    c(0xffffff, 0.95),
+                );
+            }
+            if focused {
+                out.ring(rect, 19.2);
+            }
+            if state.pressed.as_ref() == Some(&target) {
+                out.fade(start, 1., 0.85);
+            }
+            let title_style = text(17.6, if focused { 550 } else { 450 }, -0.02);
+            out.text(
+                fit(assets, &item.title, title_style, rect.w - 8.),
+                Rect::new(rect.x + 4., rect.y + rect.h + 14., rect.w - 8., 24.),
+                title_style,
+                if focused {
+                    c(0xffffff, 1.)
+                } else {
+                    c(0xececec, 0.66)
+                },
+                false,
+            );
+            if !item.subtitle.is_empty() {
+                let subtitle_style = text(13.12, 400, 0.);
+                out.text(
+                    fit(assets, &item.subtitle, subtitle_style, rect.w - 8.),
+                    Rect::new(rect.x + 4., rect.y + rect.h + 38., rect.w - 8., 18.),
+                    subtitle_style,
+                    c(0xe8e8e8, 0.48),
+                    false,
+                );
+            }
+        }
+        out.draw.push(Draw::EdgeFadeX(None));
+        out.draw.push(Draw::Clip(Some(content)));
+    }
+    y
 }
 
 struct WeatherSummary {

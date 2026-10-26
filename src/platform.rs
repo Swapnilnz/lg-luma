@@ -136,6 +136,11 @@ pub fn redirect_to_home() -> Result<bool, String> {
 pub enum Request {
     Refresh,
     Launch(String),
+    /// Launch `id` with `{"contentTarget": target}`, the webOS deep-link parameter.
+    LaunchTitle {
+        id: String,
+        target: String,
+    },
     SyncSplash(String),
     Recent {
         generation: u64,
@@ -220,6 +225,19 @@ impl Platform {
                         }
                     } else {
                         Ok(())
+                    }),
+                    Request::LaunchTitle { id, target } => Response::Launched(if !webos {
+                        Ok(())
+                    } else if !valid_app_id(&id) {
+                        Err("Invalid application identifier".into())
+                    } else if target.len() > 512 || target.chars().any(char::is_control) {
+                        Err("Invalid deep link".into())
+                    } else {
+                        call(
+                            "luna://com.webos.applicationManager/launch",
+                            json!({"id": id, "params": {"contentTarget": target}}),
+                        )
+                        .map(|_| ())
                     }),
                     Request::SyncSplash(background) => {
                         if webos
