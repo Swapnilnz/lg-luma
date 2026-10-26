@@ -163,6 +163,8 @@ pub enum Effect {
     LaunchTitle(String),
     /// Listen for a search through the remote's microphone; the request's number.
     VoiceSearch(u64),
+    /// Play a trailer in LG's YouTube app: its video ID.
+    Trailer(String),
     Recent {
         generation: u64,
         command: crate::recents::Command,
@@ -255,7 +257,9 @@ impl State {
         if self.feeds.fading() || self.feeds.finish_fades() {
             self.dirty = true;
         }
-        if self.feeds.search_animating() && !self.preferences.reduced_motion {
+        if (self.feeds.search_animating() || self.feeds.card_animating())
+            && !self.preferences.reduced_motion
+        {
             self.dirty = true;
         }
         let recents_open = self.recents_open();
@@ -314,7 +318,8 @@ impl State {
             || self.previous_background.is_some()
             || self.panel_started.is_some()
             || self.feeds.fading()
-            || (self.feeds.search_animating() && !self.preferences.reduced_motion)
+            || ((self.feeds.search_animating() || self.feeds.card_animating())
+                && !self.preferences.reduced_motion)
             || (!self.preferences.reduced_motion
                 && self
                     .notice
@@ -1578,6 +1583,10 @@ impl State {
                     2 => self.preferences.reduced_motion = !self.preferences.reduced_motion,
                     8 => self.preferences.feed_keep_posters = !self.preferences.feed_keep_posters,
                     10 => self.preferences.feed_search_bar = !self.preferences.feed_search_bar,
+                    11 => {
+                        self.preferences.feed_preview_delay =
+                            (self.preferences.feed_preview_delay.min(6) + 1) % 7;
+                    }
                     9 => {
                         self.preferences.feed_preload_rows =
                             (self.preferences.feed_preload_rows + 1) % 5;

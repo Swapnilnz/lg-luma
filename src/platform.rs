@@ -143,6 +143,8 @@ pub enum Request {
     },
     /// Listen through the remote's microphone with LG's speech recognition.
     Voice(u64),
+    /// Play a YouTube video (a trailer) in LG's YouTube app.
+    YouTube(String),
     SyncSplash(String),
     Recent {
         generation: u64,
@@ -240,6 +242,27 @@ impl Platform {
                         call(
                             "luna://com.webos.applicationManager/launch",
                             json!({"id": id, "params": {"contentTarget": target}}),
+                        )
+                        .map(|_| ())
+                    }),
+                    Request::YouTube(video) => Response::Launched(if !webos {
+                        Ok(())
+                    } else if video.is_empty()
+                        || !video.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                        })
+                    {
+                        Err("Invalid YouTube video".into())
+                    } else {
+                        call(
+                            "luna://com.webos.applicationManager/launch",
+                            json!({
+                                "id": "youtube.leanback.v4",
+                                "params": {
+                                    "contentTarget": format!("https://www.youtube.com/tv?v={video}"),
+                                    "contentId": video,
+                                },
+                            }),
                         )
                         .map(|_| ())
                     }),

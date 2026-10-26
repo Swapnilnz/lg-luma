@@ -337,6 +337,17 @@ fn effects(
                     }
                 }
             }
+            Effect::Trailer(video) => {
+                if !state.launching {
+                    if platform.webos {
+                        state.launching = true;
+                        state.notify("Opening the trailer...");
+                        platform.send(Request::YouTube(video));
+                    } else {
+                        state.notify(format!("Desktop preview: YouTube would play {video}"));
+                    }
+                }
+            }
             Effect::VoiceSearch(id) => {
                 if platform.webos {
                     platform.send(Request::Voice(id));
@@ -500,9 +511,16 @@ fn feeds_tick(
     if let Some(query) = state.search_tick() {
         service.search(query);
     }
+    if let Some(link) = state.preview_tick(controls) {
+        service.details(link);
+    }
     while let Ok(response) = service.receiver.try_recv() {
         match response {
             feeds_service::Response::Rows(rows) => state.set_feed_rows(rows),
+            feeds_service::Response::Details { link, result } => {
+                state.feeds.details_arrived(link, result);
+                state.dirty = true;
+            }
             feeds_service::Response::Search { query, result } => {
                 state.search_results(query, result)
             }
@@ -1301,6 +1319,10 @@ fn run() -> Result<(), String> {
                             state.options();
                         }
                         Keycode::F5 if !repeat => pending.push(Effect::Reload),
+                        Keycode::AudioPlay if !repeat && state.overlay.is_none() => {
+                            press = None;
+                            pending = state.play_trailer().unwrap_or_default();
+                        }
                         other => {
                             // Other remote keys are logged, so a button (such as the mic) can be
                             // mapped to Search with "search_keys" in feeds.json.
@@ -1502,7 +1524,19 @@ fn run() -> Result<(), String> {
         {
             held.held = true;
             state.pressed = None;
-            state.hold();
+            // Holding OK on a poster plays its trailer; elsewhere it keeps its usual role.
+            match state.play_trailer() {
+                Some(pending) => {
+                    running &= effects(
+                        pending,
+                        &mut state,
+                        &platform,
+                        &preferences_path,
+                        &weather_service,
+                    );
+                }
+                None => state.hold(),
+            }
         }
         if !state.loading
             && frame.is_multiple_of(3)

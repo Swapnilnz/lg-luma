@@ -4,7 +4,7 @@
 //!
 //! Configuration is `feeds.json` next to the preferences file. Without it nothing starts.
 use crate::app_artwork::Artwork;
-use crate::feeds::{Item, Row, Status};
+use crate::feeds::{Details, Item, Row, Status};
 use image::{ImageReader, Limits};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -281,6 +281,11 @@ pub enum Command {
 
 pub enum Response {
     Rows(Vec<Row>),
+    /// A title's preview; its backdrop and logo follow as `Image` responses.
+    Details {
+        link: String,
+        result: Result<Details, String>,
+    },
     /// TMDB results for `query`; their posters follow as `Image` responses.
     Search {
         query: String,
@@ -297,6 +302,8 @@ pub struct Service {
     pub receiver: mpsc::Receiver<Response>,
     /// Queries for the search worker; None without a TMDB key.
     search: Option<mpsc::Sender<String>>,
+    /// Title links for the details worker (previews and trailers); None without a TMDB key.
+    details: Option<mpsc::Sender<String>>,
 }
 
 impl Service {
@@ -311,6 +318,12 @@ impl Service {
             thread::spawn(move || search_worker(&key, requests, responses));
             queries
         });
+        let details = config.as_ref().and_then(tmdb_key).map(|key| {
+            let (links, requests) = mpsc::channel();
+            let responses = responses.clone();
+            thread::spawn(move || details_worker(&key, requests, responses));
+            links
+        });
         if let Some(config) = config.filter(|config| !config.rows.is_empty()) {
             thread::spawn(move || Worker::new(config, saved, path, responses, commands).run());
         }
@@ -318,12 +331,20 @@ impl Service {
             sender,
             receiver,
             search,
+            details,
         }
     }
 
     /// Whether Search is available: it needs a TMDB key.
     pub fn can_search(&self) -> bool {
         self.search.is_some()
+    }
+
+    /// Fetches a title's preview: logo, backdrop, synopsis and trailer.
+    pub fn details(&self, link: String) {
+        if let Some(details) = &self.details {
+            let _ = details.send(link);
+        }
     }
 
     pub fn search(&self, query: String) {
@@ -545,6 +566,13 @@ fn image_path(value: &Value) -> Option<String> {
 }
 
 fn decode(url: &str, bytes: &[u8]) -> Option<Artwork> {
+    // A little over the card's 216 x 324, so the focused poster stays sharp as it grows.
+    decode_as(format!("feed:{url}"), bytes, 240, 360)
+}
+
+/// Decodes artwork no larger than `width` x `height`; the key's prefix tells the renderer how
+/// to fit it (`feed:` posters fill their card, `backdrop:` the screen, anything else contains).
+fn decode_as(key: String, bytes: &[u8], width: u32, height: u32) -> Option<Artwork> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -554,14 +582,13 @@ fn decode(url: &str, bytes: &[u8]) -> Option<Artwork> {
     limits.max_alloc = Some(32 * 1024 * 1024);
     reader.limits(limits);
     let image = reader.decode().ok()?;
-    // The card's own size: 216 x 324 for a 2:3 poster.
-    let image = if image.width() > 216 || image.height() > 324 {
-        image.thumbnail(216, 324)
+    let image = if image.width() > width || image.height() > height {
+        image.thumbnail(width, height)
     } else {
         image
     };
     Some(Artwork {
-        key: format!("feed:{url}"),
+        key,
         pixels: image.into_rgba8(),
         color: [20, 20, 20],
     })
@@ -650,6 +677,231 @@ fn search(http: &Http, key: &str, query: &str) -> Result<Vec<Item>, String> {
         })
         .take(28)
         .collect())
+}
+
+/// The TMDB movie or show behind a card's deep link: `nuvio://detail/<type>/<imdb id>` or
+/// `nuvio://tmdb/<type>/<tmdb id>`.
+fn tmdb_title(http: &Http, key: &str, link: &str) -> Result<(Kind, u64), String> {
+    let mut parts = link
+        .strip_prefix("nuvio://")
+        .ok_or("Not a title link")?
+        .split('/');
+    let (source, kind, id) = (parts.next(), parts.next(), parts.next());
+    let kind = kind.and_then(Kind::from_text).ok_or("Unknown title type")?;
+    let id = id.ok_or("Missing title id")?;
+    match source {
+        Some("tmdb") => id
+            .strip_prefix("tmdb:")
+            .unwrap_or(id)
+            .parse()
+            .map(|id| (kind, id))
+            .map_err(|_| "Invalid TMDB id".into()),
+        Some("detail") => {
+            let value = tmdb_request(
+                http,
+                key,
+                &format!("/find/{}", segment(id)),
+                &[("external_source", "imdb_id")],
+            )?;
+            let results = match kind {
+                Kind::Movie => "movie_results",
+                Kind::Series => "tv_results",
+            };
+            value
+                .get(results)
+                .and_then(Value::as_array)
+                .and_then(|list| list.first())
+                .and_then(|first| first.get("id"))
+                .and_then(Value::as_u64)
+                .map(|id| (kind, id))
+                .ok_or_else(|| "TMDB does not know this title".into())
+        }
+        _ => Err("Not a title link".into()),
+    }
+}
+
+/// The first of `keys` that holds text.
+fn first_text(value: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_owned()
+}
+
+/// Whether a TMDB video is of `kind` (and official, when asked).
+fn video_is(video: &Value, kind: &str, official: bool) -> bool {
+    video.get("type").and_then(Value::as_str) == Some(kind)
+        && (!official || video.get("official").and_then(Value::as_bool) == Some(true))
+}
+
+/// Everything a preview shows, from one TMDB request with images and videos appended.
+fn details(http: &Http, key: &str, link: &str) -> Result<Details, String> {
+    let (kind, id) = tmdb_title(http, key, link)?;
+    let value = tmdb_request(
+        http,
+        key,
+        &format!("/{}/{id}", kind.tmdb()),
+        &[
+            ("append_to_response", "images,videos"),
+            ("include_image_language", "en,null"),
+        ],
+    )?;
+    let date = first_text(&value, &["release_date", "first_air_date"]);
+    let extent = match kind {
+        Kind::Movie => value
+            .get("runtime")
+            .and_then(Value::as_u64)
+            .filter(|minutes| *minutes > 0)
+            .map(|minutes| match (minutes / 60, minutes % 60) {
+                (0, m) => format!("{m}m"),
+                (h, 0) => format!("{h}h"),
+                (h, m) => format!("{h}h {m}m"),
+            }),
+        Kind::Series => value
+            .get("number_of_seasons")
+            .and_then(Value::as_u64)
+            .filter(|seasons| *seasons > 0)
+            .map(|seasons| format!("{seasons} Season{}", if seasons == 1 { "" } else { "s" })),
+    };
+    let rating = value
+        .get("vote_average")
+        .and_then(Value::as_f64)
+        .filter(|_| value.get("vote_count").and_then(Value::as_u64).unwrap_or(0) >= 20)
+        .filter(|rating| *rating > 0.)
+        .map(|rating| rating as f32);
+    let genres = value
+        .get("genres")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|genre| genre.get("name").and_then(Value::as_str))
+        .take(2)
+        .map(str::to_owned)
+        .collect();
+    let path = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|path| path.starts_with('/'))
+            .map(str::to_owned)
+    };
+    // An English logo first, then one without language (text-free marks).
+    let logos: Vec<&Value> = value
+        .get("images")
+        .and_then(|images| images.get("logos"))
+        .and_then(Value::as_array)
+        .map(|logos| logos.iter().collect())
+        .unwrap_or_default();
+    let logo = ["en", ""]
+        .iter()
+        .find_map(|language| {
+            logos.iter().find(|logo| {
+                logo.get("iso_639_1").and_then(Value::as_str).unwrap_or("") == *language
+            })
+        })
+        .and_then(|logo| path(logo.get("file_path")))
+        .map(|path| format!("https://image.tmdb.org/t/p/w500{path}"));
+    let videos: Vec<&Value> = value
+        .get("videos")
+        .and_then(|videos| videos.get("results"))
+        .and_then(Value::as_array)
+        .map(|videos| {
+            videos
+                .iter()
+                .filter(|video| video.get("site").and_then(Value::as_str) == Some("YouTube"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let trailer = videos
+        .iter()
+        .find(|video| video_is(video, "Trailer", true))
+        .or_else(|| {
+            videos
+                .iter()
+                .find(|video| video_is(video, "Trailer", false))
+        })
+        .or_else(|| videos.iter().find(|video| video_is(video, "Teaser", false)))
+        .and_then(|video| video.get("key").and_then(Value::as_str))
+        .filter(|key| {
+            !key.is_empty()
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
+        .map(str::to_owned);
+    Ok(Details {
+        title: first_text(&value, &["title", "name"]),
+        overview: first_text(&value, &["overview"]),
+        year: date.chars().take(4).collect(),
+        rating,
+        extent,
+        genres,
+        backdrop: path(value.get("backdrop_path"))
+            .map(|path| format!("https://image.tmdb.org/t/p/w1280{path}")),
+        logo,
+        trailer,
+    })
+}
+
+/// Answers the newest title only, then fetches its backdrop and logo.
+fn details_worker(key: &str, links: mpsc::Receiver<String>, responses: mpsc::Sender<Response>) {
+    let http = Http::new();
+    let mut next: Option<String> = None;
+    loop {
+        let mut link = match next.take() {
+            Some(link) => link,
+            None => match links.recv() {
+                Ok(link) => link,
+                Err(_) => return,
+            },
+        };
+        while let Ok(newer) = links.try_recv() {
+            link = newer;
+        }
+        let result = details(&http, key, &link);
+        let images: Vec<(String, String, u32, u32)> = result
+            .as_ref()
+            .map(|details| {
+                let backdrop = details
+                    .backdrop
+                    .clone()
+                    .map(|url| (format!("backdrop:{url}"), url, 1280, 720));
+                let logo = details
+                    .logo
+                    .clone()
+                    .map(|url| (format!("logo:{url}"), url, 640, 260));
+                backdrop.into_iter().chain(logo).collect()
+            })
+            .unwrap_or_default();
+        if let Err(error) = &result {
+            eprintln!("Luma feeds: preview {link}: {error}");
+        }
+        if responses.send(Response::Details { link, result }).is_err() {
+            return;
+        }
+        for (image_key, url, width, height) in images {
+            // Focus moved on: that title's artwork, not this one's.
+            if let Ok(newer) = links.try_recv() {
+                next = Some(newer);
+                break;
+            }
+            let Ok(reply) = http.get(&url, &[], &[], 4 * IMAGE_LIMIT) else {
+                continue;
+            };
+            if !reply.ok() {
+                continue;
+            }
+            if let Some(image) = decode_as(image_key, &reply.body, width, height) {
+                let response = Response::Image {
+                    url,
+                    image: Arc::new(image),
+                };
+                if responses.send(response).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Answers the newest query only, then fetches its posters until a newer query arrives.

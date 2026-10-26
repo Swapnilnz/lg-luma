@@ -207,7 +207,15 @@ impl Scene {
         }
     }
     fn fade(&mut self, from: usize, alpha: f32, brightness: f32) {
-        for draw in &mut self.draw[from..] {
+        self.fade_range(from, self.draw.len(), alpha, brightness);
+    }
+    /// Fades the draws in `from..to`, leaving the rest as they are.
+    fn fade_range(&mut self, from: usize, to: usize, alpha: f32, brightness: f32) {
+        let to = to.min(self.draw.len());
+        if from >= to {
+            return;
+        }
+        for draw in &mut self.draw[from..to] {
             let apply = |color: &mut Color| {
                 for channel in &mut color[..3] {
                     *channel *= brightness;
@@ -306,6 +314,9 @@ pub fn scene_with_pill(
             0.,
             false,
         );
+    }
+    if state.page == Page::Home && !recents_replaces_page(state) {
+        preview_backdrop(&mut out, state);
     }
     let content_start = out.draw.len();
     if recents_replaces_page(state) {
@@ -814,7 +825,9 @@ fn brand_mark(out: &mut Scene, assets: &Assets, app: &App, rect: Rect, language:
 
 fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let language = state.preferences.language;
-    let s = state.scroll;
+    let home_start = out.draw.len();
+    // While a preview fades in, its row slides to its place below the title's details.
+    let s = state.drawn_scroll();
     let summary = state
         .preferences
         .show_weather
@@ -946,7 +959,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     if state.feeds.can_search && state.preferences.feed_search_bar {
         feeds_y = search_bar(out, state, assets, feeds_y);
     }
-    let input_y = feed_rows(out, state, assets, feeds_y);
+    let (input_y, previewed_row) = feed_rows(out, state, assets, feeds_y);
     let inputs: Vec<_> = state
         .inventory
         .inputs
@@ -1037,18 +1050,191 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         }
         out.control(Target::Input(input.id.clone()), rect, true);
     }
+    // A preview: everything but the previewed row fades away beneath the title's details.
+    let progress = state
+        .feeds
+        .preview_progress(state.preferences.reduced_motion);
+    if progress > 0. {
+        let end = out.draw.len();
+        match previewed_row {
+            Some((row_start, row_end)) => {
+                out.fade_range(home_start, row_start, 1. - progress, 1.);
+                out.fade_range(row_end, end, 1. - progress, 1.);
+            }
+            None => out.fade_range(home_start, end, 1. - progress, 1.),
+        }
+        preview_details(out, state, progress);
+    }
+}
+
+/// Shortens `value` to about `limit` characters at a word boundary.
+fn clip_words(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    let cut: String = value.chars().take(limit).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}...", cut.trim_end_matches([',', '.', ';', ':', ' ']))
+}
+
+/// The previewed title's logo (or name), details, synopsis and trailer hint, top left.
+fn preview_details(out: &mut Scene, state: &State, progress: f32) {
+    let Some(preview) = &state.feeds.preview else {
+        return;
+    };
+    let reduced_motion = state.preferences.reduced_motion;
+    let details = state.feeds.details.get(&preview.link);
+    let card_title = match &preview.target {
+        Target::Feed(row, index) => state
+            .feeds
+            .rows
+            .get(*row)
+            .and_then(|row| row.items.get(*index))
+            .map(|item| item.title.clone()),
+        _ => None,
+    }
+    .unwrap_or_default();
+    let title = details
+        .map(|details| details.title.clone())
+        .filter(|title| !title.is_empty())
+        .unwrap_or(card_title);
+    let start = out.draw.len();
+    // Rises a little as it appears, like the rest of Apple TV's motion.
+    let lift = (1. - progress) * 18.;
+    let x = 84.;
+    let logo = details
+        .and_then(|details| details.logo.as_ref())
+        .and_then(|url| Some((state.feeds.images.get(url)?, url)));
+    if let Some((image, url)) = logo {
+        let (width, height) = (image.pixels.width() as f32, image.pixels.height() as f32);
+        let scale = (560. / width).min(170. / height);
+        out.draw.push(Draw::AppImage(
+            image.clone(),
+            Rect::new(
+                x,
+                150. + 170. - height * scale + lift,
+                width * scale,
+                height * scale,
+            ),
+            [1., 1., 1., state.feeds.reveal(url, reduced_motion)],
+        ));
+    } else {
+        out.text(
+            title,
+            Rect::new(x, 236. + lift, 1500., 76.),
+            text(60., 650, -0.03),
+            WHITE,
+            false,
+        );
+    }
+    if let Some(details) = details {
+        let mut parts: Vec<String> = Vec::new();
+        if !details.year.is_empty() {
+            parts.push(details.year.clone());
+        }
+        if let Some(extent) = &details.extent {
+            parts.push(extent.clone());
+        }
+        if !details.genres.is_empty() {
+            parts.push(details.genres.join(", "));
+        }
+        if let Some(rating) = details.rating {
+            parts.push(format!("TMDB {rating:.1}"));
+        }
+        out.text(
+            parts.join("  ·  "),
+            Rect::new(x, 344. + lift, 1300., 28.),
+            text(20.8, 550, 0.),
+            c(0xffffff, 0.8),
+            false,
+        );
+        if !details.overview.is_empty() {
+            out.text(
+                clip_words(&details.overview, 210),
+                Rect::new(x, 384. + lift, 960., 96.),
+                text(20., 400, 0.).leading(1.45),
+                c(0xffffff, 0.86),
+                false,
+            );
+        }
+        if details.trailer.is_some() {
+            out.text(
+                "Hold OK or press Play for the trailer",
+                Rect::new(x, 506. + lift, 900., 22.),
+                text(16.8, 500, 0.),
+                c(0xffffff, 0.55),
+                false,
+            );
+        }
+    }
+    out.fade_range(start, out.draw.len(), progress, 1.);
+}
+
+/// The previewed title's backdrop behind all of Home, drifting slowly (Ken Burns), with
+/// shading at the top for its details and at the bottom for the row.
+fn preview_backdrop(out: &mut Scene, state: &State) {
+    let reduced_motion = state.preferences.reduced_motion;
+    let progress = state.feeds.preview_progress(reduced_motion);
+    let Some(preview) = state.feeds.preview.as_ref().filter(|_| progress > 0.) else {
+        return;
+    };
+    let Some((image, url)) = state
+        .feeds
+        .details
+        .get(&preview.link)
+        .and_then(|details| details.backdrop.as_ref())
+        .and_then(|url| Some((state.feeds.images.get(url)?, url)))
+    else {
+        return;
+    };
+    let alpha = progress * state.feeds.reveal(url, reduced_motion);
+    let drift = if reduced_motion {
+        0.
+    } else {
+        (preview.shown.elapsed().as_secs_f32() / crate::feeds::KEN_BURNS.as_secs_f32()).min(1.)
+    };
+    let zoom = 1.02 + 0.06 * drift;
+    out.draw.push(Draw::AppImage(
+        image.clone(),
+        Rect::new(
+            960. - 960. * zoom,
+            540. - 540. * zoom,
+            1920. * zoom,
+            1080. * zoom,
+        ),
+        [1., 1., 1., alpha],
+    ));
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 0., 1920., 600.),
+        0.,
+        c(0x080b12, 0.80 * alpha),
+        c(0x080b12, 0.25 * alpha),
+    ));
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 600., 1920., 480.),
+        0.,
+        c(0x080b12, 0.25 * alpha),
+        c(0x080b12, 0.85 * alpha),
+    ));
 }
 
 const FEED_PANEL_HEIGHT: f32 = 144.;
 
 /// Trakt and MDBList rows between favourites and inputs: Apple TV-style portrait posters with
-/// no captions. Returns where the next section starts.
-fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32 {
+/// no captions. Returns where the next section starts, and the draws of the focused card's row.
+fn feed_rows(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    mut y: f32,
+) -> (f32, Option<(usize, usize)>) {
     use crate::feeds::{CARD_HEIGHT, CARD_PITCH, CARD_RADIUS, CARD_WIDTH, Status};
+    let mut focused_row = None;
     for (row_index, row) in state.feeds.rows.iter().enumerate() {
         if !row.shown() {
             continue;
         }
+        let row_start = out.draw.len();
         out.text(
             &row.title,
             Rect::new(84., y + 3.3, 1200., 31.),
@@ -1154,6 +1340,7 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
             HOME_STRIP_RIGHT,
             HOME_FADE_RIGHT,
         ])));
+        let mut focused_card = None;
         for (index, item) in row.items.iter().enumerate() {
             let rect = Rect::new(
                 84. + index as f32 * CARD_PITCH - scroll,
@@ -1174,30 +1361,61 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
             {
                 continue;
             }
-            let start = out.draw.len();
-            let focused = state.focus == target;
-            poster(out, state, assets, item, rect, focused);
-            if state.pressed.as_ref() == Some(&target) {
-                out.fade(start, 1., 0.85);
+            // The focused poster grows over its neighbours, so it is drawn after them.
+            if state.focus == target {
+                focused_card = Some((item, rect, target));
+                continue;
             }
-            if !item.subtitle.is_empty() {
-                out.text(
-                    &item.subtitle,
-                    Rect::new(rect.x + 2., rect.y + rect.h + 12., rect.w - 4., 20.),
-                    text(15.2, if focused { 550 } else { 500 }, 0.),
-                    if focused {
-                        c(0xffffff, 1.)
-                    } else {
-                        c(0xececec, 0.6)
-                    },
-                    false,
-                );
-            }
+            feed_card(out, state, assets, item, rect, &target);
+        }
+        if let Some((item, rect, target)) = focused_card {
+            feed_card(out, state, assets, item, rect, &target);
         }
         out.draw.push(Draw::EdgeFadeX(None));
         out.draw.push(Draw::Clip(Some(content)));
+        // The row that stays visible through a preview: the previewed one, even while focus
+        // has already moved on and the preview fades out.
+        let kept = state
+            .feeds
+            .preview
+            .as_ref()
+            .map_or(&state.focus, |preview| &preview.target);
+        if matches!(kept, Target::Feed(row, _) if *row == row_index) {
+            focused_row = Some((row_start, out.draw.len()));
+        }
     }
-    y
+    (y, focused_row)
+}
+
+/// A feed row's poster with its episode caption, grown while focused.
+fn feed_card(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+    target: &Target,
+) {
+    let start = out.draw.len();
+    let focused = state.focus == *target;
+    let scale = state.feeds.scale(target, state.preferences.reduced_motion);
+    let drawn = poster(out, state, assets, item, rect, focused, scale);
+    if state.pressed.as_ref() == Some(target) {
+        out.fade(start, 1., 0.85);
+    }
+    if !item.subtitle.is_empty() {
+        out.text(
+            &item.subtitle,
+            Rect::new(rect.x + 2., drawn.y + drawn.h + 12., rect.w - 4., 20.),
+            text(15.2, if focused { 550 } else { 500 }, 0.),
+            if focused {
+                c(0xffffff, 1.)
+            } else {
+                c(0xececec, 0.6)
+            },
+            false,
+        );
+    }
 }
 
 /// A poster card: the title until the poster arrives, then the poster fading in over it.
@@ -1208,8 +1426,16 @@ fn poster(
     item: &crate::feeds::Item,
     rect: Rect,
     focused: bool,
-) {
+    scale: f32,
+) -> Rect {
     use crate::feeds::CARD_RADIUS;
+    // Grows from its centre.
+    let rect = Rect::new(
+        rect.x - rect.w * (scale - 1.) / 2.,
+        rect.y - rect.h * (scale - 1.) / 2.,
+        rect.w * scale,
+        rect.h * scale,
+    );
     out.shadow(
         rect,
         CARD_RADIUS,
@@ -1274,6 +1500,7 @@ fn poster(
     if focused {
         out.ring(rect, CARD_RADIUS);
     }
+    rect
 }
 
 const SEARCH_BAR_HEIGHT: f32 = 72.;
@@ -1505,7 +1732,8 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
         );
     }
     out.draw
-        .push(Draw::Clip(Some(Rect::new(0., 250., 1920., 830.))));
+        .push(Draw::Clip(Some(Rect::new(0., 236., 1920., 844.))));
+    let mut focused_card = None;
     for (index, item) in search.results.iter().enumerate() {
         let column = index % SEARCH_COLUMNS;
         let row = index / SEARCH_COLUMNS;
@@ -1520,15 +1748,43 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
         }
         let target = Target::SearchResult(index);
         out.control(target.clone(), rect, false);
-        let start = out.draw.len();
-        poster(out, state, assets, item, rect, state.focus == target);
-        if state.pressed.as_ref() == Some(&target) {
-            out.fade(start, 1., 0.85);
+        if state.focus == target {
+            focused_card = Some((item, rect, target));
+            continue;
         }
+        search_card(out, state, assets, item, rect, &target);
+    }
+    if let Some((item, rect, target)) = focused_card {
+        search_card(out, state, assets, item, rect, &target);
     }
     out.draw.push(Draw::Clip(None));
     if entrance < 1. {
         out.fade(start, entrance, 1.);
+    }
+}
+
+/// A Search result's poster, grown while focused.
+fn search_card(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+    target: &Target,
+) {
+    let start = out.draw.len();
+    let scale = state.feeds.scale(target, state.preferences.reduced_motion);
+    poster(
+        out,
+        state,
+        assets,
+        item,
+        rect,
+        state.focus == *target,
+        scale,
+    );
+    if state.pressed.as_ref() == Some(target) {
+        out.fade(start, 1., 0.85);
     }
 }
 
@@ -2666,6 +2922,23 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         ),
     ]
     .into_iter()
+    .chain(state.feeds.can_search.then(|| {
+        (
+            11,
+            "Preview after",
+            "clock",
+            Some(match state.preferences.feed_preview_delay {
+                0 => "Off",
+                1 => "Immediately",
+                2 => "1 second",
+                3 => "2 seconds",
+                4 => "3 seconds",
+                5 => "4 seconds",
+                _ => "5 seconds",
+            }),
+            false,
+        )
+    }))
     .chain(state.feeds.can_search.then(|| {
         (
             10,

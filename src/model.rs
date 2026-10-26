@@ -121,6 +121,9 @@ pub struct Preferences {
     pub feed_preload_rows: u8,
     /// The search bar and mic button above Home's feed rows.
     pub feed_search_bar: bool,
+    /// When Home previews a focused poster's title: 0 never, 1 as soon as its details arrive,
+    /// 2 to 6 after 1 to 5 seconds.
+    pub feed_preview_delay: u8,
 }
 
 impl Default for Preferences {
@@ -145,6 +148,7 @@ impl Default for Preferences {
             feed_keep_posters: true,
             feed_preload_rows: 2,
             feed_search_bar: true,
+            feed_preview_delay: 1,
         }
     }
 }

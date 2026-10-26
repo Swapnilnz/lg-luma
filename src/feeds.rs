@@ -4,7 +4,8 @@
 //! rows.
 use crate::app_artwork::Artwork;
 use crate::state::{
-    Control, Direction, Effect, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, Rect, State, Target, TextField,
+    Control, Direction, Effect, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, Page, Rect, State, Target,
+    TextField,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -52,6 +53,43 @@ pub struct Search {
 
 /// How long Search takes to rise into place.
 pub const SEARCH_ENTRANCE: Duration = Duration::from_millis(400);
+/// The focused poster grows by this much, over this long.
+pub const EXPAND_SCALE: f32 = 0.08;
+const EXPAND: Duration = Duration::from_millis(180);
+/// The preview fades in and out over these; its backdrop drifts for KEN_BURNS.
+const PREVIEW_IN: Duration = Duration::from_millis(550);
+const PREVIEW_OUT: Duration = Duration::from_millis(300);
+pub const KEN_BURNS: Duration = Duration::from_secs(20);
+/// Where the previewed row's posters settle on screen, below the title's details.
+const PREVIEW_CARD_Y: f32 = 640.;
+/// A title's details are fetched once focus has rested this long, so scrolling past is free.
+const DETAILS_DWELL: Duration = Duration::from_millis(200);
+
+/// What a preview shows about a title, from TMDB.
+#[derive(Clone, Debug, Default)]
+pub struct Details {
+    pub title: String,
+    pub overview: String,
+    pub year: String,
+    pub rating: Option<f32>,
+    /// Runtime, or number of seasons.
+    pub extent: Option<String>,
+    pub genres: Vec<String>,
+    pub backdrop: Option<String>,
+    pub logo: Option<String>,
+    /// A YouTube video ID.
+    pub trailer: Option<String>,
+}
+
+/// The title Home previews: backdrop, logo and details behind and above its row.
+pub struct Preview {
+    pub link: String,
+    pub target: Target,
+    pub shown: Instant,
+    pub hiding: Option<Instant>,
+    /// Home's scroll before the preview moved the row into place, for a smooth slide.
+    pub scroll_from: f32,
+}
 
 /// Created by the remote's mic button through LG Input Hook (see feeds.md): Luma then listens.
 pub const VOICE_TRIGGER: &str = "/tmp/luma-voice-search";
@@ -122,6 +160,12 @@ pub struct Feeds {
     pub search_keys: Vec<i32>,
     /// Numbers voice requests, so a late reply never fills a later Search.
     pub voice_requests: u64,
+    /// The focused control and since when, for the poster's growth and the preview's delay.
+    pub focus_since: Option<(Target, Instant)>,
+    pub details: HashMap<String, Details>,
+    /// The title whose details were last asked for.
+    pub requested: Option<String>,
+    pub preview: Option<Preview>,
 }
 
 impl Feeds {
@@ -135,6 +179,17 @@ impl Feeds {
             .flat_map(|(_, row)| &row.items)
             .chain(self.search.iter().flat_map(|search| &search.results))
             .filter_map(|item| item.image.as_ref())
+            // The backdrop and logo of the title in focus, or previewed.
+            .chain(
+                [
+                    self.requested.as_ref(),
+                    self.preview.as_ref().map(|preview| &preview.link),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(|link| self.details.get(link))
+                .flat_map(|details| details.backdrop.iter().chain(details.logo.iter())),
+            )
             .collect()
     }
 
@@ -592,5 +647,203 @@ impl State {
             }
             _ => vec![],
         })
+    }
+}
+
+fn ease_out(t: f32) -> f32 {
+    1. - (1. - t.clamp(0., 1.)).powi(3)
+}
+
+/// The title link of a card, in a feed row or in Search's results.
+fn card_link(feeds: &Feeds, target: &Target) -> Option<String> {
+    match target {
+        Target::Feed(row, index) => feeds.rows.get(*row)?.items.get(*index),
+        Target::SearchResult(index) => feeds.search.as_ref()?.results.get(*index),
+        _ => None,
+    }
+    .map(|item| item.link.clone())
+}
+
+impl Feeds {
+    /// How much bigger `target` is drawn: it grows when focused.
+    pub fn scale(&self, target: &Target, reduced_motion: bool) -> f32 {
+        match &self.focus_since {
+            Some((focused, since)) if focused == target => {
+                let t = if reduced_motion {
+                    1.
+                } else {
+                    since.elapsed().as_secs_f32() / EXPAND.as_secs_f32()
+                };
+                1. + EXPAND_SCALE * ease_out(t)
+            }
+            _ => 1.,
+        }
+    }
+
+    /// How far the preview has faded in, 0 to 1.
+    pub fn preview_progress(&self, reduced_motion: bool) -> f32 {
+        let Some(preview) = &self.preview else {
+            return 0.;
+        };
+        if reduced_motion {
+            return if preview.hiding.is_some() { 0. } else { 1. };
+        }
+        match preview.hiding {
+            Some(hiding) => {
+                1. - ease_out(hiding.elapsed().as_secs_f32() / PREVIEW_OUT.as_secs_f32())
+            }
+            None => ease_out(preview.shown.elapsed().as_secs_f32() / PREVIEW_IN.as_secs_f32()),
+        }
+    }
+
+    /// Whether the focused poster or the preview is still moving.
+    pub fn card_animating(&self) -> bool {
+        self.focus_since
+            .as_ref()
+            .is_some_and(|(_, since)| since.elapsed() < EXPAND + Duration::from_millis(40))
+            || self.preview.as_ref().is_some_and(|preview| {
+                preview.hiding.is_some() || preview.shown.elapsed() < KEN_BURNS
+            })
+    }
+
+    pub fn details_arrived(&mut self, link: String, result: Result<Details, String>) {
+        // A failed lookup is not kept: focus resting on the title again tries once more.
+        let Ok(details) = result else {
+            return;
+        };
+        if self.details.len() > 80 {
+            let keep = [
+                self.requested.clone(),
+                self.preview.as_ref().map(|preview| preview.link.clone()),
+            ];
+            self.details
+                .retain(|known, _| keep.iter().flatten().any(|keep| keep == known));
+        }
+        self.details.insert(link, details);
+    }
+
+    /// Whether a title's backdrop and logo are in memory (or it has none).
+    fn artwork_loaded(&self, link: &str) -> bool {
+        self.details.get(link).is_none_or(|details| {
+            [&details.backdrop, &details.logo]
+                .into_iter()
+                .flatten()
+                .all(|url| self.images.contains_key(url))
+        })
+    }
+}
+
+impl State {
+    /// Follows focus for the poster's growth and the preview: asks for the focused title's
+    /// details once focus rests on it, and shows its preview after the configured delay.
+    /// Returns a title link whose details should be fetched now.
+    pub fn preview_tick(&mut self, controls: &[Control]) -> Option<String> {
+        let now = Instant::now();
+        if self.feeds.focus_since.as_ref().map(|(target, _)| target) != Some(&self.focus) {
+            self.feeds.focus_since = Some((self.focus.clone(), now));
+            // Each rest on a title may ask again, e.g. for artwork freed since.
+            self.feeds.requested = None;
+            self.dirty = true;
+        }
+        let since = self
+            .feeds
+            .focus_since
+            .as_ref()
+            .map_or(now, |(_, since)| *since);
+        // "Immediately" still waits a moment, so scrolling along a row does not flash previews.
+        let delay = match self.preferences.feed_preview_delay {
+            0 => None,
+            1 => Some(Duration::from_millis(250)),
+            seconds => Some(Duration::from_secs(u64::from(seconds.min(6) - 1))),
+        };
+        let previewable = self.page == Page::Home
+            && self.overlay.is_none()
+            && self.feeds.search.is_none()
+            && self.moving.is_none()
+            && delay.is_some()
+            && matches!(self.focus, Target::Feed(..));
+        let drawn_scroll = self.drawn_scroll();
+        let focused_link = card_link(&self.feeds, &self.focus);
+        if let Some(preview) = &mut self.feeds.preview {
+            if preview.hiding.is_none()
+                && (!previewable
+                    || preview.target != self.focus
+                    || focused_link.as_deref() != Some(preview.link.as_str()))
+            {
+                preview.hiding = Some(now);
+                // Keep Home where it is drawn now: no jump if focus moved mid-slide.
+                self.scroll = drawn_scroll;
+                self.dirty = true;
+            }
+            if preview
+                .hiding
+                .is_some_and(|hiding| hiding.elapsed() >= PREVIEW_OUT)
+            {
+                self.feeds.preview = None;
+                self.dirty = true;
+            }
+        }
+        let link = card_link(&self.feeds, &self.focus)?;
+        let mut request = None;
+        // Ask once focus rests: for details not known yet, or whose artwork has since gone.
+        if since.elapsed() >= DETAILS_DWELL
+            && (!self.feeds.details.contains_key(&link) || !self.feeds.artwork_loaded(&link))
+            && self.feeds.requested.as_deref() != Some(link.as_str())
+        {
+            self.feeds.requested = Some(link.clone());
+            request = Some(link.clone());
+        }
+        let showing = self
+            .feeds
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.hiding.is_none());
+        if previewable
+            && !showing
+            && delay.is_some_and(|delay| since.elapsed() >= delay)
+            && self.feeds.details.contains_key(&link)
+            && let Some(control) = controls.iter().find(|control| control.target == self.focus)
+        {
+            // Slide the row down to sit below the title's details; the rest of Home fades.
+            let scroll_from = self.scroll;
+            self.scroll = (self.scroll + control.rect.y - PREVIEW_CARD_Y).max(0.);
+            self.feeds.preview = Some(Preview {
+                link,
+                target: self.focus.clone(),
+                shown: now,
+                hiding: None,
+                scroll_from,
+            });
+            self.dirty = true;
+        }
+        request
+    }
+
+    /// Home's scroll as drawn: the row slides into place while the preview fades in.
+    pub fn drawn_scroll(&self) -> f32 {
+        match &self.feeds.preview {
+            Some(preview) if preview.hiding.is_none() => {
+                let progress = self.feeds.preview_progress(self.preferences.reduced_motion);
+                preview.scroll_from + (self.scroll - preview.scroll_from) * progress
+            }
+            _ => self.scroll,
+        }
+    }
+
+    /// Play, or holding OK, on a card: its trailer in LG's YouTube app. None when focus is
+    /// not on a card.
+    pub fn play_trailer(&mut self) -> Option<Vec<Effect>> {
+        let link = card_link(&self.feeds, &self.focus)?;
+        let trailer = self
+            .feeds
+            .details
+            .get(&link)
+            .map(|details| details.trailer.clone());
+        match trailer {
+            Some(Some(key)) => return Some(vec![Effect::Trailer(key)]),
+            Some(None) => self.notify("No trailer for this title"),
+            None => self.notify("Finding the trailer... try again in a moment"),
+        }
+        Some(vec![])
     }
 }

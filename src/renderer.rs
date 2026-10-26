@@ -1100,15 +1100,21 @@ impl Renderer {
         texture.frame = self.frame;
         let (width, height) = (texture.width as f32, texture.height as f32);
         let id = texture.id;
-        if image.key.starts_with("feed:") {
-            // Feed artwork fills its card, cropped to the card's shape and corners.
+        let backdrop = image.key.starts_with("backdrop:");
+        if image.key.starts_with("feed:") || backdrop {
+            // Feed artwork fills its card, cropped to the card's shape and corners; a preview's
+            // backdrop fills the screen.
             let scale = (rect.w / width).max(rect.h / height);
             let u = rect.w / (width * scale);
             let v = rect.h / (height * scale);
             self.quad(
                 rect,
                 [(1. - u) / 2., (1. - v) / 2., (1. + u) / 2., (1. + v) / 2.],
-                plain_radius(crate::feeds::CARD_RADIUS),
+                plain_radius(if backdrop {
+                    0.
+                } else {
+                    crate::feeds::CARD_RADIUS
+                }),
                 0.,
                 tint,
                 id,
