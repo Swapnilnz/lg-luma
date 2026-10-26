@@ -27,6 +27,7 @@ nothing changes and no requests are made.
 | `trakt`                 | `client_id` of a Trakt API app. Apps created before October 2026 may also add their `client_secret`. |
 | `mdblist`               | `api_key` from mdblist.com preferences.                    |
 | `tmdb`                  | `api_key`: a TMDB v3 key or v4 read access token. Optional; without it cards show titles instead of artwork. |
+| `search_keys`           | Remote keys that open Search, by the `keycode` or `scancode` Luma logs (`Luma key: ...` in `/tmp/luma-home.log`). Default none; the header's Search button always works. |
 | `rows`                  | Up to 60 rows, each a `title` and a `source`. Only rows near the screen keep artwork in memory. |
 
 Sources:
@@ -44,3 +45,19 @@ Create an API app at <https://trakt.tv/oauth/applications> with the redirect URI
 only a Client ID ("signs users in with PKCE"); that is all Luma needs. On first start, the Trakt rows show a code: open
 trakt.tv/activate on a phone and enter it. The sign-in is kept in `feeds-state.json` next to
 `feeds.json`; delete that file to sign out.
+
+## Search
+
+With a TMDB key, a Search button appears in the header next to TV Settings. It opens a query field
+with the TV keyboard (use its microphone to dictate) and shows matching movies and shows as
+posters; selecting one opens it in Nuvio. Back closes Search.
+
+To open Search from a remote button, press it on Home while Luma runs as Home, then read the
+key Luma logged:
+
+```sh
+grep "Luma key" /tmp/luma-home.log
+```
+
+Put its `keycode` (or `scancode`) in `"search_keys"`, e.g. `"search_keys": [1073742106]`, and
+restart Luma. If LG's own assistant still opens on that button, it cannot be taken over.

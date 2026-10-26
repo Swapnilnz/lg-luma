@@ -490,9 +490,15 @@ fn feeds_tick(
             state.feeds.prune_images();
         }
     }
+    if let Some(query) = state.search_tick() {
+        service.search(query);
+    }
     while let Ok(response) = service.receiver.try_recv() {
         match response {
             feeds_service::Response::Rows(rows) => state.set_feed_rows(rows),
+            feeds_service::Response::Search { query, result } => {
+                state.search_results(query, result)
+            }
             feeds_service::Response::Image { url, image } => {
                 if state.feeds.wanted_images().contains(&url) {
                     let reduced_motion = state.preferences.reduced_motion;
@@ -693,6 +699,7 @@ fn run() -> Result<(), String> {
                 feeds_config_path.display()
             );
             state.feeds.app_id = config.app_id.clone();
+            state.feeds.search_keys = config.search_keys.clone();
             // The same first rows the worker fetches artwork for, until Home reports its own.
             state.feeds.near = (0..4).collect();
             state.set_feed_rows(feeds_service::initial_rows(&config, &feeds_saved));
@@ -714,6 +721,7 @@ fn run() -> Result<(), String> {
         }
     };
     let feeds_service = feeds_service::Service::new(feeds_config, feeds_saved, feeds_state_path);
+    state.feeds.can_search = feeds_service.can_search();
     let platform = Platform::new(
         webos,
         options.preferences.is_none() && options.test_extra_apps == 0,
@@ -1193,6 +1201,7 @@ fn run() -> Result<(), String> {
                 }
                 Event::KeyDown {
                     keycode: Some(key),
+                    scancode,
                     repeat,
                     ..
                 } => {
@@ -1255,7 +1264,42 @@ fn run() -> Result<(), String> {
                             state.options();
                         }
                         Keycode::F5 if !repeat => pending.push(Effect::Reload),
-                        _ => {}
+                        other => {
+                            // Other remote keys are logged, so a button (such as the mic) can be
+                            // mapped to Search with "search_keys" in feeds.json.
+                            let code = i32::from(other);
+                            let scan = scancode.map_or(-1, |scancode| scancode as i32);
+                            if webos && !repeat {
+                                eprintln!(
+                                    "Luma key: {} keycode {code} scancode {scan}",
+                                    other.name()
+                                );
+                            }
+                            if !repeat
+                                && (state.feeds.search_keys.contains(&code)
+                                    || state.feeds.search_keys.contains(&scan))
+                            {
+                                press = None;
+                                pending = state.open_search();
+                            }
+                        }
+                    }
+                }
+                Event::KeyDown {
+                    keycode: None,
+                    scancode,
+                    repeat,
+                    ..
+                } => {
+                    let scan = scancode.map_or(-1, |scancode| scancode as i32);
+                    if !repeat {
+                        if webos {
+                            eprintln!("Luma key: unknown keycode, scancode {scan}");
+                        }
+                        if state.feeds.search_keys.contains(&scan) {
+                            press = None;
+                            pending = state.open_search();
+                        }
                     }
                 }
                 Event::KeyUp {

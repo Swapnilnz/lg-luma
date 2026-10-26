@@ -3,6 +3,7 @@
   "limit": 15,
   "refresh_minutes": 360,
   "trakt_refresh_minutes": 30,
+  "search_keys": [],
   "trakt": {
     "client_id": "YOUR_TRAKT_CLIENT_ID"
   },

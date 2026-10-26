@@ -248,6 +248,11 @@ impl State {
         if self.overlay.is_some() || self.moving.is_some() {
             return vec![];
         }
+        // Holding Back in Search closes it rather than opening Recents over it.
+        if self.feeds.search.is_some() {
+            self.close_search();
+            return vec![];
+        }
         self.overlay = Some(Overlay::Recents {
             restore: self.focus.clone(),
         });

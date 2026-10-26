@@ -39,6 +39,11 @@ pub enum Target {
     Recent(String),
     /// A card in a Home feed row: row index, card index.
     Feed(usize, usize),
+    /// The header's Search button.
+    FeedSearch,
+    /// Search's query field, and its results.
+    SearchField,
+    SearchResult(usize),
     RecentEmpty,
     RecentRetry,
     App(String),
@@ -130,6 +135,7 @@ pub enum Subpage {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TextField {
     Apps,
+    Search,
     Location,
     Name,
     InputName,
@@ -407,6 +413,15 @@ impl State {
         x: i32,
         y: i32,
     ) -> bool {
+        // Search's grid scrolls instead of the Home page beneath it.
+        if let Some(search) = &mut self.feeds.search {
+            let rows = search.results.len().div_ceil(crate::feeds::SEARCH_COLUMNS);
+            let max = rows.saturating_sub(2) as f32 * crate::feeds::SEARCH_ROW;
+            search.scroll = (search.scroll - y as f32 * 90.).clamp(0., max);
+            self.pointer = true;
+            self.dirty = true;
+            return false;
+        }
         let over_favorites = self.page == Page::Home
             && position.is_some_and(|(x, y)| {
                 self.favorites_viewport().contains(x, y)
@@ -684,6 +699,14 @@ impl State {
         if matches!(self.overlay, Some(Overlay::SystemKeyboard)) {
             // The TV keyboard owns its arrows until Done/Back dismisses it.
             return vec![];
+        }
+        if self.feeds.search.is_some() && self.overlay.is_none() {
+            return self.search_direction(direction);
+        }
+        if self.overlay.is_none()
+            && let Some(effects) = self.header_direction(direction)
+        {
+            return effects;
         }
         if let Some(id) = self.moving.clone() {
             let mut ids = self.preferences.favorites(&self.inventory.apps);
@@ -1145,6 +1168,18 @@ impl State {
 
     pub fn text(&mut self, text: &str) {
         if self.text_input_active() {
+            if self.keyboard_field == TextField::Search {
+                if let Some(search) = &mut self.feeds.search {
+                    search.query.extend(
+                        text.chars()
+                            .filter(|c| !c.is_control())
+                            .take(80usize.saturating_sub(search.query.chars().count())),
+                    );
+                    search.edited = Some(Instant::now());
+                }
+                self.dirty = true;
+                return;
+            }
             if self.keyboard_field == TextField::Location {
                 let mut query = self.weather.query.clone();
                 query.extend(
@@ -1188,7 +1223,12 @@ impl State {
 
     pub fn delete(&mut self) {
         if self.text_input_active() {
-            if self.keyboard_field == TextField::Location {
+            if self.keyboard_field == TextField::Search {
+                if let Some(search) = &mut self.feeds.search {
+                    search.query.pop();
+                    search.edited = Some(Instant::now());
+                }
+            } else if self.keyboard_field == TextField::Location {
                 let mut query = self.weather.query.clone();
                 query.pop();
                 self.weather.edit(query);
@@ -1223,6 +1263,13 @@ impl State {
     }
 
     fn commit_text_input(&mut self) -> Vec<Effect> {
+        if self.keyboard_field == TextField::Search {
+            // Done searches right away rather than after the typing pause.
+            if let Some(search) = &mut self.feeds.search {
+                search.edited = None;
+            }
+            return vec![];
+        }
         if self.keyboard_field == TextField::Name {
             let name = std::mem::take(&mut self.greeting_name_draft);
             let name = name.trim();
@@ -1270,7 +1317,12 @@ impl State {
             end += 1;
         }
         query.replace_range(start..end, "");
-        if self.keyboard_field == TextField::Location {
+        if self.keyboard_field == TextField::Search {
+            if let Some(search) = &mut self.feeds.search {
+                search.query = query;
+                search.edited = Some(Instant::now());
+            }
+        } else if self.keyboard_field == TextField::Location {
             self.weather.edit(query);
         } else if self.keyboard_field == TextField::Name {
             self.greeting_name_draft = query;
@@ -1289,6 +1341,11 @@ impl State {
             TextField::Name => &self.greeting_name_draft,
             TextField::InputName => &self.input_name,
             TextField::Apps => &self.query,
+            TextField::Search => self
+                .feeds
+                .search
+                .as_ref()
+                .map_or("", |search| search.query.as_str()),
         }
     }
     pub fn open_keyboard(&mut self, field: TextField) {
@@ -1312,6 +1369,7 @@ impl State {
                 TextField::Name => Target::GreetingName,
                 TextField::InputName => Target::InputRename,
                 TextField::Apps => Target::Search,
+                TextField::Search => Target::SearchField,
             };
             self.panel_started = None;
             self.dirty = true;
@@ -1340,6 +1398,7 @@ impl State {
             TextField::Name => Target::GreetingName,
             TextField::InputName => Target::InputRename,
             TextField::Apps => Target::Search,
+            TextField::Search => Target::SearchField,
         }
     }
 
@@ -1351,6 +1410,11 @@ impl State {
                 Target::RecentRetry => self.recent_request(Command::List),
                 _ => vec![],
             };
+        }
+        if self.overlay.is_none()
+            && let Some(effects) = self.search_activate()
+        {
+            return effects;
         }
         if self.moving.take().is_some() {
             // Order was saved at every move. A fresh OK release finishes the
@@ -1366,6 +1430,7 @@ impl State {
             Target::DismissNotice => self.notice = None,
             Target::CloseDialog => return self.back(),
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
+            Target::FeedSearch => return self.open_search(),
             Target::Feed(row, index) if !self.launching => {
                 if let Some(item) = self
                     .feeds
@@ -1689,6 +1754,12 @@ impl State {
                     TextField::Name => self.greeting_name_draft.clear(),
                     TextField::InputName => self.input_name.clear(),
                     TextField::Apps => self.query.clear(),
+                    TextField::Search => {
+                        if let Some(search) = &mut self.feeds.search {
+                            search.query.clear();
+                            search.edited = Some(Instant::now());
+                        }
+                    }
                 },
                 "Done" => {
                     self.overlay = None;
@@ -1728,6 +1799,10 @@ impl State {
             }
             self.focus = self.keyboard_return();
             return self.commit_text_input();
+        }
+        if self.feeds.search.is_some() {
+            self.close_search();
+            return vec![];
         }
         if self.page == Page::Settings && self.subpage.is_some() {
             self.close_subpage();

@@ -4,7 +4,7 @@
 //! rows.
 use crate::app_artwork::Artwork;
 use crate::state::{
-    Control, Direction, Effect, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, Rect, State, Target,
+    Control, Direction, Effect, HOME_STRIP_LEFT, HOME_STRIP_RIGHT, Rect, State, Target, TextField,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,6 +20,28 @@ pub const CARD_PITCH: f32 = 240.;
 pub const CARD_RADIUS: f32 = 14.4;
 /// How long a poster takes to fade in once it arrives.
 const REVEAL: Duration = Duration::from_millis(450);
+/// Search results: a grid of posters below the query field.
+pub const SEARCH_COLUMNS: usize = 7;
+pub const SEARCH_TOP: f32 = 296.;
+pub const SEARCH_ROW: f32 = CARD_HEIGHT + 40.;
+/// Typing pauses this long before the query goes out.
+const SEARCH_PAUSE: Duration = Duration::from_millis(350);
+
+/// The open Search overlay.
+#[derive(Default)]
+pub struct Search {
+    pub query: String,
+    /// The query last sent to TMDB.
+    pub sent: Option<String>,
+    pub results: Vec<Item>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// When the query last changed; None sends it at once.
+    pub edited: Option<Instant>,
+    pub scroll: f32,
+    /// Where focus returns when Search closes.
+    pub restore: Option<Target>,
+}
 
 /// One card: what it shows and the deep link it opens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -80,6 +102,11 @@ pub struct Feeds {
     pub arrived: HashMap<String, Instant>,
     /// The "Keep loaded posters" setting last sent to the worker.
     pub keep: bool,
+    pub search: Option<Search>,
+    /// Search needs a TMDB key.
+    pub can_search: bool,
+    /// Remote keys that open Search, from feeds.json.
+    pub search_keys: Vec<i32>,
 }
 
 impl Feeds {
@@ -91,6 +118,7 @@ impl Feeds {
             .enumerate()
             .filter(|(index, row)| self.keep || row.pinned || self.near.contains(index))
             .flat_map(|(_, row)| &row.items)
+            .chain(self.search.iter().flat_map(|search| &search.results))
             .filter_map(|item| item.image.as_ref())
             .collect()
     }
@@ -299,5 +327,156 @@ impl State {
             }
             _ => None,
         }
+    }
+}
+
+impl State {
+    /// Opens Search with the keyboard ready. Needs a TMDB key.
+    pub fn open_search(&mut self) -> Vec<Effect> {
+        if self.overlay.is_some() || self.recents_open() || self.feeds.search.is_some() {
+            return vec![];
+        }
+        if !self.feeds.can_search {
+            self.notify("Add a TMDB api_key to feeds.json to search");
+            return vec![];
+        }
+        self.moving = None;
+        self.feeds.search = Some(Search {
+            restore: Some(self.focus.clone()),
+            ..Search::default()
+        });
+        self.focus = Target::SearchField;
+        self.open_keyboard(TextField::Search);
+        self.dirty = true;
+        vec![]
+    }
+
+    pub fn close_search(&mut self) {
+        let restore = self.feeds.search.take().and_then(|search| search.restore);
+        self.feeds.prune_images();
+        self.focus = restore.unwrap_or(Target::FeedSearch);
+        self.reconcile_focus();
+        self.pointer = false;
+        self.dirty = true;
+    }
+
+    /// The query to send now, once typing has paused.
+    pub fn search_tick(&mut self) -> Option<String> {
+        let search = self.feeds.search.as_mut()?;
+        if search.sent.as_deref() == Some(search.query.as_str())
+            || search
+                .edited
+                .is_some_and(|edited| edited.elapsed() < SEARCH_PAUSE)
+        {
+            return None;
+        }
+        search.sent = Some(search.query.clone());
+        search.loading = !search.query.trim().is_empty();
+        search.error = None;
+        self.dirty = true;
+        Some(search.query.clone())
+    }
+
+    pub fn search_results(&mut self, query: String, result: Result<Vec<Item>, String>) {
+        let Some(search) = self.feeds.search.as_mut() else {
+            return;
+        };
+        if search.sent.as_deref() != Some(query.as_str()) {
+            return;
+        }
+        search.loading = false;
+        match result {
+            Ok(results) => {
+                search.results = results;
+                search.error = None;
+            }
+            Err(error) => {
+                search.results.clear();
+                search.error = Some(error);
+            }
+        }
+        search.scroll = 0.;
+        // New results replace the grid: focus goes back to the query field above it.
+        if matches!(self.focus, Target::SearchResult(_)) {
+            self.focus = Target::SearchField;
+        }
+        // Posters of earlier queries are no longer shown.
+        self.feeds.prune_images();
+        self.dirty = true;
+    }
+
+    /// Remote navigation inside Search: the query field above a grid of posters.
+    pub fn search_direction(&mut self, direction: Direction) -> Vec<Effect> {
+        let Some(search) = self.feeds.search.as_mut() else {
+            return vec![];
+        };
+        let count = search.results.len();
+        let next = match (self.focus.clone(), direction) {
+            (Target::SearchResult(index), Direction::Left) if index % SEARCH_COLUMNS > 0 => {
+                Target::SearchResult(index - 1)
+            }
+            (Target::SearchResult(index), Direction::Right)
+                if (index + 1) % SEARCH_COLUMNS > 0 && index + 1 < count =>
+            {
+                Target::SearchResult(index + 1)
+            }
+            (Target::SearchResult(index), Direction::Up) if index >= SEARCH_COLUMNS => {
+                Target::SearchResult(index - SEARCH_COLUMNS)
+            }
+            (Target::SearchResult(_), Direction::Up) => Target::SearchField,
+            (Target::SearchResult(index), Direction::Down)
+                if (index / SEARCH_COLUMNS + 1) * SEARCH_COLUMNS < count =>
+            {
+                Target::SearchResult((index + SEARCH_COLUMNS).min(count - 1))
+            }
+            (Target::SearchField, Direction::Down) if count > 0 => Target::SearchResult(0),
+            (Target::SearchResult(_) | Target::SearchField, _) => self.focus.clone(),
+            _ => Target::SearchField,
+        };
+        // Keep the focused row on screen: it stays the second visible row once below the first.
+        if let Target::SearchResult(index) = next {
+            search.scroll = (index / SEARCH_COLUMNS).saturating_sub(1) as f32 * SEARCH_ROW;
+        } else {
+            search.scroll = 0.;
+        }
+        self.focus = next;
+        self.pointer = false;
+        self.dirty = true;
+        vec![]
+    }
+
+    /// The header's Search button: Up from the tabs, and back down or left to the current tab.
+    pub fn header_direction(&mut self, direction: Direction) -> Option<Vec<Effect>> {
+        let next = match (&self.focus, direction) {
+            (Target::Nav(_), Direction::Up) if self.feeds.can_search => Target::FeedSearch,
+            (Target::FeedSearch, Direction::Down | Direction::Left) => {
+                Target::Nav(self.page_index())
+            }
+            (Target::FeedSearch, Direction::Right) => Target::TvSettings,
+            (Target::FeedSearch, Direction::Up) => return Some(vec![]),
+            (Target::TvSettings, Direction::Left) if self.feeds.can_search => Target::FeedSearch,
+            _ => return None,
+        };
+        self.focus = next;
+        self.pointer = false;
+        self.dirty = true;
+        Some(vec![])
+    }
+
+    /// OK inside Search. None when Search is closed.
+    pub fn search_activate(&mut self) -> Option<Vec<Effect>> {
+        let search = self.feeds.search.as_ref()?;
+        Some(match self.focus.clone() {
+            Target::SearchField => {
+                self.open_keyboard(TextField::Search);
+                vec![]
+            }
+            Target::SearchResult(index) if !self.launching => search
+                .results
+                .get(index)
+                .map(|item| vec![Effect::LaunchTitle(item.link.clone())])
+                .unwrap_or_default(),
+            _ => vec![],
+        })
     }
 }

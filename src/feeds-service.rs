@@ -53,6 +53,8 @@ pub struct Config {
     pub mdblist: Option<KeyConfig>,
     pub tmdb: Option<KeyConfig>,
     pub rows: Vec<RowConfig>,
+    /// Remote keys (SDL keycodes or scancodes, as Luma logs them) that open Search.
+    pub search_keys: Vec<i32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -279,12 +281,22 @@ pub enum Command {
 
 pub enum Response {
     Rows(Vec<Row>),
-    Image { url: String, image: Arc<Artwork> },
+    /// TMDB results for `query`; their posters follow as `Image` responses.
+    Search {
+        query: String,
+        result: Result<Vec<Item>, String>,
+    },
+    Image {
+        url: String,
+        image: Arc<Artwork>,
+    },
 }
 
 pub struct Service {
     sender: mpsc::Sender<Command>,
     pub receiver: mpsc::Receiver<Response>,
+    /// Queries for the search worker; None without a TMDB key.
+    search: Option<mpsc::Sender<String>>,
 }
 
 impl Service {
@@ -292,10 +304,32 @@ impl Service {
     pub fn new(config: Option<Config>, saved: Saved, path: PathBuf) -> Self {
         let (sender, commands) = mpsc::channel();
         let (responses, receiver) = mpsc::channel();
+        // Search runs on its own worker, so a long row load never holds up results.
+        let search = config.as_ref().and_then(tmdb_key).map(|key| {
+            let (queries, requests) = mpsc::channel();
+            let responses = responses.clone();
+            thread::spawn(move || search_worker(&key, requests, responses));
+            queries
+        });
         if let Some(config) = config.filter(|config| !config.rows.is_empty()) {
             thread::spawn(move || Worker::new(config, saved, path, responses, commands).run());
         }
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            search,
+        }
+    }
+
+    /// Whether Search is available: it needs a TMDB key.
+    pub fn can_search(&self) -> bool {
+        self.search.is_some()
+    }
+
+    pub fn search(&self, query: String) {
+        if let Some(search) = &self.search {
+            let _ = search.send(query);
+        }
     }
 
     pub fn near(&self, rows: Vec<usize>, keep: bool) {
@@ -531,6 +565,138 @@ fn decode(url: &str, bytes: &[u8]) -> Option<Artwork> {
         pixels: image.into_rgba8(),
         color: [20, 20, 20],
     })
+}
+
+fn tmdb_key(config: &Config) -> Option<String> {
+    config
+        .tmdb
+        .as_ref()
+        .map(|tmdb| tmdb.api_key.trim().to_owned())
+        .filter(|key| !key.is_empty() && !key.starts_with("YOUR_"))
+}
+
+fn tmdb_request(
+    http: &Http,
+    key: &str,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<Value, String> {
+    let url = format!("{TMDB}{path}");
+    // A v4 read access token is a JWT; a v3 key is a short hex string.
+    let reply = if key.starts_with("eyJ") {
+        let bearer = format!("Bearer {key}");
+        http.get(
+            &url,
+            query,
+            &[
+                ("Authorization", bearer.as_str()),
+                ("Accept", "application/json"),
+            ],
+            JSON_LIMIT,
+        )?
+    } else {
+        let mut query = query.to_vec();
+        query.push(("api_key", key));
+        http.get(&url, &query, &[("Accept", "application/json")], JSON_LIMIT)?
+    };
+    if !reply.ok() {
+        return Err(format!("TMDB answered HTTP {}", reply.status));
+    }
+    reply.json()
+}
+
+/// TMDB's movies and shows for `query`, as cards that open in the feeds app.
+fn search(http: &Http, key: &str, query: &str) -> Result<Vec<Item>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(vec![]);
+    }
+    let value = tmdb_request(
+        http,
+        key,
+        "/search/multi",
+        &[("query", query), ("include_adult", "false"), ("page", "1")],
+    )?;
+    Ok(value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| {
+            let kind = match result.get("media_type").and_then(Value::as_str)? {
+                "movie" => Kind::Movie,
+                "tv" => Kind::Series,
+                // People are not titles Nuvio can open.
+                _ => return None,
+            };
+            let id = result.get("id").and_then(Value::as_u64)?;
+            let title = ["title", "name"]
+                .iter()
+                .find_map(|key| result.get(*key).and_then(Value::as_str))
+                .unwrap_or("")
+                .to_owned();
+            let image = result
+                .get("poster_path")
+                .and_then(Value::as_str)
+                .filter(|path| path.starts_with('/'))
+                .map(|path| format!("{TMDB_IMAGES}{path}"));
+            Some(Item {
+                title,
+                subtitle: String::new(),
+                link: link(kind, None, Some(id))?,
+                image,
+                progress: None,
+            })
+        })
+        .take(28)
+        .collect())
+}
+
+/// Answers the newest query only, then fetches its posters until a newer query arrives.
+fn search_worker(key: &str, queries: mpsc::Receiver<String>, responses: mpsc::Sender<Response>) {
+    let http = Http::new();
+    let mut next: Option<String> = None;
+    loop {
+        let mut query = match next.take() {
+            Some(query) => query,
+            None => match queries.recv() {
+                Ok(query) => query,
+                Err(_) => return,
+            },
+        };
+        while let Ok(newer) = queries.try_recv() {
+            query = newer;
+        }
+        let result = search(&http, key, &query);
+        let images: Vec<String> = result
+            .as_ref()
+            .map(|items| items.iter().filter_map(|item| item.image.clone()).collect())
+            .unwrap_or_default();
+        if responses.send(Response::Search { query, result }).is_err() {
+            return;
+        }
+        for url in images {
+            if let Ok(newer) = queries.try_recv() {
+                next = Some(newer);
+                break;
+            }
+            let Ok(reply) = http.get(&url, &[], &[], IMAGE_LIMIT) else {
+                continue;
+            };
+            if !reply.ok() {
+                continue;
+            }
+            if let Some(image) = decode(&url, &reply.body) {
+                let response = Response::Image {
+                    url,
+                    image: Arc::new(image),
+                };
+                if responses.send(response).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 struct Device {
@@ -932,35 +1098,8 @@ impl Worker {
     // ---- TMDB artwork ----
 
     fn tmdb(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
-        let key = self
-            .config
-            .tmdb
-            .as_ref()
-            .map(|tmdb| tmdb.api_key.trim().to_owned())
-            .ok_or("No TMDB key")?;
-        let url = format!("{TMDB}{path}");
-        // A v4 read access token is a JWT; a v3 key is a short hex string.
-        let reply = if key.starts_with("eyJ") {
-            let bearer = format!("Bearer {key}");
-            self.http.get(
-                &url,
-                query,
-                &[
-                    ("Authorization", bearer.as_str()),
-                    ("Accept", "application/json"),
-                ],
-                JSON_LIMIT,
-            )?
-        } else {
-            let mut query = query.to_vec();
-            query.push(("api_key", key.as_str()));
-            self.http
-                .get(&url, &query, &[("Accept", "application/json")], JSON_LIMIT)?
-        };
-        if !reply.ok() {
-            return Err(format!("TMDB answered HTTP {}", reply.status));
-        }
-        reply.json()
+        let key = tmdb_key(&self.config).ok_or("No TMDB key")?;
+        tmdb_request(&self.http, &key, path, query)
     }
 
     fn artwork(&mut self, kind: Kind, tmdb: Option<u64>, imdb: Option<&str>) -> Option<String> {

@@ -376,6 +376,10 @@ pub fn scene_with_pill(
     out.draw.push(Draw::Clip(None));
     header(&mut out, state, assets, now, pill_x, pill_width);
     footer(&mut out, state, assets);
+    if state.feeds.search.is_some() {
+        out.controls.clear();
+        search_overlay(&mut out, state, assets);
+    }
     if let Some(overlay @ (Overlay::Options { .. } | Overlay::Keyboard)) = &state.overlay {
         out.controls.clear();
         let start = out.draw.len();
@@ -477,6 +481,22 @@ fn header(
             true,
         );
         out.control(Target::Nav(index), rect, false);
+    }
+    if state.feeds.can_search {
+        let rect = Rect::new(1724.8, 52., 49.6, 49.6);
+        let focused = state.focus == Target::FeedSearch;
+        out.pill(rect, focused, false);
+        out.icon(
+            assets,
+            "search",
+            Rect::new(1738., 65.2, 23.2, 23.2),
+            if focused {
+                c(0x2c2c2c, 1.)
+            } else {
+                c(0xeeeeee, 0.73)
+            },
+        );
+        out.control(Target::FeedSearch, rect, false);
     }
     let rect = Rect::new(1786.4, 52., 49.6, 49.6);
     let focused = state.focus == Target::TvSettings;
@@ -1168,70 +1188,7 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
             }
             let start = out.draw.len();
             let focused = state.focus == target;
-            out.shadow(
-                rect,
-                CARD_RADIUS,
-                if focused { 34. } else { 22. },
-                if focused { 14. } else { 9. },
-                if focused { 0.45 } else { 0.2 },
-            );
-            let artwork = item.image.as_ref().and_then(|url| {
-                Some((
-                    state.feeds.images.get(url)?,
-                    state.feeds.reveal(url, state.preferences.reduced_motion),
-                ))
-            });
-            // The title card stays beneath a poster that is still fading in.
-            if artwork.is_none_or(|(_, reveal)| reveal < 1.) {
-                out.draw.push(Draw::RoundedGradient(
-                    rect,
-                    CARD_RADIUS,
-                    c(0x3a4048, 1.),
-                    c(0x22272d, 1.),
-                ));
-                let style = text(20.8, 550, -0.02).leading(1.25);
-                let lines = assets.lines(&item.title, style, rect.w - 36.).min(4) as f32;
-                let height = lines * style.size * style.line_height;
-                out.text(
-                    &item.title,
-                    Rect::new(
-                        rect.x + 18.,
-                        rect.y + (rect.h - height) / 2.,
-                        rect.w - 36.,
-                        height,
-                    ),
-                    style,
-                    c(0xffffff, 0.92),
-                    true,
-                );
-            }
-            if let Some((image, reveal)) = artwork {
-                // Develops in: fades up from dim, like Apple TV's artwork.
-                let light = 0.55 + 0.45 * reveal;
-                out.draw.push(Draw::AppImage(
-                    image.clone(),
-                    rect,
-                    [light, light, light, reveal],
-                ));
-            }
-            out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
-            if let Some(progress) = item.progress {
-                let track = Rect::new(rect.x + 16., rect.y + rect.h - 20., rect.w - 32., 5.);
-                out.shape(track, 2.5, c(0x000000, 0.5));
-                out.shape(
-                    Rect::new(
-                        track.x,
-                        track.y,
-                        (track.w * progress.clamp(0., 1.)).max(5.),
-                        track.h,
-                    ),
-                    2.5,
-                    c(0xffffff, 0.95),
-                );
-            }
-            if focused {
-                out.ring(rect, CARD_RADIUS);
-            }
+            poster(out, state, assets, item, rect, focused);
             if state.pressed.as_ref() == Some(&target) {
                 out.fade(start, 1., 0.85);
             }
@@ -1253,6 +1210,175 @@ fn feed_rows(out: &mut Scene, state: &State, assets: &Assets, mut y: f32) -> f32
         out.draw.push(Draw::Clip(Some(content)));
     }
     y
+}
+
+/// A poster card: the title until the poster arrives, then the poster fading in over it.
+fn poster(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+    focused: bool,
+) {
+    use crate::feeds::CARD_RADIUS;
+    out.shadow(
+        rect,
+        CARD_RADIUS,
+        if focused { 34. } else { 22. },
+        if focused { 14. } else { 9. },
+        if focused { 0.45 } else { 0.2 },
+    );
+    let artwork = item.image.as_ref().and_then(|url| {
+        Some((
+            state.feeds.images.get(url)?,
+            state.feeds.reveal(url, state.preferences.reduced_motion),
+        ))
+    });
+    // The title card stays beneath a poster that is still fading in.
+    if artwork.is_none_or(|(_, reveal)| reveal < 1.) {
+        out.draw.push(Draw::RoundedGradient(
+            rect,
+            CARD_RADIUS,
+            c(0x3a4048, 1.),
+            c(0x22272d, 1.),
+        ));
+        let style = text(20.8, 550, -0.02).leading(1.25);
+        let lines = assets.lines(&item.title, style, rect.w - 36.).min(4) as f32;
+        let height = lines * style.size * style.line_height;
+        out.text(
+            &item.title,
+            Rect::new(
+                rect.x + 18.,
+                rect.y + (rect.h - height) / 2.,
+                rect.w - 36.,
+                height,
+            ),
+            style,
+            c(0xffffff, 0.92),
+            true,
+        );
+    }
+    if let Some((image, reveal)) = artwork {
+        // Develops in: fades up from dim, like Apple TV's artwork.
+        let light = 0.55 + 0.45 * reveal;
+        out.draw.push(Draw::AppImage(
+            image.clone(),
+            rect,
+            [light, light, light, reveal],
+        ));
+    }
+    out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
+    if let Some(progress) = item.progress {
+        let track = Rect::new(rect.x + 16., rect.y + rect.h - 20., rect.w - 32., 5.);
+        out.shape(track, 2.5, c(0x000000, 0.5));
+        out.shape(
+            Rect::new(
+                track.x,
+                track.y,
+                (track.w * progress.clamp(0., 1.)).max(5.),
+                track.h,
+            ),
+            2.5,
+            c(0xffffff, 0.95),
+        );
+    }
+    if focused {
+        out.ring(rect, CARD_RADIUS);
+    }
+}
+
+/// Search: a query field over a grid of TMDB posters, on a dimmed Home.
+fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
+    use crate::feeds::{
+        CARD_HEIGHT, CARD_PITCH, CARD_WIDTH, SEARCH_COLUMNS, SEARCH_ROW, SEARCH_TOP,
+    };
+    let Some(search) = &state.feeds.search else {
+        return;
+    };
+    out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x080b12, 0.94));
+    let field = Rect::new(84., 140., 1752., 76.);
+    let focused = state.focus == Target::SearchField;
+    out.draw.push(Draw::RoundedGradient(
+        field,
+        38.,
+        c(0x30363c, 0.85),
+        c(0x242a30, 0.80),
+    ));
+    out.border(field, 38., 1., c(0xffffff, if focused { 0.3 } else { 0.1 }));
+    out.icon(
+        assets,
+        "search",
+        Rect::new(field.x + 28., field.y + 24., 28., 28.),
+        c(0xeeeeee, 0.8),
+    );
+    let editing = state.text_input_active() && state.keyboard_field == TextField::Search;
+    let (label, color) = if search.query.is_empty() && !editing {
+        ("Movies and shows".to_owned(), c(0xeeeeee, 0.45))
+    } else {
+        (
+            format!("{}{}", search.query, if editing { "|" } else { "" }),
+            WHITE,
+        )
+    };
+    out.text(
+        label,
+        Rect::new(field.x + 74., field.y + 21., field.w - 110., 34.),
+        text(26., 500, -0.02),
+        color,
+        false,
+    );
+    if focused {
+        out.ring(field, 38.);
+    }
+    out.control(Target::SearchField, field, false);
+    let status = if search.loading && search.results.is_empty() {
+        Some("Searching...".to_owned())
+    } else if let Some(error) = &search.error {
+        Some(error.clone())
+    } else if search.results.is_empty()
+        && !search.loading
+        && search
+            .sent
+            .as_deref()
+            .is_some_and(|sent| !sent.trim().is_empty())
+    {
+        Some("No movies or shows found".to_owned())
+    } else {
+        None
+    };
+    if let Some(status) = status {
+        out.text(
+            status,
+            Rect::new(field.x + 6., SEARCH_TOP, 1200., 26.),
+            text(18.4, 450, 0.),
+            c(0xeeeeee, 0.6),
+            false,
+        );
+    }
+    out.draw
+        .push(Draw::Clip(Some(Rect::new(0., 250., 1920., 830.))));
+    for (index, item) in search.results.iter().enumerate() {
+        let column = index % SEARCH_COLUMNS;
+        let row = index / SEARCH_COLUMNS;
+        let rect = Rect::new(
+            84. + column as f32 * CARD_PITCH,
+            SEARCH_TOP + row as f32 * SEARCH_ROW - search.scroll,
+            CARD_WIDTH,
+            CARD_HEIGHT,
+        );
+        if rect.y + rect.h < 250. || rect.y > 1080. {
+            continue;
+        }
+        let target = Target::SearchResult(index);
+        out.control(target.clone(), rect, false);
+        let start = out.draw.len();
+        poster(out, state, assets, item, rect, state.focus == target);
+        if state.pressed.as_ref() == Some(&target) {
+            out.fade(start, 1., 0.85);
+        }
+    }
+    out.draw.push(Draw::Clip(None));
 }
 
 struct WeatherSummary {
@@ -2911,6 +3037,7 @@ fn keyboard(out: &mut Scene, state: &State, assets: &Assets) {
             TextField::Name => language.t("greetingName"),
             TextField::InputName => language.t("inputName"),
             TextField::Apps => language.t("findApp"),
+            TextField::Search => "Search movies and shows",
         },
         Rect::new(389., 324., 1000., 44.),
         text(37.6, 500, -0.055).leading(1.1),
