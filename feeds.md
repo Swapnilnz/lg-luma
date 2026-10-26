@@ -48,16 +48,36 @@ trakt.tv/activate on a phone and enter it. The sign-in is kept in `feeds-state.j
 
 ## Search
 
-With a TMDB key, a Search button appears in the header next to TV Settings. It opens a query field
-with the TV keyboard (use its microphone to dictate) and shows matching movies and shows as
-posters; selecting one opens it in Nuvio. Back closes Search.
+With a TMDB key, Home shows a search bar above the feed rows, with a microphone button beside
+it. The bar opens Search with the TV keyboard; the microphone listens through the remote using
+LG's own speech recognition (`com.webos.service.voiceconductor/recognizeVoice`, via Homebrew
+Channel's root service unless Luma runs as Home) and searches what it heard. Results are TMDB
+movies and shows as posters; selecting one opens it in Nuvio. Back closes Search.
 
-To open Search from a remote button, press it on Home while Luma runs as Home, then read the
-key Luma logged:
+LG keeps the remote's mic button for its own assistant, so Luma never receives it. LG Input
+Hook can take it over instead: it runs a script that asks Luma to listen. This replaces the
+mic button's normal action in every app, not just Luma. On the TV:
 
 ```sh
-grep "Luma key" /tmp/luma-home.log
+mkdir -p /home/root/.config/lginputhook
+cat > /home/root/.config/lginputhook/luma-mic.sh << 'EOF'
+#!/bin/sh
+# LG Input Hook passes 1 for a press, 0 for a release.
+[ "$1" = "1" ] || exit 0
+touch /tmp/luma-voice-search
+luna-send -n 1 luna://com.webos.applicationManager/launch '{"id":"com.webos.app.home"}'
+EOF
+chmod +x /home/root/.config/lginputhook/luma-mic.sh
 ```
 
-Put its `keycode` (or `scancode`) in `"search_keys"`, e.g. `"search_keys": [1073742106]`, and
-restart Luma. If LG's own assistant still opens on that button, it cannot be taken over.
+Then map key 428 (the mic button) to it in `/home/root/.config/lginputhook/keybinds.json`:
+
+```json
+{ "428": { "action": "exec", "command": "/home/root/.config/lginputhook/luma-mic.sh" } }
+```
+
+Input Hook reloads its keybinds within a few seconds. Remove the entry to give the mic button
+back to LG.
+
+Other buttons can open Search too: Luma logs remote keys it does not use (`Luma key: ...` in
+`/tmp/luma-home.log`); put a `keycode` or `scancode` in `"search_keys"`.

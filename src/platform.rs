@@ -141,6 +141,8 @@ pub enum Request {
         id: String,
         target: String,
     },
+    /// Listen through the remote's microphone with LG's speech recognition.
+    Voice(u64),
     SyncSplash(String),
     Recent {
         generation: u64,
@@ -150,6 +152,8 @@ pub enum Request {
 pub enum Response {
     Inventory(Result<(Inventory, Option<String>), String>),
     Launched(Result<(), String>),
+    /// What LG's speech recognition heard, for that request.
+    Voice(u64, Result<String, String>),
     Recent {
         generation: u64,
         command: crate::recents::Command,
@@ -239,6 +243,19 @@ impl Platform {
                         )
                         .map(|_| ())
                     }),
+                    Request::Voice(id) => {
+                        // Listening takes seconds: its own thread, so launches never wait on it.
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            let result = if webos {
+                                recognize_voice()
+                            } else {
+                                Err("Voice search works on the TV".into())
+                            };
+                            let _ = responses.send(Response::Voice(id, result));
+                        });
+                        continue;
+                    }
                     Request::SyncSplash(background) => {
                         if webos
                             && splash_enabled
@@ -296,11 +313,15 @@ fn sync_splash(background: &str) -> Result<(), String> {
 }
 
 fn call(uri: &str, payload: Value) -> Result<Value, String> {
+    call_for(uri, payload, std::time::Duration::from_millis(6500))
+}
+
+fn call_for(uri: &str, payload: Value, timeout: std::time::Duration) -> Result<Value, String> {
     #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
-    let response = crate::luna::call(uri, &payload);
+    let response = crate::luna::call_for(uri, &payload, timeout);
     #[cfg(not(all(feature = "webos", target_os = "linux", target_arch = "arm")))]
     let response: Result<Value, String> = {
-        let _ = payload;
+        let _ = (payload, timeout);
         Err("Native Luna services are only available in an ARM webOS build".into())
     };
     response.and_then(checked_response).map_err(|error| {
@@ -308,6 +329,55 @@ fn call(uri: &str, payload: Value) -> Result<Value, String> {
         eprintln!("Luma TV service: {error}");
         error
     })
+}
+
+/// LG's own speech recognition (ThinQ AI) through the remote's microphone: the text it heard.
+/// As LG's Home, Luma asks it directly; otherwise through Homebrew Channel's root service,
+/// with time for the viewer to speak.
+fn recognize_voice() -> Result<String, String> {
+    const URI: &str = "luna://com.webos.service.voiceconductor/recognizeVoice";
+    let timeout = std::time::Duration::from_secs(25);
+    let uri = URI;
+    let started = std::time::Instant::now();
+    let direct = if runs_as_lg_home() {
+        match call_for(URI, json!({}), timeout) {
+            Ok(reply) => Some(reply),
+            // Listened and failed (silence, timeout): do not listen a second time.
+            Err(error) if started.elapsed() > std::time::Duration::from_secs(2) => {
+                return Err(error);
+            }
+            // Refused at once: Luma may not hold the permission; try as root below.
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let reply = match direct {
+        Some(reply) => reply,
+        None => {
+            let command = format!(
+                "if [ \"$(id -u)\" = 0 ]; then /usr/bin/luna-send -n 1 -w 20000 {uri} '{{}}'; else printf '%s\\n' '{{\"returnValue\":false,\"errorText\":\"Homebrew Channel needs root access\"}}'; fi"
+            );
+            let envelope = call_for(
+                "luna://org.webosbrew.hbchannel.service/exec",
+                json!({"command": command}),
+                timeout,
+            )?;
+            command_reply(&envelope)?
+        }
+    };
+    // Firmware answers with a ranked list of candidates, or a single string.
+    let text = match reply.get("text") {
+        Some(Value::Array(candidates)) => candidates
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|text| !text.trim().is_empty())
+            .map(str::to_owned),
+        Some(Value::String(text)) => Some(text.clone()),
+        _ => None,
+    };
+    text.map(|text| text.trim().to_owned())
+        .ok_or_else(|| "Nothing was heard".into())
 }
 
 fn checked_response(value: Value) -> Result<Value, String> {

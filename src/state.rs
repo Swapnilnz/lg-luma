@@ -39,10 +39,12 @@ pub enum Target {
     Recent(String),
     /// A card in a Home feed row: row index, card index.
     Feed(usize, usize),
-    /// The header's Search button.
+    /// The search bar above the feed rows, and its microphone button.
     FeedSearch,
-    /// Search's query field, and its results.
+    FeedVoice,
+    /// Search's query field, its microphone, and its results.
     SearchField,
+    SearchVoice,
     SearchResult(usize),
     RecentEmpty,
     RecentRetry,
@@ -159,6 +161,8 @@ pub enum Effect {
     Launch(String),
     /// Open the feeds app on a title: the `contentTarget` deep link.
     LaunchTitle(String),
+    /// Listen for a search through the remote's microphone; the request's number.
+    VoiceSearch(u64),
     Recent {
         generation: u64,
         command: crate::recents::Command,
@@ -702,11 +706,6 @@ impl State {
         }
         if self.feeds.search.is_some() && self.overlay.is_none() {
             return self.search_direction(direction);
-        }
-        if self.overlay.is_none()
-            && let Some(effects) = self.header_direction(direction)
-        {
-            return effects;
         }
         if let Some(id) = self.moving.clone() {
             let mut ids = self.preferences.favorites(&self.inventory.apps);
@@ -1431,6 +1430,7 @@ impl State {
             Target::CloseDialog => return self.back(),
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
             Target::FeedSearch => return self.open_search(),
+            Target::FeedVoice => return self.start_voice(),
             Target::Feed(row, index) if !self.launching => {
                 if let Some(item) = self
                     .feeds

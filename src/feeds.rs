@@ -41,7 +41,14 @@ pub struct Search {
     pub scroll: f32,
     /// Where focus returns when Search closes.
     pub restore: Option<Target>,
+    /// Waiting for LG's speech recognition.
+    pub listening: bool,
+    /// The voice request whose reply this Search is waiting for.
+    pub voice: u64,
 }
+
+/// Created by the remote's mic button through LG Input Hook (see feeds.md): Luma then listens.
+pub const VOICE_TRIGGER: &str = "/tmp/luma-voice-search";
 
 /// One card: what it shows and the deep link it opens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -107,6 +114,8 @@ pub struct Feeds {
     pub can_search: bool,
     /// Remote keys that open Search, from feeds.json.
     pub search_keys: Vec<i32>,
+    /// Numbers voice requests, so a late reply never fills a later Search.
+    pub voice_requests: u64,
 }
 
 impl Feeds {
@@ -240,6 +249,15 @@ fn nearest_feed(
         .map(|(_, control)| control.target.clone())
 }
 
+/// The search bar or its mic button, whichever is nearer to `x`.
+fn nearest_bar(controls: &[Control], x: f32) -> Option<Target> {
+    controls
+        .iter()
+        .filter(|control| matches!(control.target, Target::FeedSearch | Target::FeedVoice))
+        .min_by(|a, b| distance(a, x).total_cmp(&distance(b, x)))
+        .map(|control| control.target.clone())
+}
+
 fn nearest_favorite(controls: &[Control], x: f32) -> Option<Target> {
     controls
         .iter()
@@ -300,7 +318,24 @@ impl State {
             .0;
         match self.focus.clone() {
             Target::App(_) if matches!(direction, Direction::Down) => {
-                let next = nearest_feed(controls, x, |_| true, false)?;
+                let next = nearest_bar(controls, x)
+                    .or_else(|| nearest_feed(controls, x, |_| true, false))?;
+                self.focus(next, controls);
+                Some(vec![])
+            }
+            bar @ (Target::FeedSearch | Target::FeedVoice) => {
+                let next = match direction {
+                    Direction::Up => nearest_favorite(controls, x)?,
+                    Direction::Down => nearest_feed(controls, x, |_| true, false)?,
+                    Direction::Left if bar == Target::FeedVoice => Target::FeedSearch,
+                    Direction::Right
+                        if bar == Target::FeedSearch
+                            && controls.iter().any(|c| c.target == Target::FeedVoice) =>
+                    {
+                        Target::FeedVoice
+                    }
+                    _ => return Some(vec![]),
+                };
                 self.focus(next, controls);
                 Some(vec![])
             }
@@ -319,6 +354,7 @@ impl State {
                         Target::Feed(row, next)
                     }
                     Direction::Up => nearest_feed(controls, x, |other| other < row, true)
+                        .or_else(|| nearest_bar(controls, x))
                         .or_else(|| nearest_favorite(controls, x))?,
                     Direction::Down => nearest_feed(controls, x, |other| other > row, false)?,
                 };
@@ -423,6 +459,11 @@ impl State {
             (Target::SearchResult(index), Direction::Up) if index >= SEARCH_COLUMNS => {
                 Target::SearchResult(index - SEARCH_COLUMNS)
             }
+            (Target::SearchResult(index), Direction::Up)
+                if index % SEARCH_COLUMNS == SEARCH_COLUMNS - 1 =>
+            {
+                Target::SearchVoice
+            }
             (Target::SearchResult(_), Direction::Up) => Target::SearchField,
             (Target::SearchResult(index), Direction::Down)
                 if (index / SEARCH_COLUMNS + 1) * SEARCH_COLUMNS < count =>
@@ -430,7 +471,14 @@ impl State {
                 Target::SearchResult((index + SEARCH_COLUMNS).min(count - 1))
             }
             (Target::SearchField, Direction::Down) if count > 0 => Target::SearchResult(0),
-            (Target::SearchResult(_) | Target::SearchField, _) => self.focus.clone(),
+            (Target::SearchField, Direction::Right) => Target::SearchVoice,
+            (Target::SearchVoice, Direction::Left) => Target::SearchField,
+            (Target::SearchVoice, Direction::Down) if count > 0 => {
+                Target::SearchResult((SEARCH_COLUMNS - 1).min(count - 1))
+            }
+            (Target::SearchResult(_) | Target::SearchField | Target::SearchVoice, _) => {
+                self.focus.clone()
+            }
             _ => Target::SearchField,
         };
         // Keep the focused row on screen: it stays the second visible row once below the first.
@@ -445,22 +493,54 @@ impl State {
         vec![]
     }
 
-    /// The header's Search button: Up from the tabs, and back down or left to the current tab.
-    pub fn header_direction(&mut self, direction: Direction) -> Option<Vec<Effect>> {
-        let next = match (&self.focus, direction) {
-            (Target::Nav(_), Direction::Up) if self.feeds.can_search => Target::FeedSearch,
-            (Target::FeedSearch, Direction::Down | Direction::Left) => {
-                Target::Nav(self.page_index())
+    /// Opens Search listening through the remote's microphone, then searches what was heard.
+    pub fn start_voice(&mut self) -> Vec<Effect> {
+        if self.feeds.search.is_none() {
+            let effects = self.open_search();
+            if self.feeds.search.is_none() {
+                return effects;
             }
-            (Target::FeedSearch, Direction::Right) => Target::TvSettings,
-            (Target::FeedSearch, Direction::Up) => return Some(vec![]),
-            (Target::TvSettings, Direction::Left) if self.feeds.can_search => Target::FeedSearch,
-            _ => return None,
+        }
+        // Voice replaces typing: put the TV keyboard away.
+        if self.text_input_active() {
+            self.overlay = None;
+            self.panel_started = None;
+        }
+        let Some(search) = self.feeds.search.as_mut() else {
+            return vec![];
         };
-        self.focus = next;
-        self.pointer = false;
+        if search.listening {
+            return vec![];
+        }
+        self.feeds.voice_requests += 1;
+        let id = self.feeds.voice_requests;
+        search.listening = true;
+        search.voice = id;
+        search.error = None;
+        self.focus = Target::SearchVoice;
         self.dirty = true;
-        Some(vec![])
+        vec![Effect::VoiceSearch(id)]
+    }
+
+    /// What the microphone heard becomes the query, searched at once.
+    pub fn voice_result(&mut self, id: u64, result: Result<String, String>) {
+        let Some(search) = self.feeds.search.as_mut() else {
+            return;
+        };
+        if !search.listening || search.voice != id {
+            return;
+        }
+        search.listening = false;
+        match result {
+            Ok(text) if !text.is_empty() => {
+                search.query = text.chars().take(80).collect();
+                search.edited = None;
+                search.error = None;
+            }
+            Ok(_) => search.error = Some("Didn't catch that. Press the mic to try again.".into()),
+            Err(error) => search.error = Some(format!("Voice search failed: {error}")),
+        }
+        self.dirty = true;
     }
 
     /// OK inside Search. None when Search is closed.
@@ -471,6 +551,7 @@ impl State {
                 self.open_keyboard(TextField::Search);
                 vec![]
             }
+            Target::SearchVoice => self.start_voice(),
             Target::SearchResult(index) if !self.launching => search
                 .results
                 .get(index)

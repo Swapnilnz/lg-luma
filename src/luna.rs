@@ -166,7 +166,7 @@ impl Connection {
         Ok(connection)
     }
 
-    fn request(&mut self, uri: &str, payload: &Value) -> Result<Value, String> {
+    fn request(&mut self, uri: &str, payload: &Value, timeout: Duration) -> Result<Value, String> {
         let uri = CString::new(uri).map_err(|_| "Invalid Luna URI")?;
         let payload = CString::new(payload.to_string()).map_err(|_| "Invalid Luna payload")?;
         let mut error = Error::new();
@@ -188,7 +188,7 @@ impl Connection {
         } {
             return Err(error.describe("call submission"));
         }
-        let deadline = Instant::now() + Duration::from_millis(6500);
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             // SAFETY: only this worker drives this private context. Iteration is
             // nonblocking, so a missing service cannot hold the UI or this loop.
@@ -228,8 +228,14 @@ impl Drop for Connection {
     }
 }
 
+#[allow(dead_code)]
 pub fn call(uri: &str, payload: &Value) -> Result<Value, String> {
-    Connection::open()?.request(uri, payload)
+    call_for(uri, payload, Duration::from_millis(6500))
+}
+
+/// A call whose reply may take longer, such as voice recognition while the viewer speaks.
+pub fn call_for(uri: &str, payload: &Value, timeout: Duration) -> Result<Value, String> {
+    Connection::open()?.request(uri, payload, timeout)
 }
 
 type Sink = Box<dyn FnMut(Value) + Send>;

@@ -482,22 +482,6 @@ fn header(
         );
         out.control(Target::Nav(index), rect, false);
     }
-    if state.feeds.can_search {
-        let rect = Rect::new(1724.8, 52., 49.6, 49.6);
-        let focused = state.focus == Target::FeedSearch;
-        out.pill(rect, focused, false);
-        out.icon(
-            assets,
-            "search",
-            Rect::new(1738., 65.2, 23.2, 23.2),
-            if focused {
-                c(0x2c2c2c, 1.)
-            } else {
-                c(0xeeeeee, 0.73)
-            },
-        );
-        out.control(Target::FeedSearch, rect, false);
-    }
     let rect = Rect::new(1786.4, 52., 49.6, 49.6);
     let focused = state.focus == Target::TvSettings;
     out.pill(rect, focused, false);
@@ -958,7 +942,11 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     }
     out.draw.push(Draw::EdgeFadeX(None));
     out.draw.push(Draw::Clip(Some(state.content_viewport())));
-    let input_y = feed_rows(out, state, assets, 544.8 + grid_height + 41.6 - s);
+    let mut feeds_y = 544.8 + grid_height + 41.6 - s;
+    if state.feeds.can_search {
+        feeds_y = search_bar(out, state, assets, feeds_y);
+    }
+    let input_y = feed_rows(out, state, assets, feeds_y);
     let inputs: Vec<_> = state
         .inventory
         .inputs
@@ -1288,6 +1276,106 @@ fn poster(
     }
 }
 
+const SEARCH_BAR_HEIGHT: f32 = 72.;
+
+/// A round microphone button.
+fn mic_button(out: &mut Scene, assets: &Assets, rect: Rect, focused: bool, listening: bool) {
+    out.shadow(rect, rect.h / 2., if focused { 30. } else { 14. }, 4., 0.2);
+    if focused {
+        out.draw.push(Draw::RoundedGradient(
+            rect,
+            rect.h / 2.,
+            c(0xfafafa, 1.),
+            c(0xe5e5e5, 1.),
+        ));
+    } else {
+        out.draw.push(Draw::RoundedGradient(
+            rect,
+            rect.h / 2.,
+            if listening {
+                c(0x3d6fd9, 0.95)
+            } else {
+                c(0x30363c, 0.85)
+            },
+            if listening {
+                c(0x2f58b8, 0.95)
+            } else {
+                c(0x242a30, 0.80)
+            },
+        ));
+        out.border(rect, rect.h / 2., 1., c(0xffffff, 0.12));
+    }
+    let size = rect.h * 0.42;
+    out.icon(
+        assets,
+        "mic",
+        Rect::new(
+            rect.x + (rect.w - size) / 2.,
+            rect.y + (rect.h - size) / 2.,
+            size,
+            size,
+        ),
+        if focused { c(0x2c2c2c, 1.) } else { WHITE },
+    );
+}
+
+/// Home's search bar and its microphone, above the feed rows. Returns where the rows start.
+fn search_bar(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
+    let mic = Rect::new(
+        HOME_STRIP_RIGHT - SEARCH_BAR_HEIGHT,
+        y,
+        SEARCH_BAR_HEIGHT,
+        SEARCH_BAR_HEIGHT,
+    );
+    let bar = Rect::new(84., y, mic.x - 16. - 84., SEARCH_BAR_HEIGHT);
+    let focused = state.focus == Target::FeedSearch;
+    out.shadow(bar, bar.h / 2., if focused { 30. } else { 14. }, 4., 0.2);
+    out.draw.push(Draw::RoundedGradient(
+        bar,
+        bar.h / 2.,
+        if focused {
+            c(0x3a4048, 0.92)
+        } else {
+            c(0x30363c, 0.80)
+        },
+        if focused {
+            c(0x2c3238, 0.88)
+        } else {
+            c(0x242a30, 0.75)
+        },
+    ));
+    out.border(
+        bar,
+        bar.h / 2.,
+        1.,
+        c(0xffffff, if focused { 0.24 } else { 0.1 }),
+    );
+    out.icon(
+        assets,
+        "search",
+        Rect::new(bar.x + 28., bar.y + 23., 26., 26.),
+        c(0xeeeeee, if focused { 0.95 } else { 0.7 }),
+    );
+    out.text(
+        "Search movies and shows",
+        Rect::new(bar.x + 72., bar.y + 22., bar.w - 100., 30.),
+        text(22.4, 500, -0.02),
+        c(0xeeeeee, if focused { 0.95 } else { 0.6 }),
+        false,
+    );
+    if focused {
+        out.ring(bar, bar.h / 2.);
+    }
+    out.control(Target::FeedSearch, bar, true);
+    let mic_focused = state.focus == Target::FeedVoice;
+    mic_button(out, assets, mic, mic_focused, false);
+    if mic_focused {
+        out.ring(mic, mic.h / 2.);
+    }
+    out.control(Target::FeedVoice, mic, true);
+    y + SEARCH_BAR_HEIGHT + 44.
+}
+
 /// Search: a query field over a grid of TMDB posters, on a dimmed Home.
 fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
     use crate::feeds::{
@@ -1297,7 +1385,8 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
         return;
     };
     out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x080b12, 0.94));
-    let field = Rect::new(84., 140., 1752., 76.);
+    let mic = Rect::new(HOME_STRIP_RIGHT - 76., 140., 76., 76.);
+    let field = Rect::new(84., 140., mic.x - 16. - 84., 76.);
     let focused = state.focus == Target::SearchField;
     out.draw.push(Draw::RoundedGradient(
         field,
@@ -1332,7 +1421,15 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
         out.ring(field, 38.);
     }
     out.control(Target::SearchField, field, false);
-    let status = if search.loading && search.results.is_empty() {
+    let mic_focused = state.focus == Target::SearchVoice;
+    mic_button(out, assets, mic, mic_focused, search.listening);
+    if mic_focused {
+        out.ring(mic, mic.h / 2.);
+    }
+    out.control(Target::SearchVoice, mic, false);
+    let status = if search.listening {
+        Some("Listening... speak now".to_owned())
+    } else if search.loading && search.results.is_empty() {
         Some("Searching...".to_owned())
     } else if let Some(error) = &search.error {
         Some(error.clone())

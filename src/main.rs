@@ -337,6 +337,13 @@ fn effects(
                     }
                 }
             }
+            Effect::VoiceSearch(id) => {
+                if platform.webos {
+                    platform.send(Request::Voice(id));
+                } else {
+                    state.voice_result(id, Err("voice search works on the TV".into()));
+                }
+            }
             Effect::Quit => return false,
             Effect::Recent {
                 generation,
@@ -969,6 +976,9 @@ fn run() -> Result<(), String> {
     let mut initial_focus = options.script.is_empty();
     // When to ask for the inventory again after a failed load (State::inventory_failed).
     let mut inventory_retry: Option<Instant> = None;
+    // A mic press left from before this start must not set Luma listening.
+    let _ = std::fs::remove_file(feeds::VOICE_TRIGGER);
+    let mut voice_trigger = true;
     let scripted_input = !options.script.is_empty();
     let mut scene = compose(
         &mut state,
@@ -1039,6 +1049,12 @@ fn run() -> Result<(), String> {
                         initial_focus = false;
                     }
                 }
+                Response::Voice(id, result) => {
+                    if let Err(error) = &result {
+                        eprintln!("Luma voice search: {error}");
+                    }
+                    state.voice_result(id, result);
+                }
                 Response::Launched(result) => {
                     state.launching = false;
                     match result {
@@ -1078,6 +1094,27 @@ fn run() -> Result<(), String> {
         }
         weather_tick(&mut state, &weather_service, visible);
         feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
+        // The remote's mic button, through LG Input Hook (feeds.md). A press made elsewhere
+        // brings Home forward; one that finds Luma hidden is dropped rather than kept for later.
+        if webos && voice_trigger && std::path::Path::new(feeds::VOICE_TRIGGER).exists() {
+            if let Err(error) = std::fs::remove_file(feeds::VOICE_TRIGGER) {
+                // Never listen again and again on a file that cannot go away.
+                eprintln!("Luma voice trigger: {error}; mic button disabled");
+                voice_trigger = false;
+            } else if visible {
+                if state.page != state::Page::Home && state.overlay.is_none() {
+                    state.open(0);
+                }
+                let pending = state.start_voice();
+                running &= effects(
+                    pending,
+                    &mut state,
+                    &platform,
+                    &preferences_path,
+                    &weather_service,
+                );
+            }
+        }
         // Rebuild hit regions before input whenever inventory/layout changed.
         if state.dirty {
             scene = compose(&mut state, &assets, pill, pill_width, now);
