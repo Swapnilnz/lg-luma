@@ -78,15 +78,18 @@ pub struct Feeds {
     pub near: BTreeSet<usize>,
     /// When each poster arrived, while it is still fading in.
     pub arrived: HashMap<String, Instant>,
+    /// The "Keep loaded posters" setting last sent to the worker.
+    pub keep: bool,
 }
 
 impl Feeds {
-    /// Artwork URLs of the rows near the screen, and of pinned rows.
+    /// Artwork URLs Home holds on to: every row's when loaded posters are kept, otherwise
+    /// those of the rows near the screen and of pinned rows.
     pub fn wanted_images(&self) -> HashSet<&String> {
         self.rows
             .iter()
             .enumerate()
-            .filter(|(index, row)| row.pinned || self.near.contains(index))
+            .filter(|(index, row)| self.keep || row.pinned || self.near.contains(index))
             .flat_map(|(_, row)| &row.items)
             .filter_map(|item| item.image.as_ref())
             .collect()
@@ -134,15 +137,33 @@ impl Feeds {
     }
 
     /// The rows whose cards lie within about two rows of the screen, from the last scene.
-    pub fn near_rows(controls: &[Control]) -> BTreeSet<usize> {
-        controls
+    /// The rows on screen, the row just above, and `ahead` rows below, from the last scene.
+    pub fn near_rows(&self, controls: &[Control], ahead: usize) -> BTreeSet<usize> {
+        let visible: BTreeSet<usize> = controls
             .iter()
             .filter_map(|control| match control.target {
-                Target::Feed(row, _) if control.rect.y > -700. && control.rect.y < 1800. => {
+                Target::Feed(row, _)
+                    if control.rect.y + control.rect.h > 108.8 && control.rect.y < 1054. =>
+                {
                     Some(row)
                 }
                 _ => None,
             })
+            .collect();
+        let (Some(&first), Some(&last)) = (visible.first(), visible.last()) else {
+            return BTreeSet::new();
+        };
+        // Count only rows that are drawn: finished empty rows take no space on Home.
+        let shown: Vec<usize> = (0..self.rows.len())
+            .filter(|row| self.rows[*row].shown())
+            .collect();
+        let position = |row: usize| shown.iter().position(|shown| *shown == row);
+        let (Some(start), Some(end)) = (position(first), position(last)) else {
+            return visible;
+        };
+        shown[start.saturating_sub(1)..(end + 1 + ahead).min(shown.len())]
+            .iter()
+            .copied()
             .collect()
     }
 

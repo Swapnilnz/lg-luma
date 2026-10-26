@@ -273,7 +273,8 @@ pub enum Command {
     /// Home came back on screen.
     Refresh,
     /// The rows on or near screen: only their artwork is downloaded and kept.
-    Near(Vec<usize>),
+    /// With `keep`, posters already sent stay with Home wherever it scrolls.
+    Near { rows: Vec<usize>, keep: bool },
 }
 
 pub enum Response {
@@ -297,8 +298,8 @@ impl Service {
         Self { sender, receiver }
     }
 
-    pub fn near(&self, rows: Vec<usize>) {
-        let _ = self.sender.send(Command::Near(rows));
+    pub fn near(&self, rows: Vec<usize>, keep: bool) {
+        let _ = self.sender.send(Command::Near { rows, keep });
     }
 
     pub fn refresh(&self) {
@@ -563,6 +564,8 @@ struct Worker {
     /// Rows whose artwork Home wants.
     near: HashSet<usize>,
     near_changed: bool,
+    /// "Keep loaded posters": Home never drops a poster, so neither does this worker.
+    keep: bool,
 }
 
 impl Worker {
@@ -619,6 +622,7 @@ impl Worker {
             // Until Home says which rows it shows: the top few.
             near: (0..4).collect(),
             near_changed: false,
+            keep: false,
         }
     }
 
@@ -653,26 +657,16 @@ impl Worker {
                     self.refocus = true;
                 }
             }
-            Command::Near(rows) => {
+            Command::Near { rows, keep } => {
                 let near: HashSet<usize> = rows.into_iter().collect();
-                if near != self.near {
+                if near != self.near || keep != self.keep {
                     self.near = near;
+                    self.keep = keep;
                     self.near_changed = true;
                     // Home dropped the artwork of rows outside every set it sends; forget it
                     // here too, even when a later set brings those rows back, so it is resent.
-                    let keep: HashSet<String> = self
-                        .config
-                        .rows
-                        .iter()
-                        .zip(&self.items)
-                        .enumerate()
-                        .filter(|(index, (row, _))| {
-                            self.near.contains(index) || is_trakt(&row.source)
-                        })
-                        .flat_map(|(_, (_, items))| items)
-                        .filter_map(|item| item.image.clone())
-                        .collect();
-                    self.images.retain(|url| keep.contains(url));
+                    let held: HashSet<String> = self.row_images(true).into_iter().collect();
+                    self.images.retain(|url| held.contains(url));
                 }
             }
         }
@@ -824,28 +818,33 @@ impl Worker {
     }
 
     /// Downloads artwork no earlier pass has fetched, newest rows first.
-    fn load_images(&mut self) -> bool {
-        // Only what Home is shown: signed-out Trakt rows are published without items, and Home
-        // drops their artwork, so it is fetched again after sign-in.
-        self.near_changed = false;
+    /// Artwork URLs of the rows near the screen and of Trakt rows, which are downloaded; with
+    /// `held`, also every row's when Home keeps loaded posters, which are not forgotten.
+    /// Signed-out Trakt rows are published without items and Home drops their artwork, so it
+    /// is never counted and is fetched again after sign-in.
+    fn row_images(&self, held: bool) -> Vec<String> {
         let signed_in = self.signed_in();
-        let wanted: Vec<String> = self
-            .config
+        self.config
             .rows
             .iter()
             .zip(&self.items)
             .enumerate()
             .filter(|(index, (row, _))| {
                 // Trakt rows (Continue Watching) keep their posters wherever Home is scrolled.
-                (self.near.contains(index) || is_trakt(&row.source))
+                (self.near.contains(index) || is_trakt(&row.source) || (held && self.keep))
                     && (signed_in || !is_trakt(&row.source))
             })
             .flat_map(|(_, (_, items))| items)
             .filter_map(|item| item.image.clone())
-            .collect();
-        let current: HashSet<&String> = wanted.iter().collect();
-        self.images.retain(|url| current.contains(url));
-        self.image_retry.retain(|url, _| current.contains(url));
+            .collect()
+    }
+
+    fn load_images(&mut self) -> bool {
+        self.near_changed = false;
+        let wanted = self.row_images(false);
+        let held: HashSet<String> = self.row_images(true).into_iter().collect();
+        self.images.retain(|url| held.contains(url));
+        self.image_retry.retain(|url, _| held.contains(url));
         let now = Instant::now();
         for url in &wanted {
             if self.image_retry.get(url).is_some_and(|retry| now < *retry) {

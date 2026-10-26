@@ -2181,6 +2181,10 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                 ),
             ]
             .into_iter()
+            .map(|(index, key, icon, value, chevron)| {
+                (index, language.t(key), icon, value, chevron)
+            })
+            .chain(feed_settings(state))
             .enumerate()
             {
                 row(
@@ -2190,7 +2194,7 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                     Row {
                         target: Target::Setting(index),
                         rect: Rect::new(640., 164.8 + position as f32 * 84. - s, 1120., 72.),
-                        title: language.t(key),
+                        title: key,
                         icon: Some(icon),
                         value,
                         description: None,
@@ -2350,6 +2354,40 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
             );
         }
     }
+}
+
+/// Settings rows for the Home feed posters, shown when feeds are configured.
+fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> {
+    if state.feeds.rows.is_empty() {
+        return vec![];
+    }
+    let language = state.preferences.language;
+    vec![
+        (
+            8,
+            "Keep loaded posters",
+            "eye",
+            Some(if state.preferences.feed_keep_posters {
+                language.t("stateOn")
+            } else {
+                language.t("stateOff")
+            }),
+            false,
+        ),
+        (
+            9,
+            "Preload rows",
+            "grid",
+            Some(match state.preferences.feed_preload_rows {
+                0 => "Off",
+                1 => "1 row",
+                2 => "2 rows",
+                3 => "3 rows",
+                _ => "4 rows",
+            }),
+            false,
+        ),
+    ]
 }
 
 fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {

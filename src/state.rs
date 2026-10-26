@@ -1507,6 +1507,11 @@ impl State {
                         return vec![];
                     }
                     2 => self.preferences.reduced_motion = !self.preferences.reduced_motion,
+                    8 => self.preferences.feed_keep_posters = !self.preferences.feed_keep_posters,
+                    9 => {
+                        self.preferences.feed_preload_rows =
+                            (self.preferences.feed_preload_rows + 1) % 5;
+                    }
                     4 => {
                         self.subpage = Some(Subpage::Language);
                         self.focus = Target::Choice(self.preferences.language.index());

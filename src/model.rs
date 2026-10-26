@@ -115,6 +115,10 @@ pub struct Preferences {
     /// Applied at launch because MSAA is selected when SDL creates the GL window.
     #[serde(deserialize_with = "crate::text_rendering::deserialize")]
     pub text_rendering: crate::text_rendering::TextRendering,
+    /// Feed posters stay in memory once downloaded, wherever Home is scrolled.
+    pub feed_keep_posters: bool,
+    /// Feed rows below the screen whose posters load in advance.
+    pub feed_preload_rows: u8,
 }
 
 impl Default for Preferences {
@@ -136,6 +140,8 @@ impl Default for Preferences {
             temperature_unit: Unit::Celsius,
             language: Language::En,
             text_rendering: crate::text_rendering::TextRendering::default(),
+            feed_keep_posters: true,
+            feed_preload_rows: 2,
         }
     }
 }

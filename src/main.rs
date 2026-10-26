@@ -473,12 +473,20 @@ fn feeds_tick(
         service.refresh();
     }
     state.feeds.visible = home;
-    // Artwork follows the rows on screen; other pages keep the last set.
+    // Artwork follows the rows on screen and the preload setting; other pages keep the last set.
+    let keep = state.preferences.feed_keep_posters;
     if home {
-        let near = feeds::Feeds::near_rows(controls);
-        if !near.is_empty() && near != state.feeds.near {
-            service.near(near.iter().copied().collect());
+        let ahead = usize::from(state.preferences.feed_preload_rows);
+        let near = state.feeds.near_rows(controls, ahead);
+        let near = if near.is_empty() {
+            state.feeds.near.clone()
+        } else {
+            near
+        };
+        if near != state.feeds.near || keep != state.feeds.keep {
+            service.near(near.iter().copied().collect(), keep);
             state.feeds.near = near;
+            state.feeds.keep = keep;
             state.feeds.prune_images();
         }
     }
