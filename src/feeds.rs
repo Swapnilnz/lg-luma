@@ -45,7 +45,13 @@ pub struct Search {
     pub listening: bool,
     /// The voice request whose reply this Search is waiting for.
     pub voice: u64,
+    /// When Search opened, for its entrance, and when listening began, for the mic's pulse.
+    pub opened: Option<Instant>,
+    pub listening_since: Option<Instant>,
 }
+
+/// How long Search takes to rise into place.
+pub const SEARCH_ENTRANCE: Duration = Duration::from_millis(400);
 
 /// Created by the remote's mic button through LG Input Hook (see feeds.md): Luma then listens.
 pub const VOICE_TRIGGER: &str = "/tmp/luma-voice-search";
@@ -157,6 +163,16 @@ impl Feeds {
         };
         let t = (arrived.elapsed().as_secs_f32() / REVEAL.as_secs_f32()).clamp(0., 1.);
         1. - (1. - t).powi(3)
+    }
+
+    /// Whether Search is rising into place or listening, so it keeps redrawing.
+    pub fn search_animating(&self) -> bool {
+        self.search.as_ref().is_some_and(|search| {
+            search.listening
+                || search.opened.is_some_and(|opened| {
+                    opened.elapsed() < SEARCH_ENTRANCE + Duration::from_millis(50)
+                })
+        })
     }
 
     /// Whether a poster is still fading in, so Home keeps redrawing.
@@ -379,6 +395,7 @@ impl State {
         self.moving = None;
         self.feeds.search = Some(Search {
             restore: Some(self.focus.clone()),
+            opened: Some(Instant::now()),
             ..Search::default()
         });
         self.focus = Target::SearchField;
@@ -390,7 +407,16 @@ impl State {
     pub fn close_search(&mut self) {
         let restore = self.feeds.search.take().and_then(|search| search.restore);
         self.feeds.prune_images();
-        self.focus = restore.unwrap_or(Target::FeedSearch);
+        self.focus = match restore {
+            // The bar may be hidden from Home (Settings): fall back to the first card.
+            Some(Target::FeedSearch | Target::FeedVoice) | None
+                if !self.preferences.feed_search_bar =>
+            {
+                self.first_content()
+            }
+            Some(target) => target,
+            None => Target::FeedSearch,
+        };
         self.reconcile_focus();
         self.pointer = false;
         self.dirty = true;
@@ -515,6 +541,7 @@ impl State {
         self.feeds.voice_requests += 1;
         let id = self.feeds.voice_requests;
         search.listening = true;
+        search.listening_since = Some(Instant::now());
         search.voice = id;
         search.error = None;
         self.focus = Target::SearchVoice;
@@ -552,11 +579,17 @@ impl State {
                 vec![]
             }
             Target::SearchVoice => self.start_voice(),
-            Target::SearchResult(index) if !self.launching => search
-                .results
-                .get(index)
-                .map(|item| vec![Effect::LaunchTitle(item.link.clone())])
-                .unwrap_or_default(),
+            Target::SearchResult(index) if !self.launching => {
+                let link = search.results.get(index).map(|item| item.link.clone());
+                match link {
+                    // Search is done once a title opens: Home is back as it was on return.
+                    Some(link) => {
+                        self.close_search();
+                        vec![Effect::LaunchTitle(link)]
+                    }
+                    None => vec![],
+                }
+            }
             _ => vec![],
         })
     }

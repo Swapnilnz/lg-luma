@@ -255,6 +255,9 @@ impl State {
         if self.feeds.fading() || self.feeds.finish_fades() {
             self.dirty = true;
         }
+        if self.feeds.search_animating() && !self.preferences.reduced_motion {
+            self.dirty = true;
+        }
         let recents_open = self.recents_open();
         if recents_open || self.recents.visibility > 0. {
             self.dirty |= self.recents.animate(
@@ -311,6 +314,7 @@ impl State {
             || self.previous_background.is_some()
             || self.panel_started.is_some()
             || self.feeds.fading()
+            || (self.feeds.search_animating() && !self.preferences.reduced_motion)
             || (!self.preferences.reduced_motion
                 && self
                     .notice
@@ -1573,6 +1577,7 @@ impl State {
                     }
                     2 => self.preferences.reduced_motion = !self.preferences.reduced_motion,
                     8 => self.preferences.feed_keep_posters = !self.preferences.feed_keep_posters,
+                    10 => self.preferences.feed_search_bar = !self.preferences.feed_search_bar,
                     9 => {
                         self.preferences.feed_preload_rows =
                             (self.preferences.feed_preload_rows + 1) % 5;

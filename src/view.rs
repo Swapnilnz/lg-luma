@@ -943,7 +943,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     out.draw.push(Draw::EdgeFadeX(None));
     out.draw.push(Draw::Clip(Some(state.content_viewport())));
     let mut feeds_y = 544.8 + grid_height + 41.6 - s;
-    if state.feeds.can_search {
+    if state.feeds.can_search && state.preferences.feed_search_bar {
         feeds_y = search_bar(out, state, assets, feeds_y);
     }
     let input_y = feed_rows(out, state, assets, feeds_y);
@@ -1279,7 +1279,42 @@ fn poster(
 const SEARCH_BAR_HEIGHT: f32 = 72.;
 
 /// A round microphone button.
-fn mic_button(out: &mut Scene, assets: &Assets, rect: Rect, focused: bool, listening: bool) {
+/// A round microphone button. `listening` is how long it has listened, in seconds: it then
+/// glows blue with rings rippling out from it.
+fn mic_button(
+    out: &mut Scene,
+    assets: &Assets,
+    rect: Rect,
+    focused: bool,
+    listening: Option<f32>,
+    reduced_motion: bool,
+) {
+    if let Some(time) = listening {
+        let radius = rect.h / 2.;
+        if reduced_motion {
+            out.shape(rect.inset(-10.), radius + 10., c(0x3d6fd9, 0.22));
+        } else {
+            // A slow breath behind the button, and two rings rippling out half a beat apart.
+            let breath = 0.5 + 0.5 * (time * 3.9).sin();
+            out.shape(
+                rect.inset(-12.),
+                radius + 12.,
+                c(0x3d6fd9, 0.12 + 0.14 * breath),
+            );
+            for ring in 0..2 {
+                let phase = (time / 1.6 + ring as f32 * 0.5).fract();
+                let grow = 8. + phase * 34.;
+                let eased = 1. - (1. - phase).powi(2);
+                out.border(
+                    rect.inset(-grow),
+                    radius + grow,
+                    2.5,
+                    c(0x8fb0ff, 0.55 * (1. - eased)),
+                );
+            }
+        }
+    }
+    let listening = listening.is_some();
     out.shadow(rect, rect.h / 2., if focused { 30. } else { 14. }, 4., 0.2);
     if focused {
         out.draw.push(Draw::RoundedGradient(
@@ -1368,7 +1403,7 @@ fn search_bar(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
     }
     out.control(Target::FeedSearch, bar, true);
     let mic_focused = state.focus == Target::FeedVoice;
-    mic_button(out, assets, mic, mic_focused, false);
+    mic_button(out, assets, mic, mic_focused, None, true);
     if mic_focused {
         out.ring(mic, mic.h / 2.);
     }
@@ -1384,9 +1419,21 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
     let Some(search) = &state.feeds.search else {
         return;
     };
+    let reduced_motion = state.preferences.reduced_motion;
+    // Entrance: Home dims away as the search field and results rise gently into place.
+    let progress = if reduced_motion {
+        1.
+    } else {
+        search.opened.map_or(1., |opened| {
+            (opened.elapsed().as_secs_f32() / crate::feeds::SEARCH_ENTRANCE.as_secs_f32()).min(1.)
+        })
+    };
+    let entrance = 1. - (1. - progress).powi(3);
+    let lift = (1. - entrance) * 28.;
+    let start = out.draw.len();
     out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x080b12, 0.94));
-    let mic = Rect::new(HOME_STRIP_RIGHT - 76., 140., 76., 76.);
-    let field = Rect::new(84., 140., mic.x - 16. - 84., 76.);
+    let mic = Rect::new(HOME_STRIP_RIGHT - 76., 140. + lift, 76., 76.);
+    let field = Rect::new(84., 140. + lift, mic.x - 16. - 84., 76.);
     let focused = state.focus == Target::SearchField;
     out.draw.push(Draw::RoundedGradient(
         field,
@@ -1422,7 +1469,11 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
     }
     out.control(Target::SearchField, field, false);
     let mic_focused = state.focus == Target::SearchVoice;
-    mic_button(out, assets, mic, mic_focused, search.listening);
+    let listened = search
+        .listening_since
+        .filter(|_| search.listening)
+        .map(|since| since.elapsed().as_secs_f32());
+    mic_button(out, assets, mic, mic_focused, listened, reduced_motion);
     if mic_focused {
         out.ring(mic, mic.h / 2.);
     }
@@ -1447,7 +1498,7 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
     if let Some(status) = status {
         out.text(
             status,
-            Rect::new(field.x + 6., SEARCH_TOP, 1200., 26.),
+            Rect::new(field.x + 6., SEARCH_TOP + lift, 1200., 26.),
             text(18.4, 450, 0.),
             c(0xeeeeee, 0.6),
             false,
@@ -1460,7 +1511,7 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
         let row = index / SEARCH_COLUMNS;
         let rect = Rect::new(
             84. + column as f32 * CARD_PITCH,
-            SEARCH_TOP + row as f32 * SEARCH_ROW - search.scroll,
+            SEARCH_TOP + row as f32 * SEARCH_ROW - search.scroll + lift,
             CARD_WIDTH,
             CARD_HEIGHT,
         );
@@ -1476,6 +1527,9 @@ fn search_overlay(out: &mut Scene, state: &State, assets: &Assets) {
         }
     }
     out.draw.push(Draw::Clip(None));
+    if entrance < 1. {
+        out.fade(start, entrance, 1.);
+    }
 }
 
 struct WeatherSummary {
@@ -2611,6 +2665,21 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
             false,
         ),
     ]
+    .into_iter()
+    .chain(state.feeds.can_search.then(|| {
+        (
+            10,
+            "Search bar on Home",
+            "search",
+            Some(if state.preferences.feed_search_bar {
+                language.t("stateOn")
+            } else {
+                language.t("stateOff")
+            }),
+            false,
+        )
+    }))
+    .collect()
 }
 
 fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {

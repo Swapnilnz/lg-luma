@@ -119,6 +119,8 @@ pub struct Preferences {
     pub feed_keep_posters: bool,
     /// Feed rows below the screen whose posters load in advance.
     pub feed_preload_rows: u8,
+    /// The search bar and mic button above Home's feed rows.
+    pub feed_search_bar: bool,
 }
 
 impl Default for Preferences {
@@ -142,6 +144,7 @@ impl Default for Preferences {
             text_rendering: crate::text_rendering::TextRendering::default(),
             feed_keep_posters: true,
             feed_preload_rows: 2,
+            feed_search_bar: true,
         }
     }
 }
