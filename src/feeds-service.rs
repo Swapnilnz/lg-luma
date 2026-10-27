@@ -58,8 +58,12 @@ pub struct Config {
     /// Remote keys (SDL keycodes or scancodes, as Luma logs them) that open Search.
     pub search_keys: Vec<i32>,
     /// Row sources whose titles take turns in the Top Shelf banner. Default: the Trakt
-    /// Continue Watching, Up Next and Watchlist rows.
+    /// Continue Watching, Up Next and Watchlist rows. With the Top Shelf on, these rows are
+    /// shown in it instead of as rows.
     pub hero: Vec<String>,
+    /// Row sources shown as small posters on the Top Shelf instead of as rows. Default:
+    /// `trakt:calendar` and `smart:new_season`.
+    pub shelf: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -156,6 +160,24 @@ impl Config {
         } else {
             self.hero.iter().any(|hero| hero == source)
         }
+    }
+
+    /// Whether a row's titles appear as small posters on the Top Shelf.
+    fn shelf_source(&self, source: &str) -> bool {
+        if self.shelf.is_empty() {
+            matches!(
+                source,
+                "trakt:calendar" | "smart:new_season" | "smart:new_seasons"
+            )
+        } else {
+            self.shelf.iter().any(|shelf| shelf == source)
+        }
+    }
+
+    /// Rows whose posters stay loaded wherever Home is scrolled: Trakt's, and those the Top
+    /// Shelf shows (it shows them all at once).
+    fn always_loaded(&self, source: &str) -> bool {
+        is_trakt(source) || self.hero_source(source) || self.shelf_source(source)
     }
 
     pub fn trakt_configured(&self) -> bool {
@@ -293,15 +315,17 @@ pub fn initial_rows(config: &Config, saved: &Saved) -> Vec<Row> {
                     .title
                     .clone()
                     .unwrap_or_else(|| static_title(&row.title)),
-                pinned: is_trakt(&row.source),
+                pinned: config.always_loaded(&row.source),
                 hero: config.hero_source(&row.source),
+                extra: config.shelf_source(&row.source),
                 status: Status::Ready,
                 items: saved.items.clone(),
             },
             None => Row {
                 title: static_title(&row.title),
-                pinned: is_trakt(&row.source),
+                pinned: config.always_loaded(&row.source),
                 hero: config.hero_source(&row.source),
+                extra: config.shelf_source(&row.source),
                 status: Status::Loading,
                 items: vec![],
             },
@@ -1033,6 +1057,8 @@ fn details_from(kind: Kind, value: &Value) -> Details {
         genres,
         backdrop: path(value.get("backdrop_path"))
             .map(|path| format!("https://image.tmdb.org/t/p/w1280{path}")),
+        landscape: path(value.get("backdrop_path"))
+            .map(|path| format!("https://image.tmdb.org/t/p/w780{path}")),
         logo,
         trailer,
     }
@@ -1057,6 +1083,11 @@ fn details_worker(key: &str, links: mpsc::Receiver<String>, responses: mpsc::Sen
         let images: Vec<(String, String, u32, u32)> = result
             .as_ref()
             .map(|details| {
+                // The wide card's artwork first: focus shows it as soon as it lands.
+                let landscape = details
+                    .landscape
+                    .clone()
+                    .map(|url| (format!("feed:{url}"), url, 640, 360));
                 let backdrop = details
                     .backdrop
                     .clone()
@@ -1065,7 +1096,7 @@ fn details_worker(key: &str, links: mpsc::Receiver<String>, responses: mpsc::Sen
                     .logo
                     .clone()
                     .map(|url| (format!("logo:{url}"), url, 640, 260));
-                backdrop.into_iter().chain(logo).collect()
+                landscape.into_iter().chain(logo).chain(backdrop).collect()
             })
             .unwrap_or_default();
         if let Err(error) = &result {
@@ -1402,7 +1433,12 @@ fn title_artwork(details: &Details) -> Vec<(String, String, (u32, u32), usize)> 
         .logo
         .clone()
         .map(|url| (format!("logo:{url}"), url, (640, 260), 4 * IMAGE_LIMIT));
-    backdrop.into_iter().chain(logo).collect()
+    // The landscape cut too, so a card of this title widens as soon as it is focused.
+    let landscape = details
+        .landscape
+        .clone()
+        .map(|url| (format!("feed:{url}"), url, (640, 360), IMAGE_LIMIT));
+    backdrop.into_iter().chain(logo).chain(landscape).collect()
 }
 
 /// Title pages: a title's data, then its artwork, cast photos and posters; and a season's
@@ -1939,8 +1975,9 @@ impl Worker {
                     title: self.titles[index]
                         .clone()
                         .unwrap_or_else(|| static_title(&row.title)),
-                    pinned: is_trakt(&row.source),
+                    pinned: self.config.always_loaded(&row.source),
                     hero: self.config.hero_source(&row.source),
+                    extra: self.config.shelf_source(&row.source),
                     status,
                     items,
                 }
@@ -1966,7 +2003,9 @@ impl Worker {
             .enumerate()
             .filter(|(index, (row, _))| {
                 // Trakt rows (Continue Watching) keep their posters wherever Home is scrolled.
-                (self.near.contains(index) || is_trakt(&row.source) || (held && self.keep))
+                (self.near.contains(index)
+                    || self.config.always_loaded(&row.source)
+                    || (held && self.keep))
                     && (signed_in || !needs_trakt(&row.source))
             })
             .flat_map(|(_, (_, items))| items)

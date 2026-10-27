@@ -385,11 +385,24 @@ pub fn scene_with_pill(
     }
     out.draw.push(Draw::EdgeFade(None));
     out.draw.push(Draw::Clip(None));
-    header(&mut out, state, assets, now, pill_x, pill_width);
+    // The Top Shelf fills the screen when it has focus: the header steps aside for it.
+    let shelf_focused = state.page == Page::Home
+        && state.feeds.hero.is_some()
+        && matches!(
+            state.focus,
+            Target::Hero | Target::HeroExtra(_) | Target::HeroMore
+        );
+    if !shelf_focused {
+        header(&mut out, state, assets, now, pill_x, pill_width);
+    }
     footer(&mut out, state, assets);
     if state.feeds.search.is_some() {
         out.controls.clear();
         search_overlay(&mut out, state, assets);
+    }
+    if state.feeds.sheet.is_some() {
+        out.controls.clear();
+        shelf_sheet(&mut out, state, assets);
     }
     if state.feeds.title.is_some() {
         out.controls.clear();
@@ -975,7 +988,8 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         feeds_y = search_bar(out, state, assets, feeds_y);
     }
     if state.feeds.hero.is_some() {
-        feeds_y = hero_banner(out, state, assets, feeds_y);
+        // The greeting, favourites and search bar fill the first screen; the banner the next.
+        feeds_y = hero_banner(out, state, assets, feeds_y.max(1080. - s));
     }
     let (input_y, previewed_row) = feed_rows(out, state, assets, feeds_y);
     let inputs: Vec<_> = state
@@ -1120,10 +1134,12 @@ fn preview_details(out: &mut Scene, state: &State, progress: f32) {
     // Rises a little as it appears, like the rest of Apple TV's motion.
     let lift = (1. - progress) * 18.;
     let x = 84.;
-    let logo = details
-        .and_then(|details| details.logo.as_ref())
-        .and_then(|url| Some((state.feeds.images.get(url)?, url)));
-    if let Some((image, url)) = logo {
+    let logo_url = details.and_then(|details| details.logo.as_ref());
+    let logo = logo_url.and_then(|url| Some((state.feeds.images.get(url)?, url)));
+    if logo.is_none() && logo_url.is_some() && preview.shown.elapsed() < SKELETON_WAIT {
+        // A logo is on its way: its shape, not the title in plain text first.
+        skeleton(out, Rect::new(x, 190. + lift, 460., 130.), 14.);
+    } else if let Some((image, url)) = logo {
         let (width, height) = (image.pixels.width() as f32, image.pixels.height() as f32);
         let scale = (560. / width).min(170. / height);
         out.draw.push(Draw::AppImage(
@@ -1203,6 +1219,13 @@ fn preview_backdrop(out: &mut Scene, state: &State) {
         .and_then(|details| details.backdrop.as_ref())
         .and_then(|url| Some((state.feeds.images.get(url)?, url)))
     else {
+        // Still loading: a dark stand-in, so Home does not show through half faded.
+        out.draw.push(Draw::RoundedGradient(
+            Rect::new(0., 0., 1920., 1080.),
+            0.,
+            c(0x1a1f25, 0.92 * progress),
+            c(0x080b12, 0.96 * progress),
+        ));
         return;
     };
     let alpha = progress * state.feeds.reveal(url, reduced_motion);
@@ -1249,7 +1272,7 @@ fn feed_rows(
     use crate::feeds::{CARD_HEIGHT, CARD_PITCH, CARD_RADIUS, CARD_WIDTH, Status};
     let mut focused_row = None;
     for (row_index, row) in state.feeds.rows.iter().enumerate() {
-        if !row.shown() {
+        if !state.feeds.row_visible(row_index) {
             continue;
         }
         let row_start = out.draw.len();
@@ -1359,14 +1382,15 @@ fn feed_rows(
             HOME_FADE_RIGHT,
         ])));
         let mut focused_card = None;
+        // Cards sit CARD_PITCH apart; a widened one pushes those after it along.
+        let mut x = 84. - scroll;
         for (index, item) in row.items.iter().enumerate() {
-            let rect = Rect::new(
-                84. + index as f32 * CARD_PITCH - scroll,
-                cards_y,
-                CARD_WIDTH,
-                CARD_HEIGHT,
-            );
             let target = Target::Feed(row_index, index);
+            let width = state
+                .feeds
+                .card_width(&target, state.preferences.reduced_motion);
+            let rect = Rect::new(x, cards_y, width, CARD_HEIGHT);
+            x += width + (CARD_PITCH - CARD_WIDTH);
             out.control(
                 target.clone(),
                 Rect::new(rect.x, rect.y, rect.w, rect.h + caption),
@@ -1417,7 +1441,14 @@ fn feed_card(
     let start = out.draw.len();
     let focused = state.focus == *target;
     let scale = state.feeds.scale(target, state.preferences.reduced_motion);
-    let drawn = poster(out, state, assets, item, rect, focused, scale);
+    let wide = state
+        .feeds
+        .wide_fraction(target, state.preferences.reduced_motion);
+    let drawn = if wide > 0. {
+        wide_card(out, state, assets, item, rect, focused, scale, wide)
+    } else {
+        poster(out, state, assets, item, rect, focused, scale)
+    };
     if state.pressed.as_ref() == Some(target) {
         out.fade(start, 1., 0.85);
     }
@@ -1434,6 +1465,79 @@ fn feed_card(
             false,
         );
     }
+}
+
+/// A focused card widened to landscape: the title's backdrop with its logo, fading in over
+/// the poster as the card widens.
+#[allow(clippy::too_many_arguments)]
+fn wide_card(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+    focused: bool,
+    scale: f32,
+    wide: f32,
+) -> Rect {
+    use crate::feeds::CARD_RADIUS;
+    let drawn = poster(out, state, assets, item, rect, false, scale);
+    let details = state.feeds.details.get(&item.link);
+    if let Some((image, _)) = held_image(state, details.and_then(|d| d.landscape.as_ref())) {
+        out.draw
+            .push(Draw::AppImage(image.clone(), drawn, [1., 1., 1., wide]));
+    }
+    // Shade the lower part for the logo.
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(drawn.x, drawn.y + drawn.h * 0.45, drawn.w, drawn.h * 0.55),
+        CARD_RADIUS,
+        c(0x080b12, 0.),
+        c(0x080b12, 0.8 * wide),
+    ));
+    let logo = held_image(state, details.and_then(|d| d.logo.as_ref()));
+    let mark = Rect::new(
+        drawn.x + 22.,
+        drawn.y + drawn.h - 22.,
+        drawn.w * 0.55,
+        drawn.h * 0.3,
+    );
+    match logo {
+        Some((image, _)) => {
+            let (width, height) = (image.pixels.width() as f32, image.pixels.height() as f32);
+            let fit = (mark.w / width).min(mark.h / height);
+            out.draw.push(Draw::AppImage(
+                image.clone(),
+                Rect::new(mark.x, mark.y - height * fit, width * fit, height * fit),
+                [1., 1., 1., wide],
+            ));
+        }
+        None => out.text(
+            clip_words(&item.title, 30),
+            Rect::new(mark.x, mark.y - 34., drawn.w - 44., 32.),
+            text(24., 650, -0.02),
+            c(0xffffff, wide),
+            false,
+        ),
+    }
+    if let Some(progress) = item.progress {
+        let track = Rect::new(drawn.x + 16., drawn.y + drawn.h - 12., drawn.w - 32., 5.);
+        out.shape(track, 2.5, c(0x000000, 0.5));
+        out.shape(
+            Rect::new(
+                track.x,
+                track.y,
+                (track.w * progress.clamp(0., 1.)).max(5.),
+                track.h,
+            ),
+            2.5,
+            c(0xffffff, 0.95),
+        );
+    }
+    out.border(drawn, CARD_RADIUS, 1., c(0xffffff, 0.08));
+    if focused {
+        out.ring(drawn, CARD_RADIUS);
+    }
+    drawn
 }
 
 /// A poster card: the title until the poster arrives, then the poster fading in over it.
@@ -1935,8 +2039,17 @@ fn icon_button(
     rect
 }
 
-/// The Top Shelf: a full-width banner of titles from the Continue Watching, Up Next and
-/// Watchlist rows, crossfading every few seconds. Returns where the rows start below it.
+/// How long placeholders stand in for artwork still loading, before words take their place.
+const SKELETON_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// A placeholder bar where words or artwork will be, while they load.
+fn skeleton(out: &mut Scene, rect: Rect, radius: f32) {
+    out.shape(rect, radius, c(0xffffff, 0.09));
+}
+
+/// The Top Shelf: the whole second screen of Home. Titles from the Continue Watching, Up Next
+/// and Watchlist rows crossfade every few seconds; their posters run along the bottom right,
+/// with "This week" posters and an expand button above them. Returns where the rows start.
 fn hero_banner(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
     use crate::feeds::{HERO_FADE, HERO_HEIGHT};
     let Some(slides) = &state.feeds.hero else {
@@ -1954,71 +2067,182 @@ fn hero_banner(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
             .get(row)
             .and_then(|row| row.items.get(index))
     };
+    let reduced_motion = state.preferences.reduced_motion;
     let band = Rect::new(0., y, 1920., HERO_HEIGHT);
     let content = state.content_viewport();
-    // Full bleed: past the content's side margins to the screen's edges.
+    // Edge to edge and top to bottom: past the content's margins and the header's band.
     out.draw
-        .push(Draw::Clip(Some(Rect::new(0., content.y, 1920., content.h))));
-    out.shape(band, 0., c(0x080b12, 0.55));
-    let fade = slides.fade(HERO_FADE, state.preferences.reduced_motion);
+        .push(Draw::Clip(Some(Rect::new(0., 0., 1920., 1080.))));
+    out.shape(band, 0., c(0x080b12, 1.));
+    // The band first: the small posters and button pushed after it win pointer hits.
+    out.control(Target::Hero, band, true);
+    let fade = slides.fade(HERO_FADE, reduced_motion);
     if let Some(from) = slides.from.filter(|_| fade < 1.) {
-        hero_slide(out, state, assets, item_at(from), band, 1.);
+        hero_slide(out, state, item_at(from), band, 1., false);
     }
+    let waiting = slides.since.elapsed() < SKELETON_WAIT;
+    hero_slide(out, state, item_at(slides.index), band, fade, waiting);
     let focused = state.focus == Target::Hero;
-    hero_slide(out, state, assets, item_at(slides.index), band, fade);
-    // The play button belongs to the slide shown; drawn once, over both while they fade.
     if let Some(item) = item_at(slides.index) {
         icon_button(
             out,
             assets,
             &play_label(item),
             "play",
-            84.,
-            band.y + band.h - 104.,
-            60.,
+            112.,
+            band.y + 860.,
+            64.,
             focused,
         );
     }
+    // Every slide's poster along the bottom right, the current one lit and raised.
+    let (thumb_w, thumb_h, thumb_pitch) = (84., 126., 98.);
+    let strip_right = 1808.;
+    let strip_y = band.y + 1080. - 72. - thumb_h;
     let count = items.len();
-    if count > 1 {
-        for index in 0..count {
-            let dot = Rect::new(
-                1836. - (count - index) as f32 * 22. + 8.,
-                band.y + band.h - 80.,
-                10.,
-                10.,
-            );
-            out.shape(
-                dot,
-                5.,
-                c(0xffffff, if index == slides.index { 0.95 } else { 0.32 }),
-            );
+    for index in 0..count {
+        let x = strip_right - (count - index) as f32 * thumb_pitch + (thumb_pitch - thumb_w);
+        let current = index == slides.index;
+        let lift = if current { 10. } else { 0. };
+        let rect = Rect::new(x, strip_y - lift, thumb_w, thumb_h);
+        let Some(item) = item_at(index) else {
+            continue;
+        };
+        let start = out.draw.len();
+        poster(out, state, assets, item, rect, false, 1.);
+        if !current {
+            out.fade(start, 0.55, 0.7);
+        } else {
+            out.border(rect.inset(-3.), crate::feeds::CARD_RADIUS + 3., 2.5, WHITE);
         }
     }
+    // "This week": small posters and the button that shows them all.
+    let minis = state.feeds.shelf_minis();
+    if !minis.is_empty() {
+        let (mini_w, mini_h, mini_pitch) = (132., 198., 152.);
+        let more = 72.;
+        let mini_y = strip_y - 64. - mini_h;
+        let total = minis.len() as f32 * mini_pitch + more;
+        let left = strip_right - total;
+        out.text(
+            state.feeds.shelf_title(),
+            Rect::new(left, mini_y - 40., 600., 28.),
+            text(20.8, 600, -0.01),
+            c(0xffffff, 0.92),
+            false,
+        );
+        for (index, item) in minis.iter().enumerate() {
+            let rect = Rect::new(left + index as f32 * mini_pitch, mini_y, mini_w, mini_h);
+            let target = Target::HeroExtra(index);
+            let mini_focused = state.focus == target;
+            let scale = state.feeds.scale(&target, reduced_motion);
+            poster(out, state, assets, item, rect, mini_focused, scale);
+            if !item.subtitle.is_empty() {
+                out.text(
+                    clip_words(&item.subtitle, 18),
+                    Rect::new(rect.x, rect.y + rect.h + 10., rect.w + 10., 20.),
+                    text(14.4, 550, 0.),
+                    c(0xffffff, if mini_focused { 1. } else { 0.7 }),
+                    false,
+                );
+            }
+            out.control(target, rect, false);
+        }
+        let button = Rect::new(
+            left + minis.len() as f32 * mini_pitch + 4.,
+            mini_y + (mini_h - more) / 2.,
+            more - 8.,
+            more - 8.,
+        );
+        let more_focused = state.focus == Target::HeroMore;
+        out.pill(button, more_focused, false);
+        out.icon(
+            assets,
+            "more",
+            button.inset(18.),
+            if more_focused { c(0x2c2c2c, 1.) } else { WHITE },
+        );
+        if more_focused {
+            out.ring(button, button.h / 2.);
+        }
+        out.control(Target::HeroMore, button, false);
+    }
     out.draw.push(Draw::Clip(Some(content)));
-    out.control(
-        Target::Hero,
-        Rect::new(84., band.y + 24., 1664., band.h - 48.),
-        true,
-    );
-    y + HERO_HEIGHT + 44.
+    y + HERO_HEIGHT + 48.
 }
 
-/// One Top Shelf slide: backdrop, shading, logo, caption and synopsis, at `alpha`.
+/// The Top Shelf's small posters expanded: every "This week" and new-season title in a grid
+/// over a dimmed Home, like Search's results.
+fn shelf_sheet(out: &mut Scene, state: &State, assets: &Assets) {
+    use crate::feeds::{
+        CARD_HEIGHT, CARD_PITCH, CARD_WIDTH, PAGE_ENTRANCE, SEARCH_COLUMNS, SEARCH_ROW, SEARCH_TOP,
+    };
+    let Some(sheet) = &state.feeds.sheet else {
+        return;
+    };
+    let entrance = if state.preferences.reduced_motion {
+        1.
+    } else {
+        let t = (sheet.opened.elapsed().as_secs_f32() / PAGE_ENTRANCE.as_secs_f32()).min(1.);
+        1. - (1. - t).powi(3)
+    };
+    let lift = (1. - entrance) * 28.;
+    let start = out.draw.len();
+    out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x080b12, 0.94));
+    out.text(
+        &sheet.title,
+        Rect::new(84., 150. + lift, 1500., 64.),
+        text(52., 650, -0.03),
+        WHITE,
+        false,
+    );
+    out.draw
+        .push(Draw::Clip(Some(Rect::new(0., 236., 1920., 844.))));
+    let mut focused_card = None;
+    for (index, item) in sheet.items.iter().enumerate() {
+        let rect = Rect::new(
+            84. + (index % SEARCH_COLUMNS) as f32 * CARD_PITCH,
+            SEARCH_TOP + (index / SEARCH_COLUMNS) as f32 * SEARCH_ROW - sheet.scroll + lift,
+            CARD_WIDTH,
+            CARD_HEIGHT,
+        );
+        if rect.y + rect.h < 250. || rect.y > 1080. {
+            continue;
+        }
+        let target = Target::SheetItem(index);
+        out.control(target.clone(), rect, false);
+        if state.focus == target {
+            focused_card = Some((item, rect, target));
+            continue;
+        }
+        search_card(out, state, assets, item, rect, &target);
+    }
+    if let Some((item, rect, target)) = focused_card {
+        search_card(out, state, assets, item, rect, &target);
+    }
+    out.draw.push(Draw::Clip(None));
+    if entrance < 1. {
+        out.fade(start, entrance, 1.);
+    }
+}
+
+/// One Top Shelf slide, full screen: backdrop, shading, logo, caption and synopsis, at
+/// `alpha`. While its artwork loads it shows placeholders where the logo and words will be.
 fn hero_slide(
     out: &mut Scene,
     state: &State,
-    _assets: &Assets,
     item: Option<&crate::feeds::Item>,
     band: Rect,
     alpha: f32,
+    waiting: bool,
 ) {
     let Some(item) = item else {
         return;
     };
     let start = out.draw.len();
     let details = state.feeds.details.get(&item.link);
-    match held_image(state, details.and_then(|details| details.backdrop.as_ref())) {
+    let backdrop = held_image(state, details.and_then(|details| details.backdrop.as_ref()));
+    match backdrop {
         Some((image, url)) => {
             let reveal = state.feeds.reveal(url, state.preferences.reduced_motion);
             out.draw
@@ -2027,63 +2251,72 @@ fn hero_slide(
         None => out.draw.push(Draw::RoundedGradient(
             band,
             0.,
-            c(0x2a3038, 1.),
-            c(0x14181d, 1.),
+            c(0x1d2228, 1.),
+            c(0x0c0f13, 1.),
         )),
     }
-    // Blend into the page above, and darken the lower half for the words.
     out.draw.push(Draw::RoundedGradient(
-        Rect::new(0., band.y, 1920., 110.),
+        Rect::new(0., band.y, 1920., 260.),
         0.,
-        c(0x080b12, 0.5),
+        c(0x080b12, 0.55),
         c(0x080b12, 0.),
     ));
     out.draw.push(Draw::RoundedGradient(
-        Rect::new(0., band.y + band.h * 0.3, 1920., band.h * 0.7),
+        Rect::new(0., band.y + 380., 1920., 700.),
         0.,
         c(0x080b12, 0.),
-        c(0x080b12, 0.88),
+        c(0x080b12, 0.92),
     ));
-    let bottom = band.y + band.h - 132.;
-    let mut line_y = bottom;
-    let caption = if item.subtitle.is_empty() {
-        details.map(meta_line).unwrap_or_default()
+    let x = 112.;
+    // Placeholders while the details or logo are on their way, for a moment only: a logo that
+    // never arrives gives way to the title in words.
+    let loading = waiting
+        && (details.is_none()
+            || details
+                .and_then(|details| details.logo.as_ref())
+                .is_some_and(|url| !state.feeds.images.contains_key(url)));
+    if loading {
+        // The shape of what is coming, not a flash of plain text.
+        skeleton(out, Rect::new(x, band.y + 560., 460., 130.), 14.);
+        skeleton(out, Rect::new(x, band.y + 718., 360., 22.), 11.);
+        skeleton(out, Rect::new(x, band.y + 760., 880., 18.), 9.);
+        skeleton(out, Rect::new(x, band.y + 790., 700., 18.), 9.);
     } else {
-        item.subtitle.clone()
-    };
-    if let Some(overview) = details
-        .map(|details| details.overview.as_str())
-        .filter(|overview| !overview.is_empty())
-    {
-        line_y -= 60.;
+        let caption = if item.subtitle.is_empty() {
+            details.map(meta_line).unwrap_or_default()
+        } else {
+            item.subtitle.clone()
+        };
         out.text(
-            clip_words(overview, 150),
-            Rect::new(84., line_y, 980., 56.),
-            text(18.4, 400, 0.).leading(1.45),
+            caption,
+            Rect::new(x, band.y + 712., 1100., 30.),
+            text(22.4, 550, 0.),
             c(0xffffff, 0.82),
             false,
         );
-    }
-    if !caption.is_empty() {
-        line_y -= 34.;
-        out.text(
-            caption,
-            Rect::new(84., line_y, 1200., 26.),
-            text(19.2, 550, 0.),
-            c(0xffffff, 0.78),
-            false,
+        if let Some(overview) = details
+            .map(|details| details.overview.as_str())
+            .filter(|overview| !overview.is_empty())
+        {
+            out.text(
+                clip_words(overview, 190),
+                Rect::new(x, band.y + 754., 960., 84.),
+                text(20., 400, 0.).leading(1.45),
+                c(0xffffff, 0.85),
+                false,
+            );
+        }
+        title_mark(
+            out,
+            state,
+            details,
+            &item.title,
+            x,
+            band.y + 690.,
+            (620., 180.),
+            72.,
         );
     }
-    title_mark(
-        out,
-        state,
-        details,
-        &item.title,
-        84.,
-        line_y - 14.,
-        (520., 150.),
-        54.,
-    );
     out.fade_range(start, out.draw.len(), alpha, 1.);
 }
 
@@ -2190,13 +2423,14 @@ fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
             c(0xf3ddbd, 1.),
             false,
         ),
-        (None, None) => out.text(
-            "Loading...",
-            Rect::new(84., top(410.), 1100., 30.),
-            text(18.4, 450, 0.),
-            c(0xffffff, 0.55),
-            false,
-        ),
+        (None, None) => {
+            // Still loading: the shape of the details, synopsis and buttons to come.
+            skeleton(out, Rect::new(84., top(334.), 420., 20.), 10.);
+            skeleton(out, Rect::new(84., top(372.), 300., 20.), 10.);
+            skeleton(out, Rect::new(84., top(418.), 1000., 18.), 9.);
+            skeleton(out, Rect::new(84., top(448.), 940., 18.), 9.);
+            skeleton(out, Rect::new(84., top(478.), 620., 18.), 9.);
+        }
         _ => {}
     }
     if let Some(credit) = info
@@ -3862,10 +4096,22 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
 
 /// Settings rows for the Home feed posters, shown when feeds are configured.
 fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> {
-    if state.feeds.rows.is_empty() {
-        return vec![];
-    }
     let language = state.preferences.language;
+    let keep_awake = (
+        14,
+        "Keep soundbar awake",
+        "tv",
+        Some(if state.preferences.keep_awake {
+            language.t("stateOn")
+        } else {
+            language.t("stateOff")
+        }),
+        false,
+    );
+    // The soundbar keep-awake works without feeds, so its row always shows.
+    if state.feeds.rows.is_empty() {
+        return vec![keep_awake];
+    }
     vec![
         (
             8,
@@ -3923,6 +4169,18 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
             false,
         )
     }))
+    .chain(std::iter::once((
+        15,
+        "Wide poster on focus",
+        "grid",
+        Some(if state.preferences.feed_wide {
+            language.t("stateOn")
+        } else {
+            language.t("stateOff")
+        }),
+        false,
+    )))
+    .chain(std::iter::once(keep_awake))
     .chain(std::iter::once((
         13,
         "Screensaver",

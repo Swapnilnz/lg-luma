@@ -5,6 +5,7 @@
   "trakt_refresh_minutes": 30,
   "search_keys": [],
   "hero": ["trakt:continue", "trakt:watchlist"],
+  "shelf": ["trakt:calendar", "smart:new_season"],
   "trakt": {
     "client_id": "YOUR_TRAKT_CLIENT_ID"
   },

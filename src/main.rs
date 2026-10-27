@@ -432,6 +432,89 @@ fn script(
     })
 }
 
+/// A soundbar that powers down after minutes of silence (Denon's auto standby) is kept on by a
+/// quiet low tone every KEEP_AWAKE_EVERY: a 40 Hz hum about 48 dB down, too low to hear.
+/// `LUMA_KEEP_AWAKE_DB`, `LUMA_KEEP_AWAKE_HZ` and `LUMA_KEEP_AWAKE_SECONDS` tune it.
+const KEEP_AWAKE_EVERY: Duration = Duration::from_secs(120);
+const TONE_SECONDS: f32 = 2.;
+
+/// Plays the keep-awake tone when due. The audio device is opened for each tone and closed once
+/// it has played, so Luma never holds the TV's sound output between tones; it keeps running
+/// while another app is in front, which keeps the soundbar on during a pause if the TV mixes a
+/// background app's sound (not every TV does).
+fn keep_awake_tick(
+    state: &State,
+    audio: Option<&sdl2::AudioSubsystem>,
+    playing: &mut Option<(sdl2::audio::AudioQueue<i16>, Instant)>,
+    last: &mut Option<Instant>,
+) {
+    if playing
+        .as_ref()
+        .is_some_and(|(_, started)| started.elapsed().as_secs_f32() >= TONE_SECONDS + 0.6)
+    {
+        *playing = None;
+    }
+    if !state.preferences.keep_awake || playing.is_some() {
+        return;
+    }
+    let Some(audio) = audio else {
+        return;
+    };
+    let every = std::env::var("LUMA_KEEP_AWAKE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(KEEP_AWAKE_EVERY, |seconds| {
+            Duration::from_secs(seconds.max(10))
+        });
+    if last.is_some_and(|last| last.elapsed() < every) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let spec = sdl2::audio::AudioSpecDesired {
+        freq: Some(48_000),
+        channels: Some(2),
+        samples: Some(4096),
+    };
+    match audio.open_queue::<i16, _>(None, &spec) {
+        Ok(queue) => {
+            let samples = keep_awake_tone(queue.spec().freq, queue.spec().channels);
+            if let Err(error) = queue.queue_audio(&samples) {
+                eprintln!("Luma keep-awake: {error}");
+                return;
+            }
+            queue.resume();
+            *playing = Some((queue, Instant::now()));
+        }
+        Err(error) => eprintln!("Luma keep-awake: {error}"),
+    }
+}
+
+/// TONE_SECONDS of a low sine, faded in and out so it never clicks, interleaved per channel.
+fn keep_awake_tone(rate: i32, channels: u8) -> Vec<i16> {
+    let env = |name: &str, default: f32| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+    let level = 10f32.powf(env("LUMA_KEEP_AWAKE_DB", -48.).min(-20.) / 20.);
+    let hz = env("LUMA_KEEP_AWAKE_HZ", 40.).clamp(10., 200.);
+    let rate = rate.max(8000) as f32;
+    let frames = (rate * TONE_SECONDS) as usize;
+    let fade = rate * 0.25;
+    let mut samples = Vec::with_capacity(frames * usize::from(channels.max(1)));
+    for frame in 0..frames {
+        let t = frame as f32;
+        let envelope = (t / fade).min((frames as f32 - t) / fade).clamp(0., 1.);
+        let value = (t / rate * hz * std::f32::consts::TAU).sin() * level * envelope;
+        let sample = (value * f32::from(i16::MAX)) as i16;
+        for _ in 0..channels.max(1) {
+            samples.push(sample);
+        }
+    }
+    samples
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("Luma native: {error}");
@@ -784,6 +867,7 @@ fn run() -> Result<(), String> {
                 title: "Feeds".into(),
                 pinned: false,
                 hero: false,
+                extra: false,
                 status: feeds::Status::Error(error),
                 items: vec![],
             }]);
@@ -920,6 +1004,13 @@ fn run() -> Result<(), String> {
     let mut captured = None;
     let mut last_drawable = None;
     let mut events = sdl.event_pump()?;
+    // The soundbar keep-alive's audio, when the TV gives Luma any (see `keep_awake_tick`).
+    let audio = sdl
+        .audio()
+        .map_err(|error| eprintln!("Luma keep-awake: no audio output: {error}"))
+        .ok();
+    let mut tone_playing: Option<(sdl2::audio::AudioQueue<i16>, Instant)> = None;
+    let mut last_tone: Option<Instant> = None;
     // Lifecycle as Home: sam sends "relaunch" (bring the running Luma to the front) instead of
     // killing and restarting it, and "close" when it wants Luma to exit. `end_registration`
     // drops a staged Home's registration (webOS 10/11) if a relaunch did not reach the front.
@@ -1164,6 +1255,7 @@ fn run() -> Result<(), String> {
         weather_tick(&mut state, &weather_service, visible);
         feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
         state.ambient_tick(last_input.elapsed(), visible);
+        keep_awake_tick(&state, audio.as_ref(), &mut tone_playing, &mut last_tone);
         // While our screensaver is due, LG's would cut in first: hold it off, for at most an
         // hour of ours, after which LG's (and its power saving) may take over.
         if webos {

@@ -46,8 +46,13 @@ pub enum Target {
     SearchField,
     SearchVoice,
     SearchResult(usize),
-    /// The Top Shelf banner above the feed rows.
+    /// The Top Shelf banner above the feed rows, its small "This week" posters, and the
+    /// button that expands them into a grid.
     Hero,
+    HeroExtra(usize),
+    HeroMore,
+    /// A title in that grid.
+    SheetItem(usize),
     /// A title page's buttons, season pills, episodes, cast and More Like This.
     TitleButton(usize),
     TitleSeason(usize),
@@ -441,8 +446,16 @@ impl State {
         x: i32,
         y: i32,
     ) -> bool {
-        // A title page scrolls instead of the Home page beneath it.
+        // A title page scrolls instead of the Home page beneath it; so does the sheet's grid.
         if self.title_wheel(y) {
+            return false;
+        }
+        if let Some(sheet) = &mut self.feeds.sheet {
+            let rows = sheet.items.len().div_ceil(crate::feeds::SEARCH_COLUMNS);
+            let max = rows.saturating_sub(2) as f32 * crate::feeds::SEARCH_ROW;
+            sheet.scroll = (sheet.scroll - y as f32 * 90.).clamp(0., max);
+            self.pointer = true;
+            self.dirty = true;
             return false;
         }
         // Search's grid scrolls instead of the Home page beneath it.
@@ -633,6 +646,19 @@ impl State {
                 }
             }
         }
+        // With the Top Shelf, Home is two screens: greeting and favourites (with the search
+        // bar) fill the first, the banner the second, whole.
+        if self.page == Page::Home && self.feeds.hero.is_some() {
+            match self.focus {
+                Target::Hero | Target::HeroExtra(_) | Target::HeroMore => {
+                    if let Some(band) = controls.iter().find(|c| c.target == Target::Hero) {
+                        self.scroll = (previous + band.rect.y).max(0.);
+                    }
+                }
+                Target::App(_) | Target::FeedSearch | Target::FeedVoice => self.scroll = 0.,
+                _ => {}
+            }
+        }
         if self.page == Page::Home {
             self.scroll_favorites(0.);
         }
@@ -737,6 +763,9 @@ impl State {
         }
         if self.feeds.title.is_some() && self.overlay.is_none() {
             return self.title_direction(direction);
+        }
+        if self.feeds.sheet.is_some() && self.overlay.is_none() {
+            return self.sheet_direction(direction);
         }
         if self.feeds.search.is_some() && self.overlay.is_none() {
             return self.search_direction(direction);
@@ -1459,6 +1488,11 @@ impl State {
             return effects;
         }
         if self.overlay.is_none()
+            && let Some(effects) = self.sheet_activate()
+        {
+            return effects;
+        }
+        if self.overlay.is_none()
             && let Some(effects) = self.search_activate()
         {
             return effects;
@@ -1484,6 +1518,12 @@ impl State {
                     return vec![Effect::LaunchTitle(item.link.clone())];
                 }
             }
+            Target::HeroExtra(index) if !self.launching => {
+                if let Some(item) = self.feeds.shelf_minis().get(index) {
+                    return vec![Effect::LaunchTitle(item.link.clone())];
+                }
+            }
+            Target::HeroMore => self.open_sheet(),
             Target::Feed(row, index) if !self.launching => {
                 if let Some(item) = self
                     .feeds
@@ -1636,6 +1676,8 @@ impl State {
                             (self.preferences.feed_preload_rows + 1) % 5;
                     }
                     12 => self.preferences.feed_hero = !self.preferences.feed_hero,
+                    14 => self.preferences.keep_awake = !self.preferences.keep_awake,
+                    15 => self.preferences.feed_wide = !self.preferences.feed_wide,
                     13 => {
                         self.preferences.feed_ambient =
                             (self.preferences.feed_ambient.min(4) + 1) % 5;

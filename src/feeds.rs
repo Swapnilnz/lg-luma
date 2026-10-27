@@ -64,6 +64,8 @@ pub const KEN_BURNS: Duration = Duration::from_secs(20);
 const PREVIEW_CARD_Y: f32 = 640.;
 /// A title's details are fetched once focus has rested this long, so scrolling past is free.
 const DETAILS_DWELL: Duration = Duration::from_millis(200);
+/// How long a preview waits for its artwork before opening with placeholders.
+const PREVIEW_ARTWORK_WAIT: Duration = Duration::from_millis(1200);
 
 /// What a preview shows about a title, from TMDB.
 #[derive(Clone, Debug, Default)]
@@ -76,6 +78,8 @@ pub struct Details {
     pub extent: Option<String>,
     pub genres: Vec<String>,
     pub backdrop: Option<String>,
+    /// The same backdrop, smaller, for a focused card that widens to landscape.
+    pub landscape: Option<String>,
     pub logo: Option<String>,
     /// A YouTube video ID.
     pub trailer: Option<String>,
@@ -134,6 +138,9 @@ pub struct Row {
     /// Its titles also take turns in the Top Shelf banner.
     #[serde(default)]
     pub hero: bool,
+    /// Its titles appear as small posters on the Top Shelf ("This week", new seasons).
+    #[serde(default)]
+    pub extra: bool,
     pub status: Status,
     pub items: Vec<Item>,
 }
@@ -191,6 +198,11 @@ pub struct Feeds {
     pub prefetched: Vec<String>,
     /// Requests for the feed workers, sent by `main::feeds_tick`.
     pub outbox: Vec<Outgoing>,
+    /// The card widened to landscape, and the one narrowing back after focus left it.
+    pub wide: Option<Wide>,
+    pub narrowing: Option<Wide>,
+    /// The Top Shelf's "This week" posters, expanded into a grid.
+    pub sheet: Option<Sheet>,
 }
 
 impl Feeds {
@@ -209,7 +221,26 @@ impl Feeds {
                 self.held_links()
                     .into_iter()
                     .filter_map(|link| self.details.get(link))
-                    .flat_map(|details| details.backdrop.iter().chain(details.logo.iter())),
+                    .flat_map(|details| {
+                        details
+                            .backdrop
+                            .iter()
+                            .chain(details.logo.iter())
+                            .chain(details.landscape.iter())
+                    }),
+            )
+            .chain(
+                self.wide
+                    .iter()
+                    .chain(self.narrowing.iter())
+                    .filter_map(|wide| self.details.get(&wide.link))
+                    .filter_map(|details| details.landscape.as_ref()),
+            )
+            .chain(
+                self.sheet
+                    .iter()
+                    .flat_map(|sheet| &sheet.items)
+                    .filter_map(|item| item.image.as_ref()),
             )
             .chain(self.title.iter().flat_map(TitlePage::images))
             .collect()
@@ -379,7 +410,7 @@ impl Feeds {
         };
         // Count only rows that are drawn: finished empty rows take no space on Home.
         let shown: Vec<usize> = (0..self.rows.len())
-            .filter(|row| self.rows[*row].shown())
+            .filter(|row| self.row_visible(*row))
             .collect();
         let position = |row: usize| shown.iter().position(|shown| *shown == row);
         let (Some(start), Some(end)) = (position(first), position(last)) else {
@@ -391,12 +422,21 @@ impl Feeds {
             .collect()
     }
 
+    /// Whether a row is drawn on Home: not a finished empty row, nor one the Top Shelf shows
+    /// in its place.
+    pub fn row_visible(&self, index: usize) -> bool {
+        self.rows
+            .get(index)
+            .is_some_and(|row| row.shown() && !(self.hero.is_some() && (row.hero || row.extra)))
+    }
+
     fn max_scroll(&self, row: usize) -> f32 {
         let count = self.rows.get(row).map_or(0, |row| row.items.len());
         if count == 0 {
             return 0.;
         }
-        let content = (count - 1) as f32 * CARD_PITCH + CARD_WIDTH;
+        // Room for a focused card widened to landscape.
+        let content = (count - 1) as f32 * CARD_PITCH + CARD_WIDTH + (WIDE_WIDTH - CARD_WIDTH);
         (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.)
     }
 }
@@ -467,11 +507,22 @@ impl State {
         feeds.prune_images();
         if let Target::Feed(row, index) = self.focus {
             let count = self.feeds.rows.get(row).map_or(0, |row| row.items.len());
-            if count == 0 {
-                self.focus = self.first_content();
+            if count == 0 || !self.feeds.row_visible(row) {
+                // A row the Top Shelf now shows: focus goes to the Top Shelf.
+                self.focus = if self.feeds.hero.is_some() && count > 0 {
+                    Target::Hero
+                } else {
+                    self.first_content()
+                };
             } else if index >= count {
                 self.focus = Target::Feed(row, count - 1);
             }
+        }
+        let minis = self.feeds.shelf_minis().len();
+        if matches!(self.focus, Target::HeroExtra(index) if index >= minis)
+            || (self.focus == Target::HeroMore && minis == 0)
+        {
+            self.focus = Target::Hero;
         }
         self.dirty = true;
     }
@@ -528,9 +579,32 @@ impl State {
                         self.focus(next, controls);
                     }
                     Direction::Down => {
-                        let next = nearest_feed(controls, 200., |_| true, false)?;
+                        let next = [Target::HeroExtra(0), Target::HeroMore]
+                            .into_iter()
+                            .find(|target| controls.iter().any(|c| c.target == *target))
+                            .or_else(|| nearest_feed(controls, 200., |_| true, false))?;
                         self.focus(next, controls);
                     }
+                }
+                Some(vec![])
+            }
+            // The Top Shelf's small posters and its expand button, in a line.
+            mini @ (Target::HeroExtra(_) | Target::HeroMore) => {
+                let line: Vec<Target> = controls
+                    .iter()
+                    .filter(|c| matches!(c.target, Target::HeroExtra(_) | Target::HeroMore))
+                    .map(|c| c.target.clone())
+                    .collect();
+                let position = line.iter().position(|t| *t == mini).unwrap_or(0);
+                let next = match direction {
+                    Direction::Left => position.checked_sub(1).and_then(|p| line.get(p).cloned()),
+                    Direction::Right => line.get(position + 1).cloned(),
+                    Direction::Up => Some(Target::Hero),
+                    Direction::Down => nearest_feed(controls, 200., |_| true, false),
+                };
+                // At either end, or with no row below, focus stays put.
+                if let Some(next) = next {
+                    self.focus(next, controls);
                 }
                 Some(vec![])
             }
@@ -583,7 +657,11 @@ impl State {
 impl State {
     /// Opens Search with the keyboard ready. Needs a TMDB key.
     pub fn open_search(&mut self) -> Vec<Effect> {
-        if self.overlay.is_some() || self.recents_open() || self.feeds.search.is_some() {
+        if self.overlay.is_some()
+            || self.recents_open()
+            || self.feeds.search.is_some()
+            || self.feeds.sheet.is_some()
+        {
             return vec![];
         }
         if !self.feeds.can_search {
@@ -809,6 +887,8 @@ fn card_item<'a>(feeds: &'a Feeds, target: &Target) -> Option<&'a Item> {
         Target::Feed(row, index) => feeds.rows.get(*row)?.items.get(*index),
         Target::SearchResult(index) => feeds.search.as_ref()?.results.get(*index),
         Target::Hero => feeds.hero_item(),
+        Target::HeroExtra(index) => feeds.shelf_minis().get(*index).copied(),
+        Target::SheetItem(index) => feeds.sheet.as_ref()?.items.get(*index),
         Target::TitleMore(index) => feeds.title.as_ref()?.more()?.get(*index),
         Target::TitleButton(_)
         | Target::TitleSeason(_)
@@ -852,9 +932,11 @@ impl Feeds {
 
     /// Whether the focused poster or the preview is still moving.
     pub fn card_animating(&self) -> bool {
-        self.focus_since
-            .as_ref()
-            .is_some_and(|(_, since)| since.elapsed() < EXPAND + Duration::from_millis(40))
+        self.wide_animating()
+            || self
+                .focus_since
+                .as_ref()
+                .is_some_and(|(_, since)| since.elapsed() < EXPAND + Duration::from_millis(40))
             || self.preview.as_ref().is_some_and(|preview| {
                 preview.hiding.is_some() || preview.shown.elapsed() < KEN_BURNS
             })
@@ -875,7 +957,7 @@ impl Feeds {
     /// Whether a title's backdrop and logo are in memory (or it has none).
     fn artwork_loaded(&self, link: &str) -> bool {
         self.details.get(link).is_none_or(|details| {
-            [&details.backdrop, &details.logo]
+            [&details.backdrop, &details.logo, &details.landscape]
                 .into_iter()
                 .flatten()
                 .all(|url| self.images.contains_key(url))
@@ -895,6 +977,7 @@ impl State {
             self.feeds.requested = None;
             self.dirty = true;
         }
+        self.wide_tick();
         let since = self
             .feeds
             .focus_since
@@ -955,6 +1038,10 @@ impl State {
             && !showing
             && delay.is_some_and(|delay| since.elapsed() >= delay)
             && self.feeds.details.contains_key(&link)
+            // Wait a moment for the backdrop and logo, so it does not open half drawn; past
+            // that it opens with placeholders where they will go.
+            && (self.feeds.artwork_loaded(&link)
+                || delay.is_some_and(|delay| since.elapsed() >= delay + PREVIEW_ARTWORK_WAIT))
             && let Some(control) = controls.iter().find(|control| control.target == self.focus)
         {
             // Slide the row down to sit below the title's details; the rest of Home fades.
@@ -1003,9 +1090,9 @@ impl State {
 
 // ---- Top Shelf, screensaver, title pages and quick actions ----
 
-/// The Top Shelf: a full-width banner above the rows. Each slide shows this long, then
-/// crossfades to the next over HERO_FADE.
-pub const HERO_HEIGHT: f32 = 560.;
+/// The Top Shelf: Home's whole second screen, above the rows. Each slide shows this long,
+/// then crossfades to the next over HERO_FADE.
+pub const HERO_HEIGHT: f32 = 1080.;
 const HERO_LIMIT: usize = 8;
 const HERO_SLIDE: Duration = Duration::from_secs(9);
 pub const HERO_FADE: Duration = Duration::from_millis(700);
@@ -1518,7 +1605,10 @@ impl State {
         };
         if count == 0 {
             if self.feeds.hero.take().is_some() {
-                if self.focus == Target::Hero {
+                if matches!(
+                    self.focus,
+                    Target::Hero | Target::HeroExtra(_) | Target::HeroMore
+                ) {
                     self.focus = self.first_content();
                 }
                 self.dirty = true;
@@ -1531,6 +1621,7 @@ impl State {
             || self.feeds.title.is_some()
             || self.feeds.menu.is_some()
             || self.feeds.ambient.is_some()
+            || self.feeds.sheet.is_some()
             || !self.feeds.visible;
         let next_link = {
             let slides = self.feeds.hero.get_or_insert_with(Slides::new);
@@ -1542,6 +1633,13 @@ impl State {
             let (row, index) = items[(slides_index(&self.feeds) + 1) % count];
             self.feeds.rows[row].items[index].link.clone()
         };
+        // The rows the Top Shelf replaces are no longer drawn: focus on one moves to it.
+        if let Target::Feed(row, _) = self.focus
+            && !self.feeds.row_visible(row)
+        {
+            self.focus = Target::Hero;
+            self.dirty = true;
+        }
         let ready = self.feeds.slide_ready(&next_link);
         let Some(slides) = self.feeds.hero.as_mut() else {
             return;
@@ -2096,6 +2194,10 @@ impl State {
             self.title_back();
             return true;
         }
+        if self.feeds.sheet.is_some() {
+            self.close_sheet();
+            return true;
+        }
         false
     }
 
@@ -2201,4 +2303,226 @@ impl Feeds {
 /// The Top Shelf's current slide index, or 0.
 fn slides_index(feeds: &Feeds) -> usize {
     feeds.hero.as_ref().map_or(0, |slides| slides.index)
+}
+
+// ---- Wide focus, the Top Shelf's small posters and their sheet ----
+
+/// A focused feed card widens to a 16:9 backdrop this wide, over WIDE_GROW.
+pub const WIDE_WIDTH: f32 = 576.;
+const WIDE_GROW: Duration = Duration::from_millis(260);
+/// How many small posters the Top Shelf shows before its expand button.
+pub const SHELF_MINIS: usize = 2;
+
+/// A card widened to landscape (or narrowing back), since when.
+#[derive(Clone, Debug)]
+pub struct Wide {
+    pub target: Target,
+    pub link: String,
+    pub since: Instant,
+}
+
+/// The Top Shelf's small posters expanded: a grid of every "This week" and new-season title.
+pub struct Sheet {
+    pub title: String,
+    pub items: Vec<Item>,
+    pub scroll: f32,
+    pub restore: Target,
+    pub opened: Instant,
+}
+
+impl Feeds {
+    /// Every title of the rows the Top Shelf shows as small posters, in row order.
+    pub fn shelf_items(&self) -> Vec<Item> {
+        self.rows
+            .iter()
+            .filter(|row| row.extra)
+            .flat_map(|row| row.items.iter().cloned())
+            .collect()
+    }
+
+    /// The small posters on the Top Shelf: the first title of each such row, topped up from
+    /// the first row when there is only one.
+    pub fn shelf_minis(&self) -> Vec<&Item> {
+        let rows: Vec<&Row> = self
+            .rows
+            .iter()
+            .filter(|row| row.extra && !row.items.is_empty())
+            .collect();
+        let mut minis: Vec<&Item> = rows.iter().filter_map(|row| row.items.first()).collect();
+        if let Some(first) = rows.first() {
+            for item in first.items.iter().skip(1) {
+                if minis.len() >= SHELF_MINIS {
+                    break;
+                }
+                minis.push(item);
+            }
+        }
+        minis.truncate(SHELF_MINIS);
+        minis
+    }
+
+    /// The heading over the small posters: the first such row's title.
+    pub fn shelf_title(&self) -> String {
+        self.rows
+            .iter()
+            .find(|row| row.extra && !row.items.is_empty())
+            .map_or_else(|| "Coming up".to_owned(), |row| row.title.clone())
+    }
+
+    /// How far a card has widened to landscape, 0 to 1.
+    pub fn wide_fraction(&self, target: &Target, reduced_motion: bool) -> f32 {
+        let grow = |wide: &Wide| {
+            if reduced_motion {
+                1.
+            } else {
+                ease_out(wide.since.elapsed().as_secs_f32() / WIDE_GROW.as_secs_f32())
+            }
+        };
+        if let Some(wide) = self.wide.as_ref().filter(|wide| wide.target == *target) {
+            return grow(wide);
+        }
+        if let Some(wide) = self
+            .narrowing
+            .as_ref()
+            .filter(|wide| wide.target == *target)
+        {
+            return 1. - grow(wide);
+        }
+        0.
+    }
+
+    /// A feed card's drawn width: portrait, or widening to landscape when focused.
+    pub fn card_width(&self, target: &Target, reduced_motion: bool) -> f32 {
+        CARD_WIDTH + (WIDE_WIDTH - CARD_WIDTH) * self.wide_fraction(target, reduced_motion)
+    }
+
+    /// Whether a title's landscape artwork is in memory.
+    pub fn landscape_ready(&self, link: &str) -> bool {
+        self.details
+            .get(link)
+            .and_then(|details| details.landscape.as_ref())
+            .is_some_and(|url| self.images.contains_key(url))
+    }
+
+    fn wide_animating(&self) -> bool {
+        self.wide
+            .iter()
+            .chain(self.narrowing.iter())
+            .any(|wide| wide.since.elapsed() < WIDE_GROW + Duration::from_millis(40))
+    }
+}
+
+impl State {
+    /// Widens the focused feed card once its landscape artwork is here, and narrows the one
+    /// focus left. Runs every frame with `preview_tick`.
+    fn wide_tick(&mut self) {
+        let now = Instant::now();
+        if self
+            .feeds
+            .narrowing
+            .as_ref()
+            .is_some_and(|wide| wide.since.elapsed() >= WIDE_GROW)
+        {
+            self.feeds.narrowing = None;
+            self.dirty = true;
+        }
+        if self
+            .feeds
+            .wide
+            .as_ref()
+            .is_some_and(|wide| wide.target != self.focus)
+        {
+            self.feeds.narrowing = self
+                .feeds
+                .wide
+                .take()
+                .map(|wide| Wide { since: now, ..wide });
+            self.dirty = true;
+        }
+        let eligible = self.preferences.feed_wide
+            && self.page == Page::Home
+            && self.feeds.title.is_none()
+            && self.feeds.search.is_none()
+            && matches!(self.focus, Target::Feed(..));
+        if !eligible || self.feeds.wide.is_some() {
+            return;
+        }
+        let Some(link) = card_link(&self.feeds, &self.focus) else {
+            return;
+        };
+        if self.feeds.landscape_ready(&link) {
+            self.feeds.wide = Some(Wide {
+                target: self.focus.clone(),
+                link,
+                since: now,
+            });
+            self.dirty = true;
+        }
+    }
+
+    /// The expand button on the Top Shelf: every "This week" and new-season title in a grid.
+    pub fn open_sheet(&mut self) {
+        let items = self.feeds.shelf_items();
+        if items.is_empty() {
+            return;
+        }
+        self.feeds.sheet = Some(Sheet {
+            title: self.feeds.shelf_title(),
+            items,
+            scroll: 0.,
+            restore: self.focus.clone(),
+            opened: Instant::now(),
+        });
+        self.focus = Target::SheetItem(0);
+        self.pointer = false;
+        self.dirty = true;
+    }
+
+    fn close_sheet(&mut self) {
+        if let Some(sheet) = self.feeds.sheet.take() {
+            self.focus = sheet.restore;
+        }
+        self.feeds.prune_images();
+        self.pointer = false;
+        self.dirty = true;
+    }
+
+    /// Remote navigation in the sheet's grid, as in Search's.
+    pub fn sheet_direction(&mut self, direction: Direction) -> Vec<Effect> {
+        let Some(sheet) = self.feeds.sheet.as_mut() else {
+            return vec![];
+        };
+        let count = sheet.items.len();
+        let index = match self.focus {
+            Target::SheetItem(index) => index,
+            _ => 0,
+        };
+        let next = match direction {
+            Direction::Left if index % SEARCH_COLUMNS > 0 => index - 1,
+            Direction::Right if (index + 1) % SEARCH_COLUMNS > 0 && index + 1 < count => index + 1,
+            Direction::Up if index >= SEARCH_COLUMNS => index - SEARCH_COLUMNS,
+            Direction::Down if (index / SEARCH_COLUMNS + 1) * SEARCH_COLUMNS < count => {
+                (index + SEARCH_COLUMNS).min(count - 1)
+            }
+            _ => index,
+        };
+        sheet.scroll = (next / SEARCH_COLUMNS).saturating_sub(1) as f32 * SEARCH_ROW;
+        self.focus = Target::SheetItem(next);
+        self.pointer = false;
+        self.dirty = true;
+        vec![]
+    }
+
+    /// OK in the sheet: the title opens in Nuvio. None when the sheet is closed.
+    pub fn sheet_activate(&mut self) -> Option<Vec<Effect>> {
+        let sheet = self.feeds.sheet.as_ref()?;
+        Some(match self.focus {
+            Target::SheetItem(index) if !self.launching => sheet
+                .items
+                .get(index)
+                .map(|item| vec![Effect::LaunchTitle(item.link.clone())])
+                .unwrap_or_default(),
+            _ => vec![],
+        })
+    }
 }

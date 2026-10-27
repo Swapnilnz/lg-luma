@@ -128,6 +128,10 @@ pub struct Preferences {
     pub feed_hero: bool,
     /// The screensaver after this long idle: 0 off, then 5, 10, 15 or 30 minutes.
     pub feed_ambient: u8,
+    /// A focused feed card widens to show the title's landscape artwork.
+    pub feed_wide: bool,
+    /// A quiet low tone every two minutes, so a soundbar that sleeps on silence stays on.
+    pub keep_awake: bool,
 }
 
 impl Default for Preferences {
@@ -155,6 +159,8 @@ impl Default for Preferences {
             feed_preview_delay: 1,
             feed_hero: true,
             feed_ambient: 2,
+            feed_wide: true,
+            keep_awake: true,
         }
     }
 }

@@ -52,10 +52,41 @@ need the Trakt sign-in too but reload with `refresh_minutes`, as lists do.
 
 ## Top Shelf
 
-Above the rows, a full-width banner cycles through the titles of the `hero` rows every nine
-seconds: backdrop, logo, caption and synopsis, and a Resume / Play button. With focus on it,
-Left and Right turn the slides by hand and OK opens the title. Settings > Interface > Top Shelf
-turns it off. It needs a TMDB key for the artwork.
+With the Top Shelf on, Home is two screens. The greeting, favourites and search bar fill the
+first; pressing Down brings in the banner, which fills the whole second screen (the header
+steps aside). Below it come the remaining rows.
+
+- Its titles come from the `hero` rows (default: Continue Watching, Up Next, Watchlist), and
+  those rows are no longer shown as rows. Slides change every nine seconds; Left and Right turn
+  them, OK opens the title, Menu opens its page.
+- Every slide's poster runs along the bottom right; the current one is lit.
+- Above them, the `shelf` rows (default `trakt:calendar` and `smart:new_season`) show as two
+  small posters, the first of each (or two from This Week), with an expand button that opens
+  all of them in a grid. Down from the banner reaches them. These rows are not shown as rows
+  either.
+- Settings > Interface > Top Shelf turns it off: every row is then a row again.
+
+| `feeds.json` key | Meaning | Default |
+| --- | --- | --- |
+| `hero` | Row sources whose titles take turns in the banner | Trakt continue, playback, up_next, watchlist |
+| `shelf` | Row sources shown as small posters on the banner | `trakt:calendar`, `smart:new_season` |
+
+## Wide posters
+
+A focused poster in a row widens to the title's 16:9 backdrop with its logo once that artwork
+has loaded, pushing the posters after it along, as Netflix and Nuvio do. Settings > Interface >
+Wide poster on focus turns it off.
+
+## Soundbar keep-awake
+
+Some soundbars (Denon's auto standby) power down after minutes without sound. With Settings >
+Interface > Keep soundbar awake on (the default), Luma plays a 2-second, 40 Hz tone about 48 dB
+down every two minutes: too low to hear, enough to count as signal. It opens the TV's audio
+output only for each tone. It keeps going while another app is in front, which also covers a
+paused video, if the TV mixes a background app's sound; not every TV does. If the soundbar
+still sleeps, raise the level (in Luma's environment, e.g. in `home.sh`):
+`LUMA_KEEP_AWAKE_DB=-40`; `LUMA_KEEP_AWAKE_HZ` and `LUMA_KEEP_AWAKE_SECONDS` change the pitch
+and the interval. Luma logs `Luma keep-awake:` lines if the TV gives it no audio output.
 
 ## Title pages
 
