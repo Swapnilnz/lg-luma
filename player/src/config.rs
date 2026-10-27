@@ -27,6 +27,8 @@ pub struct Config {
     pub defaults: Defaults,
     /// Dev builds post their log here (tools/devlog.mjs).
     pub log_url: Option<String>,
+    /// IntroDB's API for Skip Intro and Skip Recap; None when `"introdb": {"enabled": false}`.
+    pub introdb: Option<String>,
 }
 
 /// A configured value, or None for blanks and the example's placeholders.
@@ -87,5 +89,9 @@ pub fn load() -> Config {
                 .clamp(3., 60.),
         },
         log_url: real(at("/dev/log_url").and_then(Value::as_str)),
+        introdb: (at("/introdb/enabled").and_then(Value::as_bool) != Some(false)).then(|| {
+            real(at("/introdb/base_url").and_then(Value::as_str))
+                .unwrap_or_else(|| luma_core::segments::API.to_owned())
+        }),
     }
 }

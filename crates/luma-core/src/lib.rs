@@ -11,6 +11,7 @@ pub mod next;
 pub mod remote;
 pub mod resume;
 pub mod scrobble;
+pub mod segments;
 pub mod selection;
 pub mod stremio;
 pub mod subs;

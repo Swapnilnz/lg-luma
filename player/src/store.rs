@@ -11,6 +11,7 @@ const SKIP_SIGN_IN: &str = "luma.trakt.skip_until";
 const POSITIONS: &str = "luma.positions";
 const SETTINGS: &str = "luma.settings";
 const QUEUE: &str = "luma.scrobble_queue";
+const SHOW_PREFS: &str = "luma.show_prefs";
 /// Resume points kept, newest first.
 const MAX_POSITIONS: usize = 300;
 const MAX_QUEUE: usize = 50;
@@ -140,6 +141,52 @@ pub fn queue_take() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// Audio and subtitles last chosen for one show or film, as Netflix remembers them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShowPrefs {
+    pub audio: Option<String>,
+    /// Some(None) means subtitles off; None means never chosen.
+    pub subtitles: Option<Option<String>>,
+}
+
+pub fn show_prefs(key: &str) -> ShowPrefs {
+    let all = json_or(SHOW_PREFS, json!({}));
+    let Some(entry) = all.get(key) else {
+        return ShowPrefs::default();
+    };
+    ShowPrefs {
+        audio: entry.get("a").and_then(Value::as_str).map(str::to_owned),
+        subtitles: entry
+            .get("s")
+            .and_then(Value::as_str)
+            .map(|s| if s == "off" { None } else { Some(s.to_owned()) }),
+    }
+}
+
+fn save_show_field(key: &str, field: &str, value: &str) {
+    let mut all = match json_or(SHOW_PREFS, json!({})) {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    let entry = all.entry(key.to_owned()).or_insert_with(|| json!({}));
+    if let Some(entry) = entry.as_object_mut() {
+        entry.insert(field.into(), json!(value));
+    }
+    // A few hundred shows is plenty; past that, start afresh rather than grow forever.
+    if all.len() > 400 {
+        all.clear();
+    }
+    put(SHOW_PREFS, &Value::Object(all).to_string());
+}
+
+pub fn save_show_audio(key: &str, language: &str) {
+    save_show_field(key, "a", language);
+}
+
+pub fn save_show_subtitles(key: &str, language: Option<&str>) {
+    save_show_field(key, "s", language.unwrap_or("off"));
+}
+
 /// What the viewer changes in Settings and Tracks; overrides the config's defaults.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -154,6 +201,8 @@ pub struct Settings {
     pub subtitle_box: bool,
     /// Milliseconds added to video time when finding cues (positive shows them later).
     pub subtitle_offset_ms: i32,
+    /// Skip intros and recaps without asking, where IntroDB has them.
+    pub auto_skip: bool,
 }
 
 impl Settings {
@@ -201,6 +250,7 @@ impl Settings {
                 .get("subtitle_offset_ms")
                 .and_then(Value::as_i64)
                 .map_or(0, |n| n.clamp(-30_000, 30_000) as i32),
+            auto_skip: v.get("auto_skip").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 
@@ -217,6 +267,7 @@ impl Settings {
                 "subtitle_size": self.subtitle_size,
                 "subtitle_box": self.subtitle_box,
                 "subtitle_offset_ms": self.subtitle_offset_ms,
+                "auto_skip": self.auto_skip,
             })
             .to_string(),
         );

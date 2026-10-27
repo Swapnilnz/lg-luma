@@ -19,6 +19,7 @@ cp player/config.example.json player/config.local.json   # then fill it in (giti
 | `trakt.client_id` | The same Trakt app as Luma's (`client_secret` only for old apps) |
 | `defaults` | Languages, subtitles on/off, autoplay, Next Up timing; overridden by Settings on the TV |
 | `dev.log_url` | Dev builds post their log here (`node tools/devlog.mjs`) |
+| `introdb` | Skip Intro / Recap from [IntroDB](https://introdb.app/docs): on unless `"enabled": false`; `base_url` overrides the API |
 
 Luma side: add the `player` block to `feeds.json` (see `feeds.md`, "Luma Player").
 
@@ -100,10 +101,23 @@ brings the controls back; OK or Play resumes.
   pause and stop scrobbles; at most one call per 10 s; exit before 80% pauses, at 80% or later
   stops (watched). Failed calls queue locally and replay on the next launch.
 - **Next Up:** at 90% the next episode (TMDB seasons, specials skipped, unaired withheld) and
-  its streams are fetched; 45 s before the end a card counts down 10 s. OK plays now, Back
-  hides it. A season finale moves to the next season; a series finale shows no card.
-- **Tracks:** audio by preferred language; subtitles from the file (if the TV lists them) or
-  addons, rendered by the player with size, background and 250 ms timing steps, remembered.
+  its streams are fetched; when the credits start (IntroDB) or 45 s before the end, a card
+  counts down 10 s, holding while paused. OK plays now, Back hides it. A season finale moves
+  to the next season; a series finale shows no card. The card waits until the episode has
+  played a minute and its duration has held steady for 30 s, and autoplay never resumes an
+  old watch past 80%, so it can't chain into a loop.
+- **Tracks:** audio and subtitles picked in the panel are remembered per show (or film), as
+  Netflix does; new titles start from the preferred languages in Settings. Subtitles come
+  from the file (if the TV lists them) or addons, rendered by the player with size,
+  background and 250 ms timing steps. Switching streams asks the addons again for that
+  release and picks the same language.
+- **Skip Intro / Skip Recap:** IntroDB's community timestamps, where an episode has them. The
+  button shows for the segment; with the controls down OK skips and Back hides it. Settings
+  can skip automatically. IntroDB's credits start, when known, is when Next Up appears.
+- **Episodes shelf:** watched episodes get a tick and partly watched ones a progress bar, from
+  Trakt (and the player's own resume points).
+- **On a laptop**, a stream whose audio Chrome can't decode (Dolby, DTS) plays silent; after
+  6 s a toast says so. The TV decodes those in hardware.
 
 Choices made where the plan left it open, as Netflix and Apple TV do it:
 

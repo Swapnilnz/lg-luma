@@ -940,3 +940,85 @@ svg {
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
   animation: rise 0.35s var(--spring);
 }
+
+/* ----- Skip Intro / Skip Recap ----- */
+
+.skip {
+  position: absolute;
+  right: 96px;
+  bottom: 120px;
+  z-index: 5;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px);
+  transition:
+    opacity 0.3s var(--ease),
+    transform 0.4s var(--spring),
+    bottom 0.35s var(--ease);
+}
+.skip.on {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+/* Above the control bar while it is up. */
+.skip.raised {
+  bottom: 330px;
+}
+.skipbtn {
+  padding: 20px 40px;
+  border-radius: 16px;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(30, 30, 32, 0.82);
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  transition:
+    background-color 0.2s,
+    color 0.2s,
+    transform 0.25s var(--spring);
+}
+.skipbtn.focus {
+  background: #fff;
+  color: #000;
+  border-color: #fff;
+  transform: scale(1.06);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* ----- Episode shelf: watched and partly watched ----- */
+
+.tick {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #000;
+}
+.tick svg {
+  width: 24px;
+  height: 24px;
+  stroke-width: 3;
+}
+.ep.watched .thumb img {
+  opacity: 0.6;
+}
+.prog {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 12px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.3);
+  overflow: hidden;
+}
+.prog div {
+  height: 100%;
+  border-radius: 3px;
+  background: #fff;
+}

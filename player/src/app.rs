@@ -14,13 +14,14 @@ use luma_core::launch::Launch;
 use luma_core::remote::Key;
 use luma_core::resume::{self, Offer};
 use luma_core::scrobble::{self, Call, Event, Scrobbler};
+use luma_core::segments::{Segments, Skip};
 use luma_core::selection::{self, Attempts};
 use luma_core::stremio::{self, Stream, Subtitle};
 use luma_core::subs::{self, Track};
 use luma_core::tmdb::{self, Meta};
 use luma_core::trakt::{self, Media, Token};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -172,6 +173,24 @@ pub struct App {
     /// 0: the season tabs, 1: the episodes.
     pub shelf_row: u8,
     pub shelf_focus: usize,
+    /// IntroDB's intro, recap and credits for this episode.
+    pub segments: Option<Segments>,
+    /// A skip the viewer hid with Back, so it stays hidden for that segment.
+    pub skip_hidden: Option<Skip>,
+    /// Segments skipped automatically (auto-skip), so seeking back doesn't skip them again.
+    pub skipped: Vec<Skip>,
+    /// Trakt's watched episodes and this show's paused ones (percent), for the shelf.
+    pub watched: HashSet<(u32, u32)>,
+    pub partial: HashMap<(u32, u32), f64>,
+    /// Audio and subtitle languages picked during this title: kept across stream switches.
+    pub audio_wish: Option<String>,
+    pub subtitle_choice_wish: Option<Option<String>>,
+    pub first_frame_ms: f64,
+    pub audio_checked: bool,
+    /// The duration last seen and when it changed: Next Up waits for it to settle, since a
+    /// stream still being indexed can report a duration that grows as it plays.
+    pub duration_seen: f64,
+    pub duration_changed_ms: f64,
 }
 
 impl App {
@@ -230,6 +249,17 @@ impl App {
             shelf_season: 1,
             shelf_row: 1,
             shelf_focus: 0,
+            segments: None,
+            skip_hidden: None,
+            skipped: vec![],
+            watched: HashSet::new(),
+            partial: HashMap::new(),
+            audio_wish: None,
+            subtitle_choice_wish: None,
+            first_frame_ms: 0.,
+            audio_checked: false,
+            duration_seen: 0.,
+            duration_changed_ms: 0.,
         }
     }
 
@@ -322,7 +352,16 @@ impl App {
             self.binge_group = None;
             self.seasons.clear();
             self.seasons_loading.clear();
+            self.watched.clear();
+            self.partial.clear();
         }
+        self.segments = None;
+        self.skip_hidden = None;
+        self.skipped.clear();
+        self.audio_wish = None;
+        self.subtitle_choice_wish = None;
+        self.duration_seen = 0.;
+        self.duration_changed_ms = now_ms();
         self.osd_focus = OsdFocus::Scrubber;
         self.speed = 1.;
         self.paused_at = None;
@@ -385,6 +424,8 @@ impl App {
         self.current = Some(index);
         self.start = start;
         self.metadata = false;
+        self.sub_choice = SubChoice::Off;
+        self.sub_track = None;
         self.first_frame = false;
         self.stall_since = None;
         self.reloaded = false;
@@ -572,31 +613,124 @@ impl App {
         if let Some(stream) = self.current.and_then(|i| self.streams.get(i)) {
             self.binge_group = stream.binge_group.clone();
         }
-        // Preferred audio language.
+        self.first_frame_ms = now_ms();
+        self.audio_checked = false;
+        // Audio: this title's pick, else this show's, else the preferred languages.
         let audio = self.video.audio_tracks();
         if audio.len() > 1 {
             let languages: Vec<String> = audio.iter().map(|t| t.language.clone()).collect();
-            if let Some(index) = selection::pick_track(&languages, &self.settings.audio_languages)
+            if let Some(index) = selection::pick_track(&languages, &self.audio_wishes())
                 && !audio[index].on
             {
                 self.video.set_audio(index);
             }
         }
-        // Subtitles: an embedded track in a preferred language, else the addons'.
+        // Subtitles: an embedded track in the wanted language, else the addons' (each new
+        // stream asks the addons again, for subtitles that match its release).
         self.video.set_text(None);
-        if self.settings.subtitles_on {
+        if let Some(language) = self.subtitle_wish() {
             let embedded: Vec<String> = self
                 .video
                 .text_tracks()
                 .iter()
                 .map(|t| t.language.clone())
                 .collect();
-            if let Some(index) = selection::pick_track(&embedded, &self.settings.subtitle_languages)
-            {
+            if let Some(index) = selection::pick_track(&embedded, &[language]) {
                 self.set_subtitles(SubChoice::Embedded(index));
             }
         }
         self.request_subtitles();
+        if self.segments.is_none() {
+            spawn_local(fetch_segments(self.epoch));
+        }
+    }
+
+    /// The show (or film) whose audio and subtitle picks are remembered.
+    fn show_key(&self) -> Option<String> {
+        self.launch.imdb.clone()
+    }
+
+    /// Audio languages in order of preference, "Original" left out.
+    fn audio_wishes(&self) -> Vec<String> {
+        let remembered = self.audio_wish.clone().or_else(|| {
+            self.show_key()
+                .and_then(|key| store::show_prefs(&key).audio)
+        });
+        remembered
+            .map(|language| vec![language])
+            .unwrap_or_else(|| self.settings.audio_languages.clone())
+            .into_iter()
+            .filter(|language| language != "original")
+            .collect()
+    }
+
+    /// The subtitle language wanted, None for off: this title's pick, else this show's, else
+    /// the defaults.
+    fn subtitle_wish(&self) -> Option<String> {
+        if let Some(wish) = &self.subtitle_choice_wish {
+            return wish.clone();
+        }
+        if let Some(remembered) = self
+            .show_key()
+            .and_then(|key| store::show_prefs(&key).subtitles)
+        {
+            return remembered;
+        }
+        self.settings
+            .subtitles_on
+            .then(|| self.settings.subtitle_languages.first().cloned())
+            .flatten()
+    }
+
+    /// Addon subtitles in the wanted language, once the list is in, unless some are on.
+    fn apply_addon_wish(&mut self) {
+        if self.sub_choice != SubChoice::Off {
+            return;
+        }
+        let Some(language) = self.subtitle_wish() else {
+            return;
+        };
+        let languages: Vec<String> = self.addon_subs.iter().map(|s| s.lang.clone()).collect();
+        if let Some(index) = selection::pick_track(&languages, &[language]) {
+            self.set_subtitles(SubChoice::Addon(index));
+        }
+    }
+
+    /// Subtitles picked in the Tracks panel: kept for this title and remembered for the show.
+    fn choose_subtitles(&mut self, choice: SubChoice) {
+        let language = match &choice {
+            SubChoice::Off => None,
+            SubChoice::Embedded(index) => self
+                .video
+                .text_tracks()
+                .get(*index)
+                .map(|t| t.language.clone()),
+            SubChoice::Addon(index) => self.addon_subs.get(*index).map(|s| s.lang.clone()),
+        };
+        let language = language.filter(|l| !l.is_empty());
+        self.subtitle_choice_wish = Some(language.clone());
+        if let Some(key) = self.show_key() {
+            store::save_show_subtitles(&key, language.as_deref());
+        }
+        self.set_subtitles(choice);
+    }
+
+    /// An audio track picked in the Tracks panel: kept and remembered the same way.
+    fn choose_audio(&mut self, index: usize) {
+        self.video.set_audio(index);
+        let language = self
+            .video
+            .audio_tracks()
+            .get(index)
+            .map(|t| t.language.clone())
+            .filter(|l| !l.is_empty());
+        if let Some(language) = language {
+            if let Some(key) = self.show_key() {
+                store::save_show_audio(&key, &language);
+            }
+            self.audio_wish = Some(language);
+        }
+        self.toast("Audio changed");
     }
 
     fn on_ended(&mut self) {
@@ -608,6 +742,7 @@ impl App {
         if let Some(key) = self.media_key() {
             store::clear_position(&key);
         }
+        self.mark_watched();
         let autoplay = self.settings.autoplay_next;
         let play_now = self
             .next
@@ -643,6 +778,13 @@ impl App {
                 self.render();
                 return;
             }
+            let duration = self.video.duration();
+            if (duration - self.duration_seen).abs() > 1. {
+                self.duration_seen = duration;
+                self.duration_changed_ms = now;
+            }
+            self.auto_skip();
+            self.check_audio(now);
             if let Some(target) = self.seek_preview
                 && now >= self.seek_commit_ms
             {
@@ -715,15 +857,39 @@ impl App {
             }
         }
         let left = duration - position;
-        let card_at = self.settings.next_card_seconds;
+        // Credits from IntroDB when known, else a fixed time before the end.
+        let credits = self
+            .segments
+            .and_then(|s| s.outro)
+            .filter(|outro| outro.start < duration - 5.)
+            .is_some_and(|outro| position >= outro.start);
+        let near_end = credits || (left <= self.settings.next_card_seconds && left > 1.);
+        // Guards against a card that keeps coming back: the duration must have settled for
+        // 30 s, and this episode must have played for a minute.
+        let settled = now - self.duration_changed_ms > 30_000.
+            && now - self.first_frame_ms > 60_000.
+            && duration > 300.;
         let countdown = self.settings.countdown_seconds * 1000.;
         let autoplay = self.settings.autoplay_next;
+        let paused = self.video.paused();
+        let at = self.next.as_ref().map(|n| n.at);
         let mut play = false;
         if let Some(next) = &mut self.next {
-            if !next.dismissed && next.shown_at.is_none() && left <= card_at && left > 1. {
+            if !next.dismissed && next.shown_at.is_none() && near_end && settled {
+                log!(
+                    "Luma Player: Next Up for S{}E{} at {position:.0}/{duration:.0} s{}",
+                    next.at.0,
+                    next.at.1,
+                    if credits { " (credits)" } else { "" }
+                );
                 next.shown_at = Some(now);
             }
+            // The countdown holds while paused.
+            if paused && let Some(shown) = next.shown_at {
+                next.shown_at = Some(shown + 250.);
+            }
             if autoplay
+                && !paused
                 && !next.dismissed
                 && next.shown_at.is_some_and(|shown| now - shown >= countdown)
             {
@@ -731,6 +897,9 @@ impl App {
             }
         }
         if play {
+            if let Some((season, number)) = at {
+                log!("Luma Player: autoplaying S{season}E{number}");
+            }
             self.play_next();
         }
     }
@@ -745,6 +914,7 @@ impl App {
             && let Some(key) = self.media_key()
         {
             store::clear_position(&key);
+            self.mark_watched();
         } else {
             self.save_position(true);
         }
@@ -851,8 +1021,11 @@ impl App {
         let id = stremio_id(&imdb, self.launch.episode_key());
         let wanted = format!("{id}|{}", filename.clone().unwrap_or_default());
         if self.subs_for.as_deref() == Some(wanted.as_str()) {
+            // Same release as before: the list stands, only the pick is made again.
+            self.apply_addon_wish();
             return;
         }
+        self.addon_subs.clear();
         self.subs_for = Some(wanted);
         let epoch = self.epoch;
         let kind = self.launch.kind;
@@ -873,15 +1046,7 @@ impl App {
             log!("Luma Player: {} addon subtitles", found.len());
             update(epoch, move |app| {
                 app.addon_subs = found;
-                if app.settings.subtitles_on && app.sub_choice == SubChoice::Off {
-                    let langs: Vec<String> =
-                        app.addon_subs.iter().map(|s| s.lang.clone()).collect();
-                    if let Some(index) =
-                        selection::pick_track(&langs, &app.settings.subtitle_languages)
-                    {
-                        app.set_subtitles(SubChoice::Addon(index));
-                    }
-                }
+                app.apply_addon_wish();
                 app.render();
             });
         });
@@ -992,17 +1157,25 @@ impl App {
             }
             R::Audio(index) => {
                 if adjust == 0 {
-                    self.video.set_audio(index);
-                    self.toast("Audio changed");
+                    self.choose_audio(index);
                 }
             }
-            R::SubOff => self.set_subtitles(SubChoice::Off),
-            R::SubEmbedded(index) => self.set_subtitles(SubChoice::Embedded(index)),
+            R::SubOff => {
+                if adjust == 0 {
+                    self.choose_subtitles(SubChoice::Off);
+                }
+            }
+            R::SubEmbedded(index) => {
+                if adjust == 0 {
+                    self.choose_subtitles(SubChoice::Embedded(index));
+                }
+            }
             R::SubAddon(index) => {
                 if adjust == 0 {
-                    self.set_subtitles(SubChoice::Addon(index));
+                    self.choose_subtitles(SubChoice::Addon(index));
                 }
             }
+            R::AutoSkip => self.settings.auto_skip = !self.settings.auto_skip,
             R::SubSize => {
                 self.settings.subtitle_size =
                     ((i32::from(self.settings.subtitle_size) + step + 3) % 3) as u8;
@@ -1168,6 +1341,22 @@ impl App {
             && self.button_key(key, index)
         {
             return true;
+        }
+        // Skip Intro / Skip Recap, while the controls are down: OK skips, Back hides it.
+        if let Some(kind) = self.skip_offer().map(|(kind, _)| kind)
+            && !self.osd_visible()
+        {
+            match key {
+                Key::Ok => {
+                    self.skip_now();
+                    return true;
+                }
+                Key::Back => {
+                    self.skip_hidden = Some(kind);
+                    return true;
+                }
+                _ => {}
+            }
         }
         // Next Up: OK plays now, Back keeps the credits.
         let card = self
@@ -1391,8 +1580,11 @@ fn install(video: &Video) {
             number("data-ep"),
             number("data-row"),
         );
+        let skip = number("data-skip").is_some();
         with(|app| {
-            if let Some(index) = button {
+            if skip {
+                app.skip_now();
+            } else if let Some(index) = button {
                 app.click_button(index);
             } else if season.is_some() || episode.is_some() {
                 app.click_shelf(season.map(|s| s as u32), episode);
@@ -1571,6 +1763,9 @@ async fn prepare(epoch: u64, carried: Option<Vec<Stream>>) {
         return;
     };
     spawn_local(episode_details(epoch));
+    if launch.kind == Kind::Series {
+        spawn_local(load_show_progress(epoch));
+    }
     // 4. The resume point (Trakt and local), looked up while the streams load.
     let resume_cell = std::rc::Rc::new(RefCell::new(None::<Option<resume::Point>>));
     {
@@ -1637,9 +1832,17 @@ async fn prepare(epoch: u64, carried: Option<Vec<Stream>>) {
         let offer = resume::offer(point, runtime);
         match (app.launch.start, offer) {
             (Some(t), _) => app.play_index(index, Start::At(t)),
-            (None, Some(offer)) if app.auto_resume => {
+            (None, Some(offer)) if app.auto_resume && offer.percent < 80. => {
                 app.toast(format!("Resuming from {}", ui::offer_label(&offer)));
                 app.play_index(index, Start::Percent(offer.percent));
+            }
+            // Autoplay never lands near the end of an old watch: that loops Next Up.
+            (None, Some(offer)) if app.auto_resume => {
+                log!(
+                    "Luma Player: old resume point at {:.0}% ignored for autoplay",
+                    offer.percent
+                );
+                app.play_index(index, Start::Zero);
             }
             (None, Some(offer)) => {
                 app.load_index(index, Start::Zero);
@@ -1975,4 +2178,64 @@ async fn replay_queue() {
             _ => store::queue_push(&path, &body),
         }
     }
+}
+
+/// IntroDB's segments for this episode (or film), for Skip Intro, Skip Recap and Next Up.
+async fn fetch_segments(epoch: u64) {
+    let Some((Some(base), Some(imdb), episode)) = update(epoch, |app| {
+        (
+            app.config.introdb.clone(),
+            app.launch.imdb.clone(),
+            app.launch.episode_key(),
+        )
+    }) else {
+        return;
+    };
+    let reply = net::send(&luma_core::segments::request(&base, &imdb, episode), 8_000).await;
+    let segments = match reply {
+        Ok(reply) if reply.ok() => luma_core::segments::parse(&reply.text),
+        Ok(reply) => {
+            log!("Luma Player IntroDB: answered {}", reply.status);
+            Segments::default()
+        }
+        Err(error) => {
+            log!("Luma Player IntroDB: {error}");
+            Segments::default()
+        }
+    };
+    log!(
+        "Luma Player IntroDB: intro {}, recap {}, credits {}",
+        segments.intro.is_some(),
+        segments.recap.is_some(),
+        segments.outro.is_some()
+    );
+    update(epoch, |app| app.segments = Some(segments));
+}
+
+/// Trakt's watched episodes and this show's paused ones, for ticks and bars on the shelf.
+async fn load_show_progress(epoch: u64) {
+    let Some((Some(imdb), Some(Media::Episode { show, .. }))) =
+        update(epoch, |app| (app.launch.imdb.clone(), app.media.clone()))
+    else {
+        return;
+    };
+    let watched = trakt_send(move |app, token| app.progress(token, &imdb))
+        .await
+        .and_then(Result::ok)
+        .filter(|reply| reply.ok())
+        .map(|reply| trakt::parse_watched(&reply.text))
+        .unwrap_or_default();
+    let paused = trakt_send(|app, token| app.playback(token, true))
+        .await
+        .and_then(Result::ok)
+        .filter(|reply| reply.ok())
+        .map(|reply| trakt::parse_show_playback(&reply.text, &show))
+        .unwrap_or_default();
+    update(epoch, move |app| {
+        app.watched.extend(watched);
+        for (episode, percent) in paused {
+            app.partial.insert(episode, percent);
+        }
+        app.render();
+    });
 }

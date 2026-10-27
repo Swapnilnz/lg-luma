@@ -3,6 +3,7 @@
   "subtitle_addons": ["https://opensubtitles-v3.strem.io/manifest.json"],
   "tmdb": { "api_key": "YOUR_TMDB_KEY" },
   "trakt": { "client_id": "YOUR_TRAKT_CLIENT_ID" },
+  "introdb": { "enabled": true },
   "defaults": {
     "audio_languages": ["en"],
     "subtitle_languages": ["en"],

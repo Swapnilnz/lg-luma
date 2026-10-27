@@ -20,5 +20,8 @@
   "feed_search_bar": false,
   "feed_preview_delay": 1,
   "feed_hero": true,
-  "feed_ambient": 2
+  "feed_ambient": 2,
+  "feed_wide": true,
+  "keep_awake": true,
+  "feed_use_player": true
 }

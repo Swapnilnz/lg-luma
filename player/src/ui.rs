@@ -22,6 +22,7 @@ pub enum RowId {
     Autoplay,
     NextCard,
     Countdown,
+    AutoSkip,
     AudioLanguage,
     SubtitleLanguage,
     SubtitlesOn,
@@ -40,6 +41,7 @@ impl RowId {
                 | RowId::Autoplay
                 | RowId::NextCard
                 | RowId::Countdown
+                | RowId::AutoSkip
                 | RowId::AudioLanguage
                 | RowId::SubtitleLanguage
                 | RowId::SubtitlesOn
@@ -177,7 +179,11 @@ fn track_rows(app: &App) -> Vec<Row> {
         rows.push(Row {
             label: "Default track".into(),
             detail: if audio.is_empty() {
-                "This TV doesn't list the file's audio tracks".into()
+                if dom::palm().is_some() {
+                    "This TV doesn't list the file's audio tracks".into()
+                } else {
+                    "Desktop Chrome doesn't list audio tracks; the TV does".into()
+                }
             } else {
                 String::new()
             },
@@ -292,6 +298,15 @@ fn settings_rows(app: &App) -> Vec<Row> {
             "Countdown",
             format!("{:.0} s", s.countdown_seconds),
         ),
+        {
+            let mut r = row(
+                RowId::AutoSkip,
+                "Skip intros automatically",
+                on_off(s.auto_skip),
+            );
+            r.detail = "Intros and recaps from IntroDB; off shows a Skip button".into();
+            r
+        },
         heading("Languages"),
         row(
             RowId::AudioLanguage,
@@ -421,6 +436,24 @@ pub fn render(app: &App) {
     dom::set_html("panel", &panel_html);
     dom::set_class("panel", panel_class);
     dom::set_html("nextup", &if pause { String::new() } else { next_up(app) });
+    let skip = app.skip_offer().map(|(kind, _)| {
+        format!(
+            r#"<div class="skipbtn{}" data-skip="1">{}</div>"#,
+            if app.osd_visible() { "" } else { " focus" },
+            kind.label()
+        )
+    });
+    dom::set_class(
+        "skip",
+        match (&skip, app.osd_visible()) {
+            (Some(_), true) => "skip on raised",
+            (Some(_), false) => "skip on",
+            (None, _) => "skip",
+        },
+    );
+    if let Some(html) = &skip {
+        dom::set_html("skip", html);
+    }
     dom::set_html(
         "toast",
         &app.toast
@@ -751,10 +784,27 @@ fn shelf(app: &App) -> String {
                         None => format!(r#"<div class="noimg">{}</div>"#, e.number),
                     };
                     let meta = e.runtime.map(|m| short(m * 60.)).unwrap_or_default();
+                    let at = (app.shelf_season, e.number);
+                    // Watched: a tick. Partly watched: how far, as Apple TV draws it.
+                    let watched = app.watched.contains(&at) && !now;
+                    let progress = app
+                        .partial
+                        .get(&at)
+                        .filter(|p| **p > 1. && **p < 95. && !watched)
+                        .map(|p| {
+                            format!(r#"<div class="prog"><div style="width:{p:.1}%"></div></div>"#)
+                        })
+                        .unwrap_or_default();
+                    let tick = if watched {
+                        format!(r#"<span class="tick">{}</span>"#, icons::svg(icons::CHECK))
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        r#"<div class="ep{}{}" data-ep="{i}"><div class="thumb">{thumb}{}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
+                        r#"<div class="ep{}{}{}" data-ep="{i}"><div class="thumb">{thumb}{}{tick}{progress}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
                         if focus { " focus" } else { "" },
                         if now { " now" } else { "" },
+                        if watched { " watched" } else { "" },
                         if now { r#"<span class="nowtag">Now Playing</span>"# } else { "" },
                         e.number,
                         if meta.is_empty() { String::new() } else { format!(" · {meta}") },

@@ -304,6 +304,47 @@ pub fn parse_next_episode(text: &str) -> Option<(u32, u32)> {
     ))
 }
 
+/// Episodes marked watched, from a `/shows/{id}/progress/watched` reply.
+pub fn parse_watched(text: &str) -> Vec<(u32, u32)> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return vec![];
+    };
+    let Some(seasons) = v.get("seasons").and_then(Value::as_array) else {
+        return vec![];
+    };
+    seasons
+        .iter()
+        .filter_map(|season| {
+            let number = season.get("number")?.as_u64()? as u32;
+            let episodes = season.get("episodes")?.as_array()?;
+            Some(episodes.iter().filter_map(move |e| {
+                let completed = e.get("completed").and_then(Value::as_bool).unwrap_or(false);
+                completed.then_some((number, e.get("number")?.as_u64()? as u32))
+            }))
+        })
+        .flatten()
+        .collect()
+}
+
+/// This show's paused episodes and how far in (percent), from `/sync/playback/episodes`.
+pub fn parse_show_playback(text: &str, show: &Ids) -> Vec<((u32, u32), f64)> {
+    let Ok(Value::Array(list)) = serde_json::from_str::<Value>(text) else {
+        return vec![];
+    };
+    list.iter()
+        .filter(|entry| show.matches(entry.pointer("/show/ids")))
+        .filter_map(|entry| {
+            Some((
+                (
+                    entry.pointer("/episode/season")?.as_u64()? as u32,
+                    entry.pointer("/episode/number")?.as_u64()? as u32,
+                ),
+                entry.get("progress")?.as_f64()?,
+            ))
+        })
+        .collect()
+}
+
 /// Whether a reply means the call can be forgotten: done, or a duplicate (409).
 pub fn settled(status: u16) -> bool {
     (200..300).contains(&status) || status == 409 || status == 404 || status == 422
@@ -405,6 +446,23 @@ mod tests {
             number: 3,
         };
         assert!(find_playback(episodes, &other).is_none());
+    }
+
+    #[test]
+    fn watched_episodes_and_show_playback() {
+        let progress = r#"{"seasons":[
+            {"number":1,"episodes":[{"number":1,"completed":true},{"number":2,"completed":false}]},
+            {"number":2,"episodes":[{"number":1,"completed":true}]}]}"#;
+        assert_eq!(parse_watched(progress), vec![(1, 1), (2, 1)]);
+        assert!(parse_watched("{}").is_empty());
+        let playback = r#"[
+            {"progress":42.0,"episode":{"season":1,"number":3},"show":{"ids":{"imdb":"tt0944947"}}},
+            {"progress":10.0,"episode":{"season":1,"number":1},"show":{"ids":{"imdb":"tt0000001"}}}]"#;
+        let show = Ids {
+            imdb: Some("tt0944947".into()),
+            tmdb: None,
+        };
+        assert_eq!(parse_show_playback(playback, &show), vec![((1, 3), 42.)]);
     }
 
     #[test]

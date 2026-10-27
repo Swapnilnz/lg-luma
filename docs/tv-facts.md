@@ -14,6 +14,7 @@ answer; they decide stream filtering, audio tracks and subtitles.
 | 7 | Keycodes for Play, Pause, Stop, FF, RW, colours | Dev build logs "unmapped keyCode" for any key `luma-core/src/remote.rs` misses | |
 | 8 | Screen saver stays off; HDR mode switches | 20 min HDR file untouched | |
 | 9 | Release wasm loads from the packaged app | Loop 3 shows anything other than a blank screen | |
+| 10 | IntroDB answers from `file://` | Packaged build, an episode with a known intro: the log shows "Luma Player IntroDB: intro true" | |
 
 Notes:
 

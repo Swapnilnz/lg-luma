@@ -205,7 +205,96 @@ impl App {
             .and_then(|list| list.iter().position(|e| e.number == number))
             .unwrap_or(number.saturating_sub(1) as usize);
         self.ensure_season(season);
+        self.merge_local_progress(season);
         self.panel = Some(Panel::Episodes);
+    }
+
+    /// Partly watched episodes this player saved itself, for the shelf's progress bars
+    /// (Trakt's own paused points take precedence).
+    fn merge_local_progress(&mut self, season: u32) {
+        let (Some(imdb), Some(list)) = (self.launch.imdb.clone(), self.seasons.get(&season)) else {
+            return;
+        };
+        let numbers: Vec<u32> = list.iter().map(|e| e.number).collect();
+        for number in numbers {
+            let key = luma_core::ids::media_key(Kind::Series, &imdb, Some((season, number)));
+            if let Some(point) = store::position(&key)
+                && point.percent > 0.
+            {
+                self.partial
+                    .entry((season, number))
+                    .or_insert(point.percent);
+            }
+        }
+    }
+
+    /// This episode is done: ticked on the shelf straight away, before Trakt says so.
+    pub(super) fn mark_watched(&mut self) {
+        if let Some(at) = self.launch.episode_key() {
+            self.watched.insert(at);
+            self.partial.remove(&at);
+        }
+    }
+
+    // ----- Skip Intro / Skip Recap -----
+
+    /// What can be skipped now, and where it ends: never while seeking, paused or in a panel.
+    pub fn skip_offer(&self) -> Option<(luma_core::segments::Skip, f64)> {
+        if !matches!(self.screen, Screen::Playing)
+            || self.panel.is_some()
+            || self.seek_preview.is_some()
+            || !self.first_frame
+            || self.pause_screen()
+        {
+            return None;
+        }
+        let offer = self.segments?.skip_at(self.video.position())?;
+        (self.skip_hidden != Some(offer.0)).then_some(offer)
+    }
+
+    pub fn skip_now(&mut self) {
+        if let Some((kind, end)) = self.skip_offer() {
+            log!("Luma Player: {} to {end:.0} s", kind.label());
+            self.skipped.push(kind);
+            self.video.set_position(end);
+        }
+    }
+
+    /// With "Skip intros automatically", each intro and recap is skipped once.
+    pub(super) fn auto_skip(&mut self) {
+        if !self.settings.auto_skip || self.video.paused() {
+            return;
+        }
+        if let Some((kind, _)) = self.skip_offer()
+            && !self.skipped.contains(&kind)
+        {
+            self.skip_now();
+            self.toast(match kind {
+                luma_core::segments::Skip::Intro => "Skipped the intro",
+                luma_core::segments::Skip::Recap => "Skipped the recap",
+            });
+        }
+    }
+
+    /// On a laptop, a stream whose audio the browser can't decode (Dolby, DTS) plays silent:
+    /// six seconds in, say so instead. The TV decodes those in hardware, so it isn't checked
+    /// there.
+    pub(super) fn check_audio(&mut self, now: f64) {
+        if self.audio_checked
+            || !self.first_frame
+            || self.video.paused()
+            || now - self.first_frame_ms < 6_000.
+            || crate::dom::palm().is_some()
+        {
+            return;
+        }
+        self.audio_checked = true;
+        let decoded =
+            crate::dom::get(self.video.0.as_ref(), "webkitAudioDecodedByteCount").as_f64();
+        if decoded == Some(0.) {
+            log!("Luma Player: no audio decoded; likely Dolby or DTS, which desktop Chrome lacks");
+            self.toast("This browser can't play this stream's audio (likely Dolby). It will play on the TV, or try another stream.");
+        }
     }
 
     /// Fetches a season's episodes from TMDB once.
@@ -226,6 +315,7 @@ impl App {
             update(epoch, move |app| {
                 app.seasons_loading.retain(|s| *s != season);
                 app.seasons.insert(season, episodes);
+                app.merge_local_progress(season);
                 if app.shelf_season == season {
                     let len = app.shelf_episodes().map_or(0, Vec::len);
                     app.shelf_focus = app.shelf_focus.min(len.saturating_sub(1));
@@ -258,6 +348,7 @@ impl App {
                         self.shelf_season = season;
                         self.shelf_focus = 0;
                         self.ensure_season(season);
+                        self.merge_local_progress(season);
                     }
                 } else {
                     let len = self.shelf_episodes().map_or(0, Vec::len) as i32;
