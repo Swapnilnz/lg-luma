@@ -29,6 +29,16 @@ pub fn short(seconds: f64) -> String {
     }
 }
 
+/// A time of day the Australian way: `10:32 pm`, `12:05 am`.
+pub fn wall_clock(hours: u32, minutes: u32) -> String {
+    let suffix = if hours % 24 < 12 { "am" } else { "pm" };
+    let hour = match hours % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{hour}:{:02} {suffix}", minutes % 60)
+}
+
 /// Milliseconds since the epoch from an RFC 3339 UTC time such as `2026-10-27T09:12:00.000Z`.
 /// Offsets other than `Z` are applied; anything else is None.
 pub fn parse_rfc3339_ms(text: &str) -> Option<f64> {
@@ -89,6 +99,14 @@ mod tests {
         assert_eq!(short(4320.), "1h 12m");
         assert_eq!(short(3600.), "1h");
         assert_eq!(short(20.), "1m");
+    }
+
+    #[test]
+    fn formats_wall_clocks() {
+        assert_eq!(wall_clock(22, 32), "10:32 pm");
+        assert_eq!(wall_clock(0, 5), "12:05 am");
+        assert_eq!(wall_clock(12, 0), "12:00 pm");
+        assert_eq!(wall_clock(9, 7), "9:07 am");
     }
 
     #[test]

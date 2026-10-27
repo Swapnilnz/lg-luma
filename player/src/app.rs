@@ -24,6 +24,9 @@ use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+mod controls;
+pub use controls::{OsdButton, OsdFocus, SPEEDS};
+
 const STREAMS_TIMEOUT_MS: i32 = 15_000;
 const STREAM_CACHE_MS: f64 = 10. * 60_000.;
 const FIRST_FRAME_MS: f64 = 12_000.;
@@ -81,6 +84,9 @@ pub enum Panel {
     Tracks,
     Settings,
     Info,
+    Speed,
+    /// The Episodes shelf along the bottom: season tabs over episode stills.
+    Episodes,
 }
 
 /// Where a stream starts once its duration is known.
@@ -153,6 +159,19 @@ pub struct App {
     pub subs_for: Option<String>,
     pub sub_choice: SubChoice,
     pub sub_track: Option<Track>,
+    /// Where focus sits in the controls: the scrubber, or a button below it.
+    pub osd_focus: OsdFocus,
+    pub speed: f64,
+    /// When playback was paused, for the pause screen 10 s later.
+    pub paused_at: Option<f64>,
+    pub episode_overview: Option<String>,
+    /// Episodes by season from TMDB, for the Episodes shelf.
+    pub seasons: HashMap<u32, Vec<tmdb::Episode>>,
+    pub seasons_loading: Vec<u32>,
+    pub shelf_season: u32,
+    /// 0: the season tabs, 1: the episodes.
+    pub shelf_row: u8,
+    pub shelf_focus: usize,
 }
 
 impl App {
@@ -202,6 +221,15 @@ impl App {
             subs_for: None,
             sub_choice: SubChoice::Off,
             sub_track: None,
+            osd_focus: OsdFocus::Scrubber,
+            speed: 1.,
+            paused_at: None,
+            episode_overview: None,
+            seasons: HashMap::new(),
+            seasons_loading: vec![],
+            shelf_season: 1,
+            shelf_row: 1,
+            shelf_focus: 0,
         }
     }
 
@@ -237,8 +265,10 @@ impl App {
 
     pub fn osd_visible(&self) -> bool {
         matches!(self.screen, Screen::Playing)
-            && self.panel.is_none()
-            && (now_ms() < self.osd_until
+            && self.panel != Some(Panel::Episodes)
+            && !self.pause_screen()
+            && (self.panel.is_some()
+                || now_ms() < self.osd_until
                 || self.seek_preview.is_some()
                 || (self.video.paused() && self.first_frame && !self.ended))
     }
@@ -290,7 +320,13 @@ impl App {
             self.meta = None;
             self.tmdb_id = None;
             self.binge_group = None;
+            self.seasons.clear();
+            self.seasons_loading.clear();
         }
+        self.osd_focus = OsdFocus::Scrubber;
+        self.speed = 1.;
+        self.paused_at = None;
+        self.episode_overview = None;
         self.epoch += 1;
         self.video.unload();
         self.screen = Screen::Loading(String::new());
@@ -480,6 +516,7 @@ impl App {
             "loadedmetadata" => {
                 self.metadata = true;
                 self.apply_start();
+                self.video.set_rate(self.speed);
             }
             "playing" => {
                 if !self.first_frame {
@@ -488,6 +525,7 @@ impl App {
                 }
                 self.stall_since = None;
                 self.seeking = false;
+                self.paused_at = None;
                 self.scrobble_event(Event::Playing);
             }
             "timeupdate" => {
@@ -504,6 +542,7 @@ impl App {
             "seeked" => self.seeking = false,
             "pause" => {
                 if self.first_frame && !self.ended && !self.video.ended() {
+                    self.paused_at = Some(now_ms());
                     self.scrobble_event(Event::Paused);
                     self.save_position(true);
                 }
@@ -593,6 +632,10 @@ impl App {
             && now > *until
         {
             self.toast = None;
+        }
+        // Focus returns to the scrubber once the controls fade (not while a panel is up).
+        if self.osd_focus != OsdFocus::Scrubber && self.panel.is_none() && !self.osd_visible() {
+            self.osd_focus = OsdFocus::Scrubber;
         }
         if matches!(self.screen, Screen::Playing) && self.current.is_some() && self.wants_play {
             self.watchdog(now);
@@ -1008,6 +1051,11 @@ impl App {
                     self.trakt_toggle();
                 }
             }
+            R::Speed(rate) => {
+                if adjust == 0 {
+                    self.set_speed(rate);
+                }
+            }
         }
         self.settings.save();
     }
@@ -1080,6 +1128,14 @@ impl App {
     }
 
     fn playing_key(&mut self, key: Key) -> bool {
+        if self.pause_screen() {
+            self.leave_pause_screen(key);
+            return true;
+        }
+        if self.panel == Some(Panel::Episodes) {
+            self.shelf_key(key);
+            return true;
+        }
         if let Some(panel) = self.panel {
             match key {
                 Key::Back => {
@@ -1087,8 +1143,10 @@ impl App {
                         // Nothing plays: Back from the picker leaves.
                         self.exit();
                     } else {
+                        // Back to the controls, on the button that opened the panel.
                         self.panel = None;
                         self.notice = None;
+                        self.show_osd();
                     }
                 }
                 Key::Up => self.move_focus(-1),
@@ -1103,6 +1161,12 @@ impl App {
                 Key::Stop => self.exit(),
                 _ => self.media_key_pressed(key),
             }
+            return true;
+        }
+        if let OsdFocus::Button(index) = self.osd_focus
+            && self.osd_visible()
+            && self.button_key(key, index)
+        {
             return true;
         }
         // Next Up: OK plays now, Back keeps the credits.
@@ -1137,7 +1201,11 @@ impl App {
                 }
             }
             Key::Up => self.show_osd(),
-            Key::Down => self.open_panel(Panel::Picker),
+            // Down moves into the control bar, at the button it was last on.
+            Key::Down => {
+                self.show_osd();
+                self.osd_focus = OsdFocus::Button(self.default_button());
+            }
             Key::Left => self.seek_by(-10.),
             Key::Right => self.seek_by(10.),
             Key::Back => {
@@ -1300,19 +1368,42 @@ fn install(video: &Video) {
             Err(error) => log!("Luma Player relaunch: {error}"),
         }
     });
-    // The Magic Remote pointer: a click on a row picks it; elsewhere it acts as OK.
+    // The Magic Remote pointer: a click on a control-bar button, shelf tab or card, or panel
+    // row picks it; anywhere else it acts as OK.
     dom::listen(document.as_ref(), "click", |event| {
-        let row = event
+        let target = event
             .target()
-            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-            .and_then(|el| el.closest("[data-row]").ok().flatten())
-            .and_then(|el| el.get_attribute("data-row"))
-            .and_then(|n| n.parse::<usize>().ok());
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok());
+        let number = |attribute: &str| -> Option<usize> {
+            let selector = format!("[{attribute}]");
+            target
+                .as_ref()?
+                .closest(&selector)
+                .ok()
+                .flatten()?
+                .get_attribute(attribute)?
+                .parse()
+                .ok()
+        };
+        let (button, season, episode, row) = (
+            number("data-osd"),
+            number("data-season"),
+            number("data-ep"),
+            number("data-row"),
+        );
         with(|app| {
-            if let Some(row) = row {
-                app.focus = row;
+            if let Some(index) = button {
+                app.click_button(index);
+            } else if season.is_some() || episode.is_some() {
+                app.click_shelf(season.map(|s| s as u32), episode);
+            } else {
+                if let Some(row) = row {
+                    app.focus = row;
+                }
+                app.on_key(Key::Ok);
+                return;
             }
-            app.on_key(Key::Ok);
+            app.render();
         });
     });
     dom::every(250, || {
@@ -1672,13 +1763,17 @@ async fn episode_details(epoch: u64) {
     let Ok(reply) = net::send(&tmdb::season(&key, show, season), 10_000).await else {
         return;
     };
-    let episode = tmdb::parse_season(&reply.text)
-        .into_iter()
-        .find(|e| e.number == number);
+    let episodes = tmdb::parse_season(&reply.text);
+    let episode = episodes.iter().find(|e| e.number == number).cloned();
     update(epoch, |app| {
         if let Some(episode) = episode {
             app.episode_name = Some(episode.name).filter(|n| !n.is_empty());
+            app.episode_overview = Some(episode.overview).filter(|o| !o.is_empty());
             app.episode_runtime = episode.runtime;
+        }
+        // The Episodes shelf opens on this season without another fetch.
+        if !episodes.is_empty() {
+            app.seasons.insert(season, episodes);
         }
         app.render();
     });

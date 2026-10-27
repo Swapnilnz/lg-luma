@@ -67,16 +67,25 @@ nix develop .#player -c scripts/player-deploy.sh
 
 ## How it behaves
 
-| Key | Playing | In a panel |
-|-----|---------|------------|
-| OK | Show the controls; with them up (or paused), play/pause | Select |
-| Up | Show the controls | Move |
-| Down | Streams | Move |
-| Left / Right | Seek 10 s (presses add up, land after 0.6 s) | Adjust a setting |
-| Rewind / FF | Seek 60 s | |
-| Back | Hide the controls, else exit to Luma | Close |
-| Play, Pause, Stop | As labelled; Stop exits | |
-| Red / Green / Yellow / Blue | Info / Streams / Audio & Subtitles / Settings | Switch panel |
+The controls are an Apple TV-style bar: the scrubber, and below it Play/Pause, back and
+forward 10 s, then Episodes and Next Episode (shows), Audio & Subtitles, Playback Speed,
+Streams, Info and Settings. Each opens as a popover above the bar; Episodes opens a shelf of
+season tabs and episode stills along the bottom.
+
+| Key | Controls hidden | On the scrubber | On the buttons | In a panel |
+|-----|-----------------|-----------------|----------------|------------|
+| OK | Show the controls | Play/pause | Press the button | Select |
+| Up | Show the controls | | Back to the scrubber | Move |
+| Down | Show the buttons | Down to the buttons | | Move |
+| Left / Right | Seek 10 s | Seek 10 s (presses add up, land after 0.6 s) | Move between buttons | Adjust a setting; shelf: seasons or episodes |
+| Back | Exit to Luma | Hide the controls (exit when paused) | Hide the controls | Close |
+| Rewind / FF | Seek 60 s | Seek 60 s | Seek 60 s | |
+| Play, Pause, Stop | As labelled; Stop exits | | | |
+| Red / Green / Yellow / Blue | Info / Streams / Audio & Subtitles / Settings | | | Switch panel |
+
+Paused for 10 s, the controls give way to a pause screen: the title or logo, the episode,
+its synopsis, where you paused and how long is left, and the time of day top right. Any key
+brings the controls back; OK or Play resumes.
 
 - **Start:** TMDB backdrop and logo while AIOStreams answers (15 s, one automatic retry). The
   top stream plays, or the one in the same `bingeGroup` as the last episode.
@@ -99,6 +108,9 @@ nix develop .#player -c scripts/player-deploy.sh
 Choices made where the plan left it open, as Netflix and Apple TV do it:
 
 - OK shows the controls and a second OK pauses: the Magic Remote has no Play/Pause buttons.
+- Picking another episode on the shelf asks to resume it if it has a saved place; Next
+  Episode starts it from the top (or resumes silently, as autoplay does).
+- Playback speed resets to Normal for each new title.
 - A show card with no episode and no Trakt history starts at S1 E1.
 - Back from the Resume question, a message or the picker (nothing playing) exits to Luma.
 - After the last episode or a movie ends, the player closes back to Luma.
@@ -108,6 +120,7 @@ Choices made where the plan left it open, as Netflix and Apple TV do it:
 | File | Owns |
 |------|------|
 | `src/app.rs` | State, launch flow, fallback, scrobbling, resume, Next Up, keys |
+| `src/app/controls.rs` | Control-bar buttons, Episodes shelf, Next Episode, speed, pause screen |
 | `src/ui.rs` | HTML for each layer: stages, controls, Next Up, panels and their rows |
 | `src/video.rs` | `<video>`, audio and text tracks through Reflect |
 | `src/net.rs` | `fetch` with timeouts, `keepalive` for exit scrobbles |

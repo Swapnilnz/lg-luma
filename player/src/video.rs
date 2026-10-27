@@ -61,6 +61,11 @@ impl Video {
         let _ = self.0.pause();
     }
 
+    /// Playback speed; `load()` resets it, so it is set again on each new source.
+    pub fn set_rate(&self, rate: f64) {
+        self.0.set_playback_rate(rate);
+    }
+
     pub fn paused(&self) -> bool {
         self.0.paused()
     }

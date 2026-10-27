@@ -1,11 +1,11 @@
 //! Drawing: the app's state as HTML in a few fixed layers over the `<video>`.
 //! Each layer is only written when its HTML changes.
 
-use crate::app::{App, Panel, Screen, SubChoice};
+use crate::app::{App, OsdButton, OsdFocus, Panel, Screen, SubChoice};
 use crate::dom::{self, escape, now_ms};
 use luma_core::resume::Offer;
 use luma_core::selection::{language_name, normalize_language, same_language};
-use luma_core::time::clock;
+use luma_core::time::{clock, short, wall_clock};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 
@@ -26,6 +26,25 @@ pub enum RowId {
     SubtitleLanguage,
     SubtitlesOn,
     Trakt,
+    Speed(f64),
+}
+
+impl RowId {
+    /// Rows changed with Left/Right, drawn with a chevron.
+    fn adjustable(&self) -> bool {
+        matches!(
+            self,
+            RowId::SubSize
+                | RowId::SubBox
+                | RowId::SubOffset
+                | RowId::Autoplay
+                | RowId::NextCard
+                | RowId::Countdown
+                | RowId::AudioLanguage
+                | RowId::SubtitleLanguage
+                | RowId::SubtitlesOn
+        )
+    }
 }
 
 /// One line in a panel. Rows without an id are headings or text and never take focus.
@@ -100,6 +119,24 @@ pub fn rows(app: &App, panel: Panel) -> Vec<Row> {
         Panel::Tracks => track_rows(app),
         Panel::Settings => settings_rows(app),
         Panel::Info => info_rows(app),
+        Panel::Speed => crate::app::SPEEDS
+            .iter()
+            .map(|&rate| {
+                let mut r = row(
+                    RowId::Speed(rate),
+                    if rate == 1. {
+                        "Normal".to_owned()
+                    } else {
+                        format!("{rate}×")
+                    },
+                    "",
+                );
+                r.selected = (app.speed - rate).abs() < 0.01;
+                r
+            })
+            .collect(),
+        // The shelf draws itself; it has no rows.
+        Panel::Episodes => vec![],
     }
 }
 
@@ -364,19 +401,26 @@ pub fn render(app: &App) {
             "stage on"
         },
     );
-    dom::set_html("osd", &osd(app));
-    dom::set_class("osd", if app.osd_visible() { "osd on" } else { "osd" });
-    let panel_html = app.panel.map(|p| panel(app, p)).unwrap_or_default();
-    dom::set_html("panel", &panel_html);
-    dom::set_class(
-        "panel",
-        if app.panel.is_some() {
-            "panel on"
+    let pause = app.pause_screen();
+    dom::set_html(
+        "pause",
+        &if pause {
+            pause_screen(app)
         } else {
-            "panel"
+            String::new()
         },
     );
-    dom::set_html("nextup", &next_up(app));
+    dom::set_class("pause", if pause { "pause on" } else { "pause" });
+    dom::set_html("osd", &osd(app));
+    dom::set_class("osd", if app.osd_visible() { "osd on" } else { "osd" });
+    let (panel_html, panel_class) = match app.panel {
+        Some(Panel::Episodes) => (shelf(app), "panel shelf on"),
+        Some(p) => (panel(app, p), "panel popover on"),
+        None => (String::new(), "panel"),
+    };
+    dom::set_html("panel", &panel_html);
+    dom::set_class("panel", panel_class);
+    dom::set_html("nextup", &if pause { String::new() } else { next_up(app) });
     dom::set_html(
         "toast",
         &app.toast
@@ -386,7 +430,7 @@ pub fn render(app: &App) {
     );
     dom::set_class(
         "spinner",
-        if app.buffering() && app.panel.is_none() {
+        if app.buffering() && app.panel.is_none() && !pause {
             "spinner on"
         } else {
             "spinner"
@@ -406,20 +450,41 @@ pub fn render(app: &App) {
         ),
     );
     if app.panel.is_some() {
-        scroll_focus_into_view();
+        keep_focus_visible();
     }
 }
 
-fn scroll_focus_into_view() {
-    let Ok(Some(el)) = dom::document().query_selector("#panel .row.focus") else {
+/// Scrolls the panel's list (never the page) so the focused row is in view. The page itself
+/// must not scroll: scrollIntoView on a panel still sliding in moved the whole player.
+fn keep_focus_visible() {
+    let document = dom::document();
+    let (Ok(Some(list)), Ok(Some(row))) = (
+        document.query_selector("#panel .rows"),
+        document.query_selector("#panel .row.focus"),
+    ) else {
         return;
     };
-    let f = dom::get(el.as_ref(), "scrollIntoView");
-    if let Ok(f) = f.dyn_into::<js_sys::Function>() {
-        let options = js_sys::Object::new();
-        dom::set(&options, "block", &JsValue::from_str("nearest"));
-        let _ = f.call1(el.as_ref(), &options);
+    let (Ok(list), Ok(row)) = (
+        list.dyn_into::<web_sys::HtmlElement>(),
+        row.dyn_into::<web_sys::HtmlElement>(),
+    ) else {
+        return;
+    };
+    let top = row.offset_top();
+    let bottom = top + row.offset_height();
+    let view = list.client_height();
+    let scroll = list.scroll_top();
+    if top < scroll + 12 {
+        list.set_scroll_top((top - 12).max(0));
+    } else if bottom > scroll + view - 12 {
+        list.set_scroll_top(bottom - view + 12);
     }
+}
+
+/// The local time `ms` from now, e.g. `10:32 pm`.
+fn time_of_day(ms_from_now: f64) -> String {
+    let date = js_sys::Date::new(&JsValue::from_f64(now_ms() + ms_from_now.max(0.)));
+    wall_clock(date.get_hours(), date.get_minutes())
 }
 
 fn backdrop(app: &App) -> String {
@@ -527,9 +592,6 @@ fn osd(app: &App) -> String {
     let paused = app.video.paused() && app.first_frame;
     let center = if app.seek_preview.is_some() {
         format!(r#"<div class="center seek">{}</div>"#, clock(position))
-    } else if paused {
-        r#"<div class="center"><div class="pause-icon"><span></span><span></span></div></div>"#
-            .into()
     } else {
         String::new()
     };
@@ -537,20 +599,177 @@ fn osd(app: &App) -> String {
         .episode_line()
         .map(|line| format!(r#"<div class="e">{}</div>"#, escape(&line)))
         .unwrap_or_default();
+    let remaining = if duration > 0. {
+        let left = (duration - position) / app.speed.max(0.1);
+        format!(
+            "-{}<span class=\"ends\">Ends at {}</span>",
+            clock(duration - position),
+            time_of_day(left * 1000.)
+        )
+    } else {
+        String::new()
+    };
+    let scrub_focus = app.osd_focus == OsdFocus::Scrubber && app.panel.is_none();
+    let buttons = app.osd_buttons();
+    let button_html = |(i, b): (usize, &OsdButton)| -> String {
+        let focus = app.panel.is_none() && app.osd_focus == OsdFocus::Button(i);
+        let active = app.panel.is_some() && b.panel() == app.panel;
+        let icon = match b {
+            OsdButton::PlayPause if paused || !app.first_frame => icons::PLAY,
+            OsdButton::PlayPause => icons::PAUSE,
+            OsdButton::Back10 => icons::BACK_10,
+            OsdButton::Forward10 => icons::FORWARD_10,
+            OsdButton::Episodes => icons::EPISODES,
+            OsdButton::Next => icons::NEXT,
+            OsdButton::Tracks => icons::SUBTITLES,
+            OsdButton::Speed => icons::SPEED,
+            OsdButton::Streams => icons::STREAMS,
+            OsdButton::Info => icons::INFO,
+            OsdButton::Settings => icons::SETTINGS,
+        };
+        let label = match b {
+            OsdButton::PlayPause if paused => "Play".to_owned(),
+            OsdButton::PlayPause => "Pause".to_owned(),
+            OsdButton::Speed if (app.speed - 1.).abs() > 0.01 => format!("Speed · {}×", app.speed),
+            other => other.label().to_owned(),
+        };
+        let badge = match b {
+            OsdButton::Speed if (app.speed - 1.).abs() > 0.01 => {
+                format!(r#"<span class="badge">{}×</span>"#, app.speed)
+            }
+            _ => String::new(),
+        };
+        format!(
+            r#"<div class="obtn{}{}" data-osd="{i}">{}{badge}<span class="tip">{}</span></div>"#,
+            if focus { " focus" } else { "" },
+            if active { " active" } else { "" },
+            icons::svg(icon),
+            escape(&label)
+        )
+    };
+    let transport: String = buttons
+        .iter()
+        .enumerate()
+        .take(3)
+        .map(button_html)
+        .collect();
+    let options: String = buttons
+        .iter()
+        .enumerate()
+        .skip(3)
+        .map(button_html)
+        .collect();
     format!(
         r#"<div class="top"><div class="t">{}</div>{episode}</div>{center}
         <div class="bottom">
-          <div class="bar"><div class="buf" style="width:{buffered:.2}%"></div><div class="played" style="width:{played:.2}%"></div><div class="knob" style="left:{played:.2}%"></div></div>
-          <div class="times"><span>{}</span><span>{}</span></div>
-          <div class="keys"><span class="k red"></span>Info<span class="k green"></span>Streams<span class="k yellow"></span>Audio &amp; Subtitles<span class="k blue"></span>Settings</div>
+          <div class="scrub{}">
+            <div class="bar"><div class="buf" style="width:{buffered:.2}%"></div><div class="played" style="width:{played:.2}%"></div><div class="knob" style="left:{played:.2}%"></div></div>
+            <div class="times"><span>{}</span><span>{remaining}</span></div>
+          </div>
+          <div class="controls"><div class="group">{transport}</div><div class="group">{options}</div></div>
         </div>"#,
         escape(&app.title()),
+        if scrub_focus { " focus" } else { "" },
         clock(position),
-        if duration > 0. {
-            format!("-{}", clock(duration - position))
-        } else {
-            String::new()
-        },
+    )
+}
+
+/// Paused for 10 s: what's on, the blurb, and the time, as Nuvio shows it.
+fn pause_screen(app: &App) -> String {
+    let title = match app.meta.as_ref().and_then(|m| m.logo.as_ref()) {
+        Some(logo) => format!(
+            r#"<img class="logo" src="{}" alt="{}">"#,
+            escape(logo),
+            escape(&app.title())
+        ),
+        None => format!(r#"<h1>{}</h1>"#, escape(&app.title())),
+    };
+    let episode = app
+        .episode_line()
+        .map(|line| format!(r#"<div class="pep">{}</div>"#, escape(&line)))
+        .unwrap_or_default();
+    let blurb = app
+        .overview()
+        .map(|text| format!(r#"<p class="pblurb">{}</p>"#, escape(&text)))
+        .unwrap_or_default();
+    let position = app.video.position();
+    let duration = app.video.duration();
+    let left = if duration > 0. {
+        format!(" · {} left", short(duration - position))
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<div class="pshade"></div>
+        <div class="pclock">{}</div>
+        <div class="pinfo"><div class="plabel">You're watching</div>{title}{episode}{blurb}<div class="ptime">Paused at {}{left}</div></div>"#,
+        time_of_day(0.),
+        clock(position),
+    )
+}
+
+/// The Episodes shelf: season tabs over a row of episode stills, as Apple TV draws it.
+fn shelf(app: &App) -> String {
+    const PITCH: i32 = 428;
+    const WINDOW: i32 = 1680;
+    let current = app.launch.episode_key();
+    let tabs: String = app
+        .shelf_seasons()
+        .iter()
+        .map(|&season| {
+            format!(
+                r#"<div class="tab{}{}" data-season="{season}">Season {season}</div>"#,
+                if season == app.shelf_season {
+                    " on"
+                } else {
+                    ""
+                },
+                if season == app.shelf_season && app.shelf_row == 0 {
+                    " focus"
+                } else {
+                    ""
+                },
+            )
+        })
+        .collect();
+    let body = match app.shelf_episodes() {
+        None => r#"<div class="empty">Loading episodes…</div>"#.to_owned(),
+        Some(list) if list.is_empty() => {
+            r#"<div class="empty">No episode list from TMDB for this season.</div>"#.to_owned()
+        }
+        Some(list) => {
+            let total = list.len() as i32 * PITCH;
+            let offset = ((app.shelf_focus as i32 - 1).max(0) * PITCH).min((total - WINDOW).max(0));
+            let cards: String = list
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let now = current == Some((app.shelf_season, e.number));
+                    let focus = app.shelf_row == 1 && i == app.shelf_focus;
+                    let thumb = match &e.still {
+                        Some(url) => format!(r#"<img src="{}" alt="">"#, escape(url)),
+                        None => format!(r#"<div class="noimg">{}</div>"#, e.number),
+                    };
+                    let meta = e.runtime.map(|m| short(m * 60.)).unwrap_or_default();
+                    format!(
+                        r#"<div class="ep{}{}" data-ep="{i}"><div class="thumb">{thumb}{}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
+                        if focus { " focus" } else { "" },
+                        if now { " now" } else { "" },
+                        if now { r#"<span class="nowtag">Now Playing</span>"# } else { "" },
+                        e.number,
+                        if meta.is_empty() { String::new() } else { format!(" · {meta}") },
+                        escape(&e.name),
+                    )
+                })
+                .collect();
+            format!(
+                r#"<div class="cards-window"><div class="cards" style="transform:translateX(-{offset}px)">{cards}</div></div>"#
+            )
+        }
+    };
+    format!(
+        r#"<div class="shelf-inner"><div class="stitle">{}</div><div class="tabs">{tabs}</div>{body}</div>"#,
+        escape(&app.title())
     )
 }
 
@@ -594,6 +813,8 @@ fn panel(app: &App, panel: Panel) -> String {
         Panel::Tracks => "Audio & Subtitles",
         Panel::Settings => "Settings",
         Panel::Info => "Info",
+        Panel::Speed => "Playback Speed",
+        Panel::Episodes => "Episodes",
     };
     let notice = app
         .notice
@@ -616,21 +837,39 @@ fn panel(app: &App, panel: Panel) -> String {
             if r.id.is_some() && i == app.focus {
                 class.push_str(" focus");
             }
-            if r.selected {
-                class.push_str(" selected");
-            }
             if r.disabled {
                 class.push_str(" disabled");
             }
+            let check = if r.id.is_some() {
+                format!(
+                    r#"<div class="chk">{}</div>"#,
+                    if r.selected {
+                        icons::svg(icons::CHECK)
+                    } else {
+                        String::new()
+                    }
+                )
+            } else {
+                String::new()
+            };
             let detail = if r.detail.is_empty() {
                 String::new()
             } else {
                 format!(r#"<div class="d">{}</div>"#, escape(&r.detail))
             };
-            let value = if r.value.is_empty() {
+            let chevron = r.id.as_ref().is_some_and(RowId::adjustable);
+            let value = if r.value.is_empty() && !chevron {
                 String::new()
             } else {
-                format!(r#"<div class="v">{}</div>"#, escape(&r.value))
+                format!(
+                    r#"<div class="v">{}{}</div>"#,
+                    escape(&r.value),
+                    if chevron {
+                        icons::svg(icons::CHEVRON)
+                    } else {
+                        String::new()
+                    }
+                )
             };
             let data = if r.id.is_some() {
                 format!(r#" data-row="{i}""#)
@@ -638,7 +877,7 @@ fn panel(app: &App, panel: Panel) -> String {
                 String::new()
             };
             format!(
-                r#"<div class="{class}"{data}><div class="l">{}{detail}</div>{value}</div>"#,
+                r#"<div class="{class}"{data}>{check}<div class="l">{}{detail}</div>{value}</div>"#,
                 escape(&r.label)
             )
         })
@@ -646,4 +885,28 @@ fn panel(app: &App, panel: Panel) -> String {
     format!(
         r#"<div class="sheet"><div class="ptitle">{title}</div>{notice}<div class="rows">{rows}</div></div>"#
     )
+}
+
+/// Line icons (24 x 24, after Lucide), drawn in the current text colour.
+mod icons {
+    pub fn svg(body: &str) -> String {
+        format!(
+            r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"#
+        )
+    }
+
+    pub const PLAY: &str = r#"<path d="M7 4.5v15l12.5-7.5z" fill="currentColor"/>"#;
+    pub const PAUSE: &str = r#"<rect x="6" y="4.5" width="4" height="15" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="4.5" width="4" height="15" rx="1" fill="currentColor" stroke="none"/>"#;
+    pub const BACK_10: &str = r#"<path d="M3 12a9 9 0 1 0 2.64-6.36L3 8.3"/><path d="M3 3.5v4.8h4.8"/><text x="12.4" y="15.6" font-size="8" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="sans-serif">10</text>"#;
+    pub const FORWARD_10: &str = r#"<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8.3"/><path d="M21 3.5v4.8h-4.8"/><text x="11.6" y="15.6" font-size="8" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="sans-serif">10</text>"#;
+    pub const EPISODES: &str = r#"<rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="13" width="7" height="7" rx="1.5"/><path d="M14 6h7M14 9.5h4.5M14 15h7M14 18.5h4.5"/>"#;
+    pub const NEXT: &str =
+        r#"<path d="M5 4.5v15l11-7.5z" fill="currentColor"/><path d="M19 5v14"/>"#;
+    pub const SUBTITLES: &str = r#"<rect x="2.5" y="4.5" width="19" height="15" rx="3"/><path d="M7 15h4M14 15h3M7 11.5h2M12 11.5h5"/>"#;
+    pub const SPEED: &str = r#"<path d="M12 14.5l4-4.5"/><path d="M3.4 18.5a10 10 0 1 1 17.2 0"/><circle cx="12" cy="14.5" r="1" fill="currentColor"/>"#;
+    pub const STREAMS: &str = r#"<path d="M12.8 2.2a2 2 0 0 0-1.6 0L2.6 6.1a1 1 0 0 0 0 1.8l8.6 3.9a2 2 0 0 0 1.6 0l8.6-3.9a1 1 0 0 0 0-1.8z"/><path d="M2 12.6l9.2 4.2a2 2 0 0 0 1.6 0L22 12.6"/><path d="M2 17.6l9.2 4.2a2 2 0 0 0 1.6 0L22 17.6"/>"#;
+    pub const INFO: &str = r#"<circle cx="12" cy="12" r="9.5"/><path d="M12 16.5v-5M12 7.8h.01"/>"#;
+    pub const SETTINGS: &str = r#"<path d="M20 7h-9M14 17H4"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>"#;
+    pub const CHECK: &str = r#"<path d="M20 6 9 17l-5-5"/>"#;
+    pub const CHEVRON: &str = r#"<path d="m9 18 6-6-6-6"/>"#;
 }
