@@ -601,6 +601,21 @@ impl State {
     /// Remote focus is revealed after layout changes, including hide/reorder.
     /// Pointer paths deliberately do not call this method.
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
+        let shelf_move = matches!(
+            self.focus,
+            Target::Hero
+                | Target::HeroExtra(_)
+                | Target::HeroMore
+                | Target::App(_)
+                | Target::FeedSearch
+                | Target::FeedVoice
+        );
+        // Focus left mid-slide for somewhere else: settle where Home is drawn, then go on.
+        if self.feeds.page_slide.is_some() && !shelf_move {
+            self.scroll = self.drawn_scroll();
+            self.feeds.page_slide = None;
+        }
+        let drawn = self.drawn_scroll();
         let previous = self.scroll;
         let previous_home = self.home_scroll;
         let previous_feeds = self.feeds.scroll.clone();
@@ -649,14 +664,21 @@ impl State {
         // With the Top Shelf, Home is two screens: greeting and favourites (with the search
         // bar) fill the first, the banner the second, whole.
         if self.page == Page::Home && self.feeds.hero.is_some() {
-            match self.focus {
-                Target::Hero | Target::HeroExtra(_) | Target::HeroMore => {
-                    if let Some(band) = controls.iter().find(|c| c.target == Target::Hero) {
-                        self.scroll = (previous + band.rect.y).max(0.);
-                    }
+            // Between the two screens Home slides (PAGE_SLIDE) rather than jumps.
+            let target = match self.focus {
+                Target::Hero | Target::HeroExtra(_) | Target::HeroMore => controls
+                    .iter()
+                    .find(|c| c.target == Target::Hero)
+                    .map(|band| (drawn + band.rect.y).max(0.)),
+                Target::App(_) | Target::FeedSearch | Target::FeedVoice => Some(0.),
+                _ => None,
+            };
+            if let Some(target) = target {
+                if (target - previous).abs() > 1. {
+                    self.feeds.page_slide = (!self.preferences.reduced_motion)
+                        .then(|| (drawn, std::time::Instant::now()));
                 }
-                Target::App(_) | Target::FeedSearch | Target::FeedVoice => self.scroll = 0.,
-                _ => {}
+                self.scroll = target;
             }
         }
         if self.page == Page::Home {

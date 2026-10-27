@@ -93,7 +93,16 @@ pub struct Preview {
     pub hiding: Option<Instant>,
     /// Home's scroll before the preview moved the row into place, for a smooth slide.
     pub scroll_from: f32,
+    /// When the preview last moved on to another title, and the title it moved from: its
+    /// backdrop stays beneath while the new one crossfades in over PREVIEW_CHANGE.
+    pub changed: Instant,
+    pub previous: Option<String>,
 }
+
+/// How long a preview takes to crossfade from one title's backdrop to the next.
+pub const PREVIEW_CHANGE: Duration = Duration::from_millis(320);
+/// Home's slide between its first screen and the Top Shelf.
+pub const PAGE_SLIDE: Duration = Duration::from_millis(480);
 
 /// Created by the remote's mic button through LG Input Hook (see feeds.md): Luma then listens.
 pub const VOICE_TRIGGER: &str = "/tmp/luma-voice-search";
@@ -195,14 +204,19 @@ pub struct Feeds {
     /// What Trakt says about titles lately opened in a menu or page.
     pub trakt_titles: HashMap<String, TraktTitle>,
     /// Titles last sent for their backdrop and logo (Top Shelf and screensaver slides).
-    pub prefetched: Vec<String>,
+    pub prefetched: Vec<(String, bool)>,
     /// Requests for the feed workers, sent by `main::feeds_tick`.
     pub outbox: Vec<Outgoing>,
+    /// Cards on screen and in the rows by focus, whose art is fetched before focus reaches
+    /// them; marked true for the few beside focus, whose full backdrop is fetched too.
+    pub warm: Vec<(String, bool)>,
     /// The card widened to landscape, and the one narrowing back after focus left it.
     pub wide: Option<Wide>,
     pub narrowing: Option<Wide>,
     /// The Top Shelf's "This week" posters, expanded into a grid.
     pub sheet: Option<Sheet>,
+    /// Home sliding between its first screen and the Top Shelf: from which scroll, since when.
+    pub page_slide: Option<(f32, Instant)>,
 }
 
 impl Feeds {
@@ -237,6 +251,19 @@ impl Feeds {
                     .filter_map(|details| details.landscape.as_ref()),
             )
             .chain(
+                self.warm
+                    .iter()
+                    .filter_map(|(link, _)| self.details.get(link))
+                    .flat_map(|details| details.logo.iter().chain(details.landscape.iter())),
+            )
+            .chain(
+                self.warm
+                    .iter()
+                    .filter(|(_, full)| *full)
+                    .filter_map(|(link, _)| self.details.get(link))
+                    .filter_map(|details| details.backdrop.as_ref()),
+            )
+            .chain(
                 self.sheet
                     .iter()
                     .flat_map(|sheet| &sheet.items)
@@ -252,6 +279,9 @@ impl Feeds {
         let mut links: Vec<&String> = [
             self.requested.as_ref(),
             self.preview.as_ref().map(|preview| &preview.link),
+            self.preview
+                .as_ref()
+                .and_then(|preview| preview.previous.as_ref()),
             self.title.as_ref().map(|page| &page.link),
         ]
         .into_iter()
@@ -332,12 +362,32 @@ impl Feeds {
     }
 
     /// Slides whose backdrop and logo are not in memory yet, for the artwork worker.
-    pub fn prefetch_wanted(&self) -> Vec<String> {
-        self.slide_links()
+    pub fn prefetch_wanted(&self) -> Vec<(String, bool)> {
+        let mut wanted: Vec<(String, bool)> = self
+            .slide_links()
             .into_iter()
-            .filter(|link| !self.details.contains_key(*link) || !self.artwork_loaded(link))
-            .cloned()
-            .collect()
+            .map(|link| (link.clone(), true))
+            .chain(self.warm.iter().cloned())
+            .collect();
+        let mut seen = HashSet::new();
+        wanted.retain(|(link, full)| seen.insert(link.clone()) && !self.art_ready(link, *full));
+        wanted
+    }
+
+    /// Whether a title's details, logo and landscape art (and backdrop, with `full`) are here.
+    fn art_ready(&self, link: &str, full: bool) -> bool {
+        let Some(details) = self.details.get(link) else {
+            return false;
+        };
+        let backdrop = if full {
+            details.backdrop.as_ref()
+        } else {
+            None
+        };
+        [details.logo.as_ref(), details.landscape.as_ref(), backdrop]
+            .into_iter()
+            .flatten()
+            .all(|url| self.images.contains_key(url))
     }
 
     /// Drops artwork no nearby row shows.
@@ -560,7 +610,31 @@ impl State {
                 .any(|control| control.target == Target::Hero)
                 .then_some(Target::Hero)
         };
+        // With the Top Shelf, the first screen stacks greeting, search bar, then favourites at
+        // the bottom: Down from favourites is the Top Shelf, Up is the search bar.
+        let stacked = self.feeds.hero.is_some();
         match self.focus.clone() {
+            Target::App(_) if stacked && matches!(direction, Direction::Down) => {
+                let next = hero().or_else(|| nearest_feed(controls, x, |_| true, false))?;
+                self.focus(next, controls);
+                Some(vec![])
+            }
+            Target::App(_) if stacked && matches!(direction, Direction::Up) => {
+                let next = nearest_bar(controls, x)?;
+                self.focus(next, controls);
+                Some(vec![])
+            }
+            Target::FeedSearch | Target::FeedVoice
+                if stacked && matches!(direction, Direction::Up | Direction::Down) =>
+            {
+                let next = if matches!(direction, Direction::Down) {
+                    nearest_favorite(controls, x).or_else(hero)?
+                } else {
+                    Target::Nav(0)
+                };
+                self.focus(next, controls);
+                Some(vec![])
+            }
             Target::App(_) if matches!(direction, Direction::Down) => {
                 let next = nearest_bar(controls, x)
                     .or_else(hero)
@@ -574,9 +648,14 @@ impl State {
                         self.hero_step(matches!(direction, Direction::Right));
                     }
                     Direction::Up => {
-                        let next = nearest_bar(controls, x)
-                            .or_else(|| nearest_favorite(controls, 960.))?;
-                        self.focus(next, controls);
+                        let next = if stacked {
+                            nearest_favorite(controls, 960.).or_else(|| nearest_bar(controls, x))
+                        } else {
+                            nearest_bar(controls, x).or_else(|| nearest_favorite(controls, 960.))
+                        };
+                        if let Some(next) = next {
+                            self.focus(next, controls);
+                        }
                     }
                     Direction::Down => {
                         let next = [Target::HeroExtra(0), Target::HeroMore]
@@ -932,7 +1011,12 @@ impl Feeds {
 
     /// Whether the focused poster or the preview is still moving.
     pub fn card_animating(&self) -> bool {
-        self.wide_animating()
+        self.preview.as_ref().is_some_and(|preview| {
+            preview.changed.elapsed() < PREVIEW_CHANGE + Duration::from_millis(40)
+        }) || self
+            .page_slide
+            .is_some_and(|(_, since)| since.elapsed() < PAGE_SLIDE + Duration::from_millis(40))
+            || self.wide_animating()
             || self
                 .focus_since
                 .as_ref()
@@ -947,8 +1031,9 @@ impl Feeds {
         let Ok(details) = result else {
             return;
         };
-        if self.details.len() > 80 {
-            let keep: HashSet<String> = self.held_links().into_iter().cloned().collect();
+        if self.details.len() > 240 {
+            let mut keep: HashSet<String> = self.held_links().into_iter().cloned().collect();
+            keep.extend(self.warm.iter().map(|(link, _)| link.clone()));
             self.details.retain(|known, _| keep.contains(known));
         }
         self.details.insert(link, details);
@@ -1000,12 +1085,39 @@ impl State {
             && matches!(self.focus, Target::Feed(..));
         let drawn_scroll = self.drawn_scroll();
         let focused_link = card_link(&self.feeds, &self.focus);
+        if self
+            .feeds
+            .page_slide
+            .is_some_and(|(_, since)| since.elapsed() >= PAGE_SLIDE)
+        {
+            self.feeds.page_slide = None;
+            self.dirty = true;
+        }
+        if let Some(preview) = &mut self.feeds.preview
+            && preview.previous.is_some()
+            && preview.changed.elapsed() >= PREVIEW_CHANGE
+        {
+            preview.previous = None;
+        }
         if let Some(preview) = &mut self.feeds.preview {
+            let moved = preview.target != self.focus
+                || focused_link.as_deref() != Some(preview.link.as_str());
+            // Moving on to another card while previewing: the preview stays and follows it at
+            // once, with placeholders until that title's art is here. Home never shows through.
             if preview.hiding.is_none()
-                && (!previewable
-                    || preview.target != self.focus
-                    || focused_link.as_deref() != Some(preview.link.as_str()))
+                && previewable
+                && moved
+                && let Some(link) = focused_link.clone()
+                && let Some(control) = controls.iter().find(|c| c.target == self.focus)
             {
+                // The backdrop shown so far stays beneath the next one until it is in.
+                preview.previous = Some(std::mem::replace(&mut preview.link, link));
+                preview.target = self.focus.clone();
+                preview.changed = now;
+                self.scroll = (drawn_scroll + control.rect.y - PREVIEW_CARD_Y).max(0.);
+                preview.scroll_from = self.scroll;
+                self.dirty = true;
+            } else if preview.hiding.is_none() && (!previewable || moved) {
                 preview.hiding = Some(now);
                 // Keep Home where it is drawn now: no jump if focus moved mid-slide.
                 self.scroll = drawn_scroll;
@@ -1053,6 +1165,8 @@ impl State {
                 shown: now,
                 hiding: None,
                 scroll_from,
+                changed: now,
+                previous: None,
             });
             self.dirty = true;
         }
@@ -1061,6 +1175,14 @@ impl State {
 
     /// Home's scroll as drawn: the row slides into place while the preview fades in.
     pub fn drawn_scroll(&self) -> f32 {
+        if let Some((from, since)) = self.feeds.page_slide
+            && since.elapsed() < PAGE_SLIDE
+        {
+            let t = since.elapsed().as_secs_f32() / PAGE_SLIDE.as_secs_f32();
+            // Ease in and out, as Apple TV's pages move.
+            let t = t * t * (3. - 2. * t);
+            return from + (self.scroll - from) * t;
+        }
         match &self.feeds.preview {
             Some(preview) if preview.hiding.is_none() => {
                 let progress = self.feeds.preview_progress(self.preferences.reduced_motion);
@@ -2524,5 +2646,75 @@ impl State {
                 .unwrap_or_default(),
             _ => vec![],
         })
+    }
+}
+
+impl State {
+    /// The cards whose art is fetched ahead of focus: every card on screen, and those of the
+    /// focused row and the two below it, within about a screen's width. The two either side
+    /// of focus also get their full backdrop, so a preview opens on art, not placeholders.
+    pub fn warm_links(&self, controls: &[Control]) -> Vec<(String, bool)> {
+        const LIMIT: usize = 48;
+        let (focus_row, focus_index) = match self.focus {
+            Target::Feed(row, index) => (Some(row), index),
+            _ => (None, 0),
+        };
+        let mut rows: BTreeSet<usize> = controls
+            .iter()
+            .filter_map(|control| match control.target {
+                Target::Feed(row, _)
+                    if control.rect.y < 1080. && control.rect.y + control.rect.h > 0. =>
+                {
+                    Some(row)
+                }
+                _ => None,
+            })
+            .collect();
+        // From the Top Shelf, the first rows below it are next.
+        let anchor = focus_row.or_else(|| {
+            matches!(
+                self.focus,
+                Target::Hero | Target::HeroMore | Target::HeroExtra(_)
+            )
+            .then(|| (0..self.feeds.rows.len()).find(|row| self.feeds.row_visible(*row)))
+            .flatten()
+        });
+        if let Some(row) = anchor {
+            rows.extend(
+                (row..self.feeds.rows.len())
+                    .filter(|row| self.feeds.row_visible(*row))
+                    .take(3),
+            );
+        }
+        let mut cards: Vec<(usize, String, bool)> = Vec::new();
+        for control in controls {
+            let Target::Feed(row, index) = control.target else {
+                continue;
+            };
+            if !rows.contains(&row)
+                || control.rect.x > 1920. + CARD_PITCH * 2.
+                || control.rect.x + control.rect.w < -CARD_PITCH
+            {
+                continue;
+            }
+            let Some(item) = self.feeds.rows.get(row).and_then(|r| r.items.get(index)) else {
+                continue;
+            };
+            let near = focus_row == Some(row) && focus_index.abs_diff(index) <= 2;
+            // Nearest focus first: the worker fetches in this order.
+            let distance = match focus_row {
+                Some(focus) => focus.abs_diff(row) * 100 + focus_index.abs_diff(index),
+                None => row * 100 + index,
+            };
+            cards.push((distance, item.link.clone(), near));
+        }
+        cards.sort_by_key(|(distance, ..)| *distance);
+        let mut seen = HashSet::new();
+        cards
+            .into_iter()
+            .filter(|(_, link, _)| seen.insert(link.clone()))
+            .take(LIMIT)
+            .map(|(_, link, near)| (link, near))
+            .collect()
     }
 }

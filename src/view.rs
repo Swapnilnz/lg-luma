@@ -392,8 +392,23 @@ pub fn scene_with_pill(
             state.focus,
             Target::Hero | Target::HeroExtra(_) | Target::HeroMore
         );
-    if !shelf_focused {
+    // While Home slides between its screens, the header fades with it.
+    let slide = state.feeds.page_slide.and_then(|(_, since)| {
+        let t = since.elapsed().as_secs_f32() / crate::feeds::PAGE_SLIDE.as_secs_f32();
+        (t < 1.).then_some(t)
+    });
+    let header_alpha = match (shelf_focused, slide) {
+        (true, Some(t)) => 1. - t,
+        (true, None) => 0.,
+        (false, Some(t)) => t,
+        (false, None) => 1.,
+    };
+    if header_alpha > 0. {
+        let start = out.draw.len();
         header(&mut out, state, assets, now, pill_x, pill_width);
+        if header_alpha < 1. {
+            out.fade(start, header_alpha, 1.);
+        }
     }
     footer(&mut out, state, assets);
     if state.feeds.search.is_some() {
@@ -882,9 +897,37 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     if let Some(summary) = summary {
         weather_summary(out, state, assets, summary, 265. - shift + 94.92 + 18.4 - s);
     }
+    // With the Top Shelf, the first screen ends with the favourites, at its bottom, and the
+    // search bar sits above them. `f` is the favourites' scroll: Home's, moved down that far.
+    let stacked = state.feeds.hero.is_some();
+    let f = if stacked {
+        let apps = state.apps();
+        let grid = if apps.is_empty() {
+            if state.loading && state.inventory.apps.is_empty() {
+                FACE_HEIGHT
+            } else {
+                247.5
+            }
+        } else if state.preferences.show_home_names {
+            FACE_HEIGHT
+                + 18.4
+                + apps
+                    .iter()
+                    .map(|app| caption_height(state, assets, app, HOME_TILE_WIDTH))
+                    .fold(49.28, f32::max)
+        } else {
+            FACE_HEIGHT
+        };
+        s - ((1080. - 72. - grid) - 544.8).max(0.)
+    } else {
+        s
+    };
+    if stacked && state.feeds.can_search && state.preferences.feed_search_bar {
+        search_bar(out, state, assets, 478.5 - f - SEARCH_BAR_HEIGHT - 44.);
+    }
     out.text(
         language.t("favorites"),
-        Rect::new(84., 478.5 - s, 1000., 31.),
+        Rect::new(84., 478.5 - f, 1000., 31.),
         text(23.2, 550, -0.035).leading(1.3),
         WHITE,
         false,
@@ -892,7 +935,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     if state.moving.is_some() {
         out.text(
             language.t("moveApps"),
-            Rect::new(1686., 485. - s, 150., 24.),
+            Rect::new(1686., 485. - f, 150., 24.),
             text(14.4, 400, 0.),
             c(0xdedede, 1.),
             true,
@@ -906,7 +949,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             out.shape(
                 Rect::new(
                     84. + index as f32 * GRID_PITCH,
-                    544.8 - s,
+                    544.8 - f,
                     270.,
                     FACE_HEIGHT,
                 ),
@@ -921,7 +964,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             state,
             assets,
             EmptyState {
-                rect: Rect::new(84., 533.6 - s, 1752., 258.7),
+                rect: Rect::new(84., 533.6 - f, 1752., 258.7),
                 icon: if error { "alert" } else { "heart" },
                 title: if error {
                     language.t("aLittleHelp")
@@ -973,7 +1016,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             app,
             Rect::new(
                 84. + index as f32 * HOME_TILE_PITCH - state.home_scroll,
-                544.8 - s,
+                544.8 - f,
                 HOME_TILE_WIDTH,
                 FACE_HEIGHT,
             ),
@@ -983,8 +1026,8 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     }
     out.draw.push(Draw::EdgeFadeX(None));
     out.draw.push(Draw::Clip(Some(state.content_viewport())));
-    let mut feeds_y = 544.8 + grid_height + 41.6 - s;
-    if state.feeds.can_search && state.preferences.feed_search_bar {
+    let mut feeds_y = 544.8 + grid_height + 41.6 - f;
+    if !stacked && state.feeds.can_search && state.preferences.feed_search_bar {
         feeds_y = search_bar(out, state, assets, feeds_y);
     }
     if state.feeds.hero.is_some() {
@@ -1134,9 +1177,19 @@ fn preview_details(out: &mut Scene, state: &State, progress: f32) {
     // Rises a little as it appears, like the rest of Apple TV's motion.
     let lift = (1. - progress) * 18.;
     let x = 84.;
+    // Following focus onto a title not looked up yet: its shape at once, never Home.
+    if details.is_none() {
+        skeleton(out, Rect::new(x, 190. + lift, 460., 130.), 14.);
+        skeleton(out, Rect::new(x, 348. + lift, 420., 20.), 10.);
+        skeleton(out, Rect::new(x, 390. + lift, 940., 18.), 9.);
+        skeleton(out, Rect::new(x, 420. + lift, 880., 18.), 9.);
+        skeleton(out, Rect::new(x, 450. + lift, 600., 18.), 9.);
+        out.fade_range(start, out.draw.len(), progress, 1.);
+        return;
+    }
     let logo_url = details.and_then(|details| details.logo.as_ref());
     let logo = logo_url.and_then(|url| Some((state.feeds.images.get(url)?, url)));
-    if logo.is_none() && logo_url.is_some() && preview.shown.elapsed() < SKELETON_WAIT {
+    if logo.is_none() && logo_url.is_some() && preview.changed.elapsed() < SKELETON_WAIT {
         // A logo is on its way: its shape, not the title in plain text first.
         skeleton(out, Rect::new(x, 190. + lift, 460., 130.), 14.);
     } else if let Some((image, url)) = logo {
@@ -1212,50 +1265,71 @@ fn preview_backdrop(out: &mut Scene, state: &State) {
     let Some(preview) = state.feeds.preview.as_ref().filter(|_| progress > 0.) else {
         return;
     };
-    let Some((image, url)) = state
-        .feeds
-        .details
-        .get(&preview.link)
-        .and_then(|details| details.backdrop.as_ref())
-        .and_then(|url| Some((state.feeds.images.get(url)?, url)))
-    else {
-        // Still loading: a dark stand-in, so Home does not show through half faded.
-        out.draw.push(Draw::RoundedGradient(
-            Rect::new(0., 0., 1920., 1080.),
-            0.,
-            c(0x1a1f25, 0.92 * progress),
-            c(0x080b12, 0.96 * progress),
-        ));
-        return;
+    let backdrop = |link: &String| {
+        state
+            .feeds
+            .details
+            .get(link)
+            .and_then(|details| details.backdrop.as_ref())
+            .and_then(|url| Some((state.feeds.images.get(url)?, url)))
     };
-    let alpha = progress * state.feeds.reveal(url, reduced_motion);
+    // A dark base first: Home never shows through, whatever is still loading or fading in.
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 0., 1920., 1080.),
+        0.,
+        c(0x1a1f25, progress),
+        c(0x080b12, progress),
+    ));
+    // One slow drift for the whole preview, so moving on never restarts the zoom.
     let drift = if reduced_motion {
         0.
     } else {
         (preview.shown.elapsed().as_secs_f32() / crate::feeds::KEN_BURNS.as_secs_f32()).min(1.)
     };
     let zoom = 1.02 + 0.06 * drift;
-    out.draw.push(Draw::AppImage(
-        image.clone(),
-        Rect::new(
-            960. - 960. * zoom,
-            540. - 540. * zoom,
-            1920. * zoom,
-            1080. * zoom,
-        ),
-        [1., 1., 1., alpha],
-    ));
+    let frame = Rect::new(
+        960. - 960. * zoom,
+        540. - 540. * zoom,
+        1920. * zoom,
+        1080. * zoom,
+    );
+    let change = if reduced_motion {
+        1.
+    } else {
+        let t = (preview.changed.elapsed().as_secs_f32()
+            / crate::feeds::PREVIEW_CHANGE.as_secs_f32())
+        .min(1.);
+        t * t * (3. - 2. * t)
+    };
+    let current = backdrop(&preview.link);
+    let current_alpha = current.map_or(0., |(_, url)| {
+        state.feeds.reveal(url, reduced_motion).min(change)
+    });
+    // The title moved from stays until the new one has fully come in over it.
+    if current_alpha < 1.
+        && let Some((image, _)) = preview.previous.as_ref().and_then(backdrop)
+    {
+        out.draw
+            .push(Draw::AppImage(image.clone(), frame, [1., 1., 1., progress]));
+    }
+    if let Some((image, _)) = current {
+        out.draw.push(Draw::AppImage(
+            image.clone(),
+            frame,
+            [1., 1., 1., progress * current_alpha],
+        ));
+    }
     out.draw.push(Draw::RoundedGradient(
         Rect::new(0., 0., 1920., 600.),
         0.,
-        c(0x080b12, 0.80 * alpha),
-        c(0x080b12, 0.25 * alpha),
+        c(0x080b12, 0.80 * progress),
+        c(0x080b12, 0.25 * progress),
     ));
     out.draw.push(Draw::RoundedGradient(
         Rect::new(0., 600., 1920., 480.),
         0.,
-        c(0x080b12, 0.25 * alpha),
-        c(0x080b12, 0.85 * alpha),
+        c(0x080b12, 0.25 * progress),
+        c(0x080b12, 0.85 * progress),
     ));
 }
 
@@ -2090,79 +2164,50 @@ fn hero_banner(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
             &play_label(item),
             "play",
             112.,
-            band.y + 860.,
+            band.y + 800.,
             64.,
             focused,
         );
     }
-    // Every slide's poster along the bottom right, the current one lit and raised.
-    let (thumb_w, thumb_h, thumb_pitch) = (84., 126., 98.);
-    let strip_right = 1808.;
-    let strip_y = band.y + 1080. - 72. - thumb_h;
-    let count = items.len();
-    for index in 0..count {
-        let x = strip_right - (count - index) as f32 * thumb_pitch + (thumb_pitch - thumb_w);
-        let current = index == slides.index;
-        let lift = if current { 10. } else { 0. };
-        let rect = Rect::new(x, strip_y - lift, thumb_w, thumb_h);
+    // Every slide's poster in a line under the button, the current one lit and raised.
+    let (thumb_w, thumb_h, thumb_pitch) = (72., 108., 84.);
+    let strip_y = band.y + 900.;
+    for index in 0..items.len() {
         let Some(item) = item_at(index) else {
             continue;
         };
+        let current = index == slides.index;
+        let lift = if current { 8. } else { 0. };
+        let rect = Rect::new(
+            112. + index as f32 * thumb_pitch,
+            strip_y - lift,
+            thumb_w,
+            thumb_h,
+        );
         let start = out.draw.len();
         poster(out, state, assets, item, rect, false, 1.);
-        if !current {
-            out.fade(start, 0.55, 0.7);
-        } else {
+        if current {
             out.border(rect.inset(-3.), crate::feeds::CARD_RADIUS + 3., 2.5, WHITE);
+        } else {
+            out.fade(start, 0.55, 0.7);
         }
     }
-    // "This week": small posters and the button that shows them all.
-    let minis = state.feeds.shelf_minis();
-    if !minis.is_empty() {
-        let (mini_w, mini_h, mini_pitch) = (132., 198., 152.);
-        let more = 72.;
-        let mini_y = strip_y - 64. - mini_h;
-        let total = minis.len() as f32 * mini_pitch + more;
-        let left = strip_right - total;
-        out.text(
-            state.feeds.shelf_title(),
-            Rect::new(left, mini_y - 40., 600., 28.),
-            text(20.8, 600, -0.01),
-            c(0xffffff, 0.92),
-            false,
-        );
-        for (index, item) in minis.iter().enumerate() {
-            let rect = Rect::new(left + index as f32 * mini_pitch, mini_y, mini_w, mini_h);
-            let target = Target::HeroExtra(index);
-            let mini_focused = state.focus == target;
-            let scale = state.feeds.scale(&target, reduced_motion);
-            poster(out, state, assets, item, rect, mini_focused, scale);
-            if !item.subtitle.is_empty() {
-                out.text(
-                    clip_words(&item.subtitle, 18),
-                    Rect::new(rect.x, rect.y + rect.h + 10., rect.w + 10., 20.),
-                    text(14.4, 550, 0.),
-                    c(0xffffff, if mini_focused { 1. } else { 0.7 }),
-                    false,
-                );
-            }
-            out.control(target, rect, false);
-        }
-        let button = Rect::new(
-            left + minis.len() as f32 * mini_pitch + 4.,
-            mini_y + (mini_h - more) / 2.,
-            more - 8.,
-            more - 8.,
-        );
-        let more_focused = state.focus == Target::HeroMore;
-        out.pill(button, more_focused, false);
+    // "This week" and new seasons: one calendar button, bottom right, opening them all.
+    if !state.feeds.shelf_minis().is_empty() {
+        let button = Rect::new(1808. - 76., band.y + 1080. - 76. - 72., 76., 76.);
+        let calendar_focused = state.focus == Target::HeroMore;
+        out.pill(button, calendar_focused, false);
         out.icon(
             assets,
-            "more",
-            button.inset(18.),
-            if more_focused { c(0x2c2c2c, 1.) } else { WHITE },
+            "calendar",
+            button.inset(22.),
+            if calendar_focused {
+                c(0x2c2c2c, 1.)
+            } else {
+                WHITE
+            },
         );
-        if more_focused {
+        if calendar_focused {
             out.ring(button, button.h / 2.);
         }
         out.control(Target::HeroMore, button, false);
@@ -2277,10 +2322,10 @@ fn hero_slide(
                 .is_some_and(|url| !state.feeds.images.contains_key(url)));
     if loading {
         // The shape of what is coming, not a flash of plain text.
-        skeleton(out, Rect::new(x, band.y + 560., 460., 130.), 14.);
-        skeleton(out, Rect::new(x, band.y + 718., 360., 22.), 11.);
-        skeleton(out, Rect::new(x, band.y + 760., 880., 18.), 9.);
-        skeleton(out, Rect::new(x, band.y + 790., 700., 18.), 9.);
+        skeleton(out, Rect::new(x, band.y + 500., 460., 130.), 14.);
+        skeleton(out, Rect::new(x, band.y + 658., 360., 22.), 11.);
+        skeleton(out, Rect::new(x, band.y + 700., 880., 18.), 9.);
+        skeleton(out, Rect::new(x, band.y + 730., 700., 18.), 9.);
     } else {
         let caption = if item.subtitle.is_empty() {
             details.map(meta_line).unwrap_or_default()
@@ -2289,7 +2334,7 @@ fn hero_slide(
         };
         out.text(
             caption,
-            Rect::new(x, band.y + 712., 1100., 30.),
+            Rect::new(x, band.y + 652., 1100., 30.),
             text(22.4, 550, 0.),
             c(0xffffff, 0.82),
             false,
@@ -2300,7 +2345,7 @@ fn hero_slide(
         {
             out.text(
                 clip_words(overview, 190),
-                Rect::new(x, band.y + 754., 960., 84.),
+                Rect::new(x, band.y + 694., 960., 84.),
                 text(20., 400, 0.).leading(1.45),
                 c(0xffffff, 0.85),
                 false,
@@ -2312,7 +2357,7 @@ fn hero_slide(
             details,
             &item.title,
             x,
-            band.y + 690.,
+            band.y + 630.,
             (620., 180.),
             72.,
         );

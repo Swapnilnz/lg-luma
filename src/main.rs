@@ -600,7 +600,10 @@ fn feeds_tick(
     if let Some(link) = state.preview_tick(controls) {
         service.details(link);
     }
-    // Top Shelf and screensaver slides whose artwork is not here yet.
+    // Art ahead of focus: slides, and the cards on screen and in the rows by focus.
+    if home {
+        state.feeds.warm = state.warm_links(controls);
+    }
     let slides = state.feeds.prefetch_wanted();
     if slides != state.feeds.prefetched {
         state.feeds.prefetched = slides.clone();

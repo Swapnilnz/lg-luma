@@ -414,8 +414,9 @@ pub struct Service {
     details: Option<mpsc::Sender<String>>,
     /// Title pages; None without a TMDB key.
     titles: Option<mpsc::Sender<TitleCommand>>,
-    /// Top Shelf and screensaver slides whose artwork Home lacks; None without a TMDB key.
-    slides: Option<mpsc::Sender<Vec<String>>>,
+    /// Titles whose artwork Home wants ahead of focus (slides, cards near the screen), each
+    /// with whether its full-screen backdrop is wanted too; None without a TMDB key.
+    slides: Option<mpsc::Sender<Vec<(String, bool)>>>,
     trakt: bool,
 }
 
@@ -486,8 +487,8 @@ impl Service {
         }
     }
 
-    /// Backdrops and logos for these slides.
-    pub fn slides(&self, links: Vec<String>) {
+    /// Details, logos and landscape art for these titles, and backdrops for those marked.
+    pub fn slides(&self, links: Vec<(String, bool)>) {
         if let Some(slides) = &self.slides
             && !links.is_empty()
         {
@@ -1533,15 +1534,16 @@ fn title_worker(
     }
 }
 
-/// Top Shelf and screensaver slides: each title's details, then its backdrop and logo.
+/// Artwork ahead of focus: each title's details, then its logo and landscape art, and its
+/// full-screen backdrop when marked. A newer list replaces the rest of an older one.
 fn slides_worker(
     key: &str,
-    requests: mpsc::Receiver<Vec<String>>,
+    requests: mpsc::Receiver<Vec<(String, bool)>>,
     responses: mpsc::Sender<Response>,
 ) {
     let http = Http::new();
     let mut known: HashMap<String, Details> = HashMap::new();
-    let mut next: Option<Vec<String>> = None;
+    let mut next: Option<Vec<(String, bool)>> = None;
     loop {
         let mut links = match next.take() {
             Some(links) => links,
@@ -1553,7 +1555,7 @@ fn slides_worker(
         while let Ok(newer) = requests.try_recv() {
             links = newer;
         }
-        'links: for link in links {
+        'links: for (link, full) in links {
             let result = match known.get(&link) {
                 Some(found) => Ok(found.clone()),
                 None => details(&http, key, &link),
@@ -1561,11 +1563,14 @@ fn slides_worker(
             let Ok(found) = result else {
                 continue;
             };
-            if known.len() > 100 {
+            if known.len() > 400 {
                 known.clear();
             }
             known.insert(link.clone(), found.clone());
-            let images = title_artwork(&found);
+            let images: Vec<_> = title_artwork(&found)
+                .into_iter()
+                .filter(|(image_key, ..)| full || !image_key.starts_with("backdrop:"))
+                .collect();
             let response = Response::Details {
                 link,
                 result: Ok(found),
