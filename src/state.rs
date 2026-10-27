@@ -46,6 +46,16 @@ pub enum Target {
     SearchField,
     SearchVoice,
     SearchResult(usize),
+    /// The Top Shelf banner above the feed rows.
+    Hero,
+    /// A title page's buttons, season pills, episodes, cast and More Like This.
+    TitleButton(usize),
+    TitleSeason(usize),
+    TitleEpisode(usize),
+    TitleCast(usize),
+    TitleMore(usize),
+    /// An entry of a card's quick-actions menu.
+    MenuItem(usize),
     RecentEmpty,
     RecentRetry,
     App(String),
@@ -262,6 +272,10 @@ impl State {
         {
             self.dirty = true;
         }
+        self.hero_tick();
+        if self.feeds.extras_animating(self.preferences.reduced_motion) {
+            self.dirty = true;
+        }
         let recents_open = self.recents_open();
         if recents_open || self.recents.visibility > 0. {
             self.dirty |= self.recents.animate(
@@ -320,6 +334,7 @@ impl State {
             || self.feeds.fading()
             || ((self.feeds.search_animating() || self.feeds.card_animating())
                 && !self.preferences.reduced_motion)
+            || self.feeds.extras_animating(self.preferences.reduced_motion)
             || (!self.preferences.reduced_motion
                 && self
                     .notice
@@ -426,6 +441,10 @@ impl State {
         x: i32,
         y: i32,
     ) -> bool {
+        // A title page scrolls instead of the Home page beneath it.
+        if self.title_wheel(y) {
+            return false;
+        }
         // Search's grid scrolls instead of the Home page beneath it.
         if let Some(search) = &mut self.feeds.search {
             let rows = search.results.len().div_ceil(crate::feeds::SEARCH_COLUMNS);
@@ -712,6 +731,12 @@ impl State {
         if matches!(self.overlay, Some(Overlay::SystemKeyboard)) {
             // The TV keyboard owns its arrows until Done/Back dismisses it.
             return vec![];
+        }
+        if self.feeds.menu.is_some() && self.overlay.is_none() {
+            return self.menu_direction(direction);
+        }
+        if self.feeds.title.is_some() && self.overlay.is_none() {
+            return self.title_direction(direction);
         }
         if self.feeds.search.is_some() && self.overlay.is_none() {
             return self.search_direction(direction);
@@ -1149,6 +1174,10 @@ impl State {
         if self.overlay.is_some() || self.moving.is_some() {
             return;
         }
+        // Menu on a poster or the Top Shelf: the title's page.
+        if self.open_card_title() {
+            return;
+        }
         if let Target::App(id) = &self.focus {
             self.overlay = Some(Overlay::Options {
                 id: id.clone(),
@@ -1420,6 +1449,16 @@ impl State {
             };
         }
         if self.overlay.is_none()
+            && let Some(effects) = self.menu_activate()
+        {
+            return effects;
+        }
+        if self.overlay.is_none()
+            && let Some(effects) = self.title_activate()
+        {
+            return effects;
+        }
+        if self.overlay.is_none()
             && let Some(effects) = self.search_activate()
         {
             return effects;
@@ -1440,6 +1479,11 @@ impl State {
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
             Target::FeedSearch => return self.open_search(),
             Target::FeedVoice => return self.start_voice(),
+            Target::Hero if !self.launching => {
+                if let Some(item) = self.feeds.hero_item() {
+                    return vec![Effect::LaunchTitle(item.link.clone())];
+                }
+            }
             Target::Feed(row, index) if !self.launching => {
                 if let Some(item) = self
                     .feeds
@@ -1590,6 +1634,11 @@ impl State {
                     9 => {
                         self.preferences.feed_preload_rows =
                             (self.preferences.feed_preload_rows + 1) % 5;
+                    }
+                    12 => self.preferences.feed_hero = !self.preferences.feed_hero,
+                    13 => {
+                        self.preferences.feed_ambient =
+                            (self.preferences.feed_ambient.min(4) + 1) % 5;
                     }
                     4 => {
                         self.subpage = Some(Subpage::Language);
@@ -1813,6 +1862,9 @@ impl State {
             }
             self.focus = self.keyboard_return();
             return self.commit_text_input();
+        }
+        if self.feeds_back() {
+            return vec![];
         }
         if self.feeds.search.is_some() {
             self.close_search();

@@ -400,10 +400,13 @@ fn script(
             state.options();
             vec![]
         }
-        "hold" => {
-            state.hold();
-            vec![]
-        }
+        "hold" => match state.card_hold() {
+            Some(effects) => effects,
+            None => {
+                state.hold();
+                vec![]
+            }
+        },
         "wait" => vec![],
         action if action.starts_with("type:") => {
             let field = if state.text_input_active() {
@@ -514,6 +517,22 @@ fn feeds_tick(
     if let Some(link) = state.preview_tick(controls) {
         service.details(link);
     }
+    // Top Shelf and screensaver slides whose artwork is not here yet.
+    let slides = state.feeds.prefetch_wanted();
+    if slides != state.feeds.prefetched {
+        state.feeds.prefetched = slides.clone();
+        service.slides(slides);
+    }
+    for request in std::mem::take(&mut state.feeds.outbox) {
+        match request {
+            feeds::Outgoing::Title(link) => service.title(feeds_service::TitleCommand::Open(link)),
+            feeds::Outgoing::Season(link, season) => {
+                service.title(feeds_service::TitleCommand::Season(link, season))
+            }
+            feeds::Outgoing::TraktState(link) => service.trakt_state(link),
+            feeds::Outgoing::Trakt(link, action) => service.trakt_action(link, action),
+        }
+    }
     while let Ok(response) = service.receiver.try_recv() {
         match response {
             feeds_service::Response::Rows(rows) => state.set_feed_rows(rows),
@@ -531,6 +550,31 @@ fn feeds_tick(
                     state.dirty = true;
                 }
             }
+            feeds_service::Response::Title { link, result } => {
+                state.feeds.title_arrived(link, result);
+                state.dirty = true;
+            }
+            feeds_service::Response::Season {
+                link,
+                season,
+                result,
+            } => {
+                state.feeds.season_arrived(link, season, result);
+                state.dirty = true;
+            }
+            feeds_service::Response::TraktState { link, result } => {
+                state.feeds.trakt_arrived(link, result);
+                state.dirty = true;
+            }
+            feeds_service::Response::Action { link, result } => state.trakt_done(link, result),
+        }
+    }
+    // A title page may have asked for a season while its data arrived: send it now.
+    for request in std::mem::take(&mut state.feeds.outbox) {
+        if let feeds::Outgoing::Season(link, season) = request {
+            service.title(feeds_service::TitleCommand::Season(link, season));
+        } else {
+            state.feeds.outbox.push(request);
         }
     }
 }
@@ -739,14 +783,17 @@ fn run() -> Result<(), String> {
             state.set_feed_rows(vec![feeds::Row {
                 title: "Feeds".into(),
                 pinned: false,
+                hero: false,
                 status: feeds::Status::Error(error),
                 items: vec![],
             }]);
             None
         }
     };
-    let feeds_service = feeds_service::Service::new(feeds_config, feeds_saved, feeds_state_path);
+    let feeds_service =
+        feeds_service::Service::new(feeds_config, feeds_saved, feeds_state_path, local_offset);
     state.feeds.can_search = feeds_service.can_search();
+    state.feeds.trakt = feeds_service.trakt();
     let platform = Platform::new(
         webos,
         options.preferences.is_none() && options.test_extra_apps == 0,
@@ -997,6 +1044,10 @@ fn run() -> Result<(), String> {
     // A mic press left from before this start must not set Luma listening.
     let _ = std::fs::remove_file(feeds::VOICE_TRIGGER);
     let mut voice_trigger = true;
+    // The last remote or pointer input, for the screensaver; and whether LG's own screen saver
+    // is held off while ours is due.
+    let mut last_input = Instant::now();
+    let mut saver_blocked = false;
     let scripted_input = !options.script.is_empty();
     let mut scene = compose(
         &mut state,
@@ -1112,6 +1163,35 @@ fn run() -> Result<(), String> {
         }
         weather_tick(&mut state, &weather_service, visible);
         feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
+        state.ambient_tick(last_input.elapsed(), visible);
+        // While our screensaver is due, LG's would cut in first: hold it off, for at most an
+        // hour of ours, after which LG's (and its power saving) may take over.
+        if webos {
+            // Only while ours can show: with titles, and not stuck waiting past its delay (an
+            // open dialog keeps it from starting), so LG's power saving is never lost for good.
+            let block = visible
+                && state.feeds.has_titles()
+                && match (
+                    &state.feeds.ambient,
+                    feeds::ambient_delay(state.preferences.feed_ambient),
+                ) {
+                    (_, None) => false,
+                    (Some(ambient), Some(_)) => ambient.started.elapsed() < feeds::AMBIENT_MAX,
+                    (None, Some(delay)) => last_input.elapsed() < delay + Duration::from_secs(60),
+                };
+            if block != saver_blocked {
+                saver_blocked = block;
+                if block {
+                    video.disable_screen_saver();
+                } else {
+                    video.enable_screen_saver();
+                }
+                eprintln!(
+                    "Luma screensaver: LG's screen saver {}",
+                    if block { "held off" } else { "allowed" }
+                );
+            }
+        }
         // The remote's mic button, through LG Input Hook (feeds.md). A press made elsewhere
         // brings Home forward; one that finds Luma hidden is dropped rather than kept for later.
         if webos && voice_trigger && std::path::Path::new(feeds::VOICE_TRIGGER).exists() {
@@ -1169,6 +1249,30 @@ fn run() -> Result<(), String> {
                 focused = true;
                 foreground.confirmed();
             }
+            if matches!(
+                event,
+                Event::KeyDown { .. }
+                    | Event::MouseButtonDown { .. }
+                    | Event::MouseWheel { .. }
+                    | Event::MouseMotion { .. }
+            ) {
+                last_input = Instant::now();
+                // Input only ends the screensaver: OK also opens the title it showed.
+                if state.feeds.ambient.is_some() {
+                    let ok = matches!(
+                        event,
+                        Event::KeyDown {
+                            keycode: Some(Keycode::Return | Keycode::KpEnter),
+                            ..
+                        }
+                    );
+                    state.ambient_input(ok);
+                    press = None;
+                    back_button.cancel();
+                    scene = compose(&mut state, &assets, pill, pill_width, now);
+                    continue;
+                }
+            }
             // As Home, these go to /tmp/luma-home.log and show whether a relaunch reached the
             // compositor.
             if options.webos_home
@@ -1216,6 +1320,7 @@ fn run() -> Result<(), String> {
                     WindowEvent::Hidden | WindowEvent::Minimized => {
                         visible = false;
                         focused = false;
+                        state.feeds.ambient = None;
                         press = None;
                         back_button.cancel();
                         if matches!(state.overlay, Some(Overlay::SystemKeyboard)) {
@@ -1230,6 +1335,7 @@ fn run() -> Result<(), String> {
                     }
                     WindowEvent::Shown | WindowEvent::Restored | WindowEvent::FocusGained => {
                         visible = true;
+                        last_input = Instant::now();
                         // Shown and Restored can come from SDL itself; only focus confirms.
                         if matches!(win_event, WindowEvent::FocusGained) {
                             focused = true;
@@ -1524,8 +1630,8 @@ fn run() -> Result<(), String> {
         {
             held.held = true;
             state.pressed = None;
-            // Holding OK on a poster plays its trailer; elsewhere it keeps its usual role.
-            match state.play_trailer() {
+            // Holding OK on a poster opens its quick actions; elsewhere it keeps its usual role.
+            match state.card_hold() {
                 Some(pending) => {
                     running &= effects(
                         pending,

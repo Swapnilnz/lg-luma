@@ -4,6 +4,7 @@
   "refresh_minutes": 360,
   "trakt_refresh_minutes": 30,
   "search_keys": [],
+  "hero": ["trakt:continue", "trakt:watchlist"],
   "trakt": {
     "client_id": "YOUR_TRAKT_CLIENT_ID"
   },
@@ -16,6 +17,10 @@
   "rows": [
     { "title": "Continue Watching", "source": "trakt:continue" },
     { "title": "Watchlist", "source": "trakt:watchlist" },
+    { "title": "This Week", "source": "trakt:calendar" },
+    { "title": "New Seasons", "source": "smart:new_season" },
+    { "title": "Because you watched {title}", "source": "smart:because" },
+    { "title": "Because you watched {title}", "source": "smart:because:2" },
     { "title": "Popular Movies", "source": "mdblist:USERNAME/LIST-SLUG" }
   ]
 }

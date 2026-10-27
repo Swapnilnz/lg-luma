@@ -391,6 +391,14 @@ pub fn scene_with_pill(
         out.controls.clear();
         search_overlay(&mut out, state, assets);
     }
+    if state.feeds.title.is_some() {
+        out.controls.clear();
+        title_page(&mut out, state, assets);
+    }
+    if state.feeds.menu.is_some() {
+        out.controls.clear();
+        feed_menu(&mut out, state, assets);
+    }
     if let Some(overlay @ (Overlay::Options { .. } | Overlay::Keyboard)) = &state.overlay {
         out.controls.clear();
         let start = out.draw.len();
@@ -433,6 +441,13 @@ pub fn scene_with_pill(
             out.controls = parent_controls;
             out.modal = parent_modal;
         }
+    }
+    // The screensaver covers everything and takes no pointer targets: any input ends it.
+    if state.feeds.ambient.is_some() {
+        out.controls.clear();
+        out.modal = None;
+        ambient(&mut out, state, now);
+        return out;
     }
     if let Some((notice, _)) = &state.notice {
         toast(&mut out, state, assets, notice);
@@ -959,6 +974,9 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     if state.feeds.can_search && state.preferences.feed_search_bar {
         feeds_y = search_bar(out, state, assets, feeds_y);
     }
+    if state.feeds.hero.is_some() {
+        feeds_y = hero_banner(out, state, assets, feeds_y);
+    }
     let (input_y, previewed_row) = feed_rows(out, state, assets, feeds_y);
     let inputs: Vec<_> = state
         .inventory
@@ -1483,6 +1501,19 @@ fn poster(
         ));
     }
     out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
+    if let Some(badge) = &item.badge {
+        let style = text(14.4, 650, 0.02);
+        let width = assets.width(badge, style) + 22.;
+        let chip = Rect::new(rect.x + 12., rect.y + 12., width, 26.);
+        out.shape(chip, 13., c(0xf3f3f3, 0.94));
+        out.text(
+            badge,
+            Rect::new(chip.x, chip.y + 5., chip.w, 18.),
+            style,
+            c(0x1c1c1c, 1.),
+            true,
+        );
+    }
     if let Some(progress) = item.progress {
         let track = Rect::new(rect.x + 16., rect.y + rect.h - 20., rect.w - 32., 5.);
         out.shape(track, 2.5, c(0x000000, 0.5));
@@ -1786,6 +1817,946 @@ fn search_card(
     if state.pressed.as_ref() == Some(target) {
         out.fade(start, 1., 0.85);
     }
+}
+
+// ---- Top Shelf, title pages, quick actions and the screensaver ----
+
+/// An image Home holds, by URL.
+fn held_image<'a>(
+    state: &'a State,
+    url: Option<&'a String>,
+) -> Option<(&'a std::sync::Arc<crate::app_artwork::Artwork>, &'a String)> {
+    let url = url?;
+    Some((state.feeds.images.get(url)?, url))
+}
+
+/// A title's logo, contained in `max` with its bottom-left at (`x`, `bottom`); else its name.
+#[allow(clippy::too_many_arguments)]
+fn title_mark(
+    out: &mut Scene,
+    state: &State,
+    details: Option<&crate::feeds::Details>,
+    fallback: &str,
+    x: f32,
+    bottom: f32,
+    max: (f32, f32),
+    title_size: f32,
+) -> f32 {
+    let logo = held_image(state, details.and_then(|details| details.logo.as_ref()));
+    if let Some((image, url)) = logo {
+        let (width, height) = (image.pixels.width() as f32, image.pixels.height() as f32);
+        let scale = (max.0 / width).min(max.1 / height);
+        let rect = Rect::new(x, bottom - height * scale, width * scale, height * scale);
+        out.draw.push(Draw::AppImage(
+            image.clone(),
+            rect,
+            [
+                1.,
+                1.,
+                1.,
+                state.feeds.reveal(url, state.preferences.reduced_motion),
+            ],
+        ));
+        return rect.y;
+    }
+    let title = details
+        .map(|details| details.title.as_str())
+        .filter(|title| !title.is_empty())
+        .unwrap_or(fallback);
+    let height = title_size * 1.25;
+    out.text(
+        title,
+        Rect::new(x, bottom - height, 1500., height),
+        text(title_size, 650, -0.03),
+        WHITE,
+        false,
+    );
+    bottom - height
+}
+
+/// "2023  ·  2h 14m  ·  Drama, Thriller".
+fn meta_line(details: &crate::feeds::Details) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !details.year.is_empty() {
+        parts.push(details.year.clone());
+    }
+    if let Some(extent) = &details.extent {
+        parts.push(extent.clone());
+    }
+    if !details.genres.is_empty() {
+        parts.push(details.genres.join(", "));
+    }
+    parts.join("  ·  ")
+}
+
+/// The play button's words for a card: Resume, Play an episode, or Play.
+fn play_label(item: &crate::feeds::Item) -> String {
+    match (item.progress.is_some(), item.episode) {
+        (true, Some(episode)) => format!("Resume {}", crate::feeds::episode_label(episode)),
+        (true, None) => "Resume".into(),
+        (false, Some(episode)) => format!("Play {}", crate::feeds::episode_label(episode)),
+        (false, None) => "Play".into(),
+    }
+}
+
+/// A pill button with an icon, at `x`; returns its rectangle.
+#[allow(clippy::too_many_arguments)]
+fn icon_button(
+    out: &mut Scene,
+    assets: &Assets,
+    label: &str,
+    icon: &str,
+    x: f32,
+    y: f32,
+    height: f32,
+    focused: bool,
+) -> Rect {
+    let style = text(20., 550, -0.01);
+    let width = assets.width(label, style) + 56. + 34.;
+    let rect = Rect::new(x, y, width, height);
+    out.pill(rect, focused, false);
+    let color = if focused { c(0x2c2c2c, 1.) } else { WHITE };
+    out.icon(
+        assets,
+        icon,
+        Rect::new(x + 26., y + (height - 22.) / 2., 22., 22.),
+        color,
+    );
+    out.text(
+        label,
+        Rect::new(x + 60., y + (height - 26.) / 2., width - 70., 26.),
+        style,
+        color,
+        false,
+    );
+    if focused {
+        out.ring(rect, height / 2.);
+    }
+    rect
+}
+
+/// The Top Shelf: a full-width banner of titles from the Continue Watching, Up Next and
+/// Watchlist rows, crossfading every few seconds. Returns where the rows start below it.
+fn hero_banner(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
+    use crate::feeds::{HERO_FADE, HERO_HEIGHT};
+    let Some(slides) = &state.feeds.hero else {
+        return y;
+    };
+    let items = state.feeds.hero_items();
+    if items.is_empty() {
+        return y;
+    }
+    let item_at = |slide: usize| {
+        let (row, index) = items[slide % items.len()];
+        state
+            .feeds
+            .rows
+            .get(row)
+            .and_then(|row| row.items.get(index))
+    };
+    let band = Rect::new(0., y, 1920., HERO_HEIGHT);
+    let content = state.content_viewport();
+    // Full bleed: past the content's side margins to the screen's edges.
+    out.draw
+        .push(Draw::Clip(Some(Rect::new(0., content.y, 1920., content.h))));
+    out.shape(band, 0., c(0x080b12, 0.55));
+    let fade = slides.fade(HERO_FADE, state.preferences.reduced_motion);
+    if let Some(from) = slides.from.filter(|_| fade < 1.) {
+        hero_slide(out, state, assets, item_at(from), band, 1.);
+    }
+    let focused = state.focus == Target::Hero;
+    hero_slide(out, state, assets, item_at(slides.index), band, fade);
+    // The play button belongs to the slide shown; drawn once, over both while they fade.
+    if let Some(item) = item_at(slides.index) {
+        icon_button(
+            out,
+            assets,
+            &play_label(item),
+            "play",
+            84.,
+            band.y + band.h - 104.,
+            60.,
+            focused,
+        );
+    }
+    let count = items.len();
+    if count > 1 {
+        for index in 0..count {
+            let dot = Rect::new(
+                1836. - (count - index) as f32 * 22. + 8.,
+                band.y + band.h - 80.,
+                10.,
+                10.,
+            );
+            out.shape(
+                dot,
+                5.,
+                c(0xffffff, if index == slides.index { 0.95 } else { 0.32 }),
+            );
+        }
+    }
+    out.draw.push(Draw::Clip(Some(content)));
+    out.control(
+        Target::Hero,
+        Rect::new(84., band.y + 24., 1664., band.h - 48.),
+        true,
+    );
+    y + HERO_HEIGHT + 44.
+}
+
+/// One Top Shelf slide: backdrop, shading, logo, caption and synopsis, at `alpha`.
+fn hero_slide(
+    out: &mut Scene,
+    state: &State,
+    _assets: &Assets,
+    item: Option<&crate::feeds::Item>,
+    band: Rect,
+    alpha: f32,
+) {
+    let Some(item) = item else {
+        return;
+    };
+    let start = out.draw.len();
+    let details = state.feeds.details.get(&item.link);
+    match held_image(state, details.and_then(|details| details.backdrop.as_ref())) {
+        Some((image, url)) => {
+            let reveal = state.feeds.reveal(url, state.preferences.reduced_motion);
+            out.draw
+                .push(Draw::AppImage(image.clone(), band, [1., 1., 1., reveal]));
+        }
+        None => out.draw.push(Draw::RoundedGradient(
+            band,
+            0.,
+            c(0x2a3038, 1.),
+            c(0x14181d, 1.),
+        )),
+    }
+    // Blend into the page above, and darken the lower half for the words.
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., band.y, 1920., 110.),
+        0.,
+        c(0x080b12, 0.5),
+        c(0x080b12, 0.),
+    ));
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., band.y + band.h * 0.3, 1920., band.h * 0.7),
+        0.,
+        c(0x080b12, 0.),
+        c(0x080b12, 0.88),
+    ));
+    let bottom = band.y + band.h - 132.;
+    let mut line_y = bottom;
+    let caption = if item.subtitle.is_empty() {
+        details.map(meta_line).unwrap_or_default()
+    } else {
+        item.subtitle.clone()
+    };
+    if let Some(overview) = details
+        .map(|details| details.overview.as_str())
+        .filter(|overview| !overview.is_empty())
+    {
+        line_y -= 60.;
+        out.text(
+            clip_words(overview, 150),
+            Rect::new(84., line_y, 980., 56.),
+            text(18.4, 400, 0.).leading(1.45),
+            c(0xffffff, 0.82),
+            false,
+        );
+    }
+    if !caption.is_empty() {
+        line_y -= 34.;
+        out.text(
+            caption,
+            Rect::new(84., line_y, 1200., 26.),
+            text(19.2, 550, 0.),
+            c(0xffffff, 0.78),
+            false,
+        );
+    }
+    title_mark(
+        out,
+        state,
+        details,
+        &item.title,
+        84.,
+        line_y - 14.,
+        (520., 150.),
+        54.,
+    );
+    out.fade_range(start, out.draw.len(), alpha, 1.);
+}
+
+/// A title's page: backdrop, logo, details and ratings, buttons, seasons and episodes, cast
+/// and More Like This.
+fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
+    use crate::feeds::{
+        CARD_HEIGHT, CARD_PITCH, CARD_WIDTH, CAST_CAPTION, CAST_HEIGHT, CAST_PITCH, CAST_WIDTH,
+        EPISODE_HEIGHT, EPISODE_PITCH, EPISODE_WIDTH, PAGE_ENTRANCE, SEASON_HEIGHT, SEASON_PITCH,
+        SEASON_WIDTH, SECTION_HEADER, Section, TITLE_BUTTON_HEIGHT, TITLE_BUTTONS_Y, TitleButton,
+    };
+    let Some(page) = &state.feeds.title else {
+        return;
+    };
+    let reduced_motion = state.preferences.reduced_motion;
+    let entrance = if reduced_motion {
+        1.
+    } else {
+        let t = (page.opened.elapsed().as_secs_f32() / PAGE_ENTRANCE.as_secs_f32()).min(1.);
+        1. - (1. - t).powi(3)
+    };
+    let start = out.draw.len();
+    out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x080b12, 1.));
+    let info = page.info();
+    let details = state
+        .feeds
+        .details
+        .get(&page.link)
+        .or(info.map(|info| &info.details));
+    if let Some((image, url)) = held_image(state, details.and_then(|d| d.backdrop.as_ref())) {
+        let reveal = state.feeds.reveal(url, reduced_motion);
+        out.draw.push(Draw::AppImage(
+            image.clone(),
+            Rect::new(0., -page.page_scroll * 0.3, 1920., 1080.),
+            [0.85, 0.85, 0.85, reveal],
+        ));
+    }
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 0., 1920., 1080.),
+        0.,
+        c(0x080b12, 0.45),
+        c(0x080b12, 0.97),
+    ));
+    let s = page.page_scroll;
+    let lift = (1. - entrance) * 24.;
+    let top = |y: f32| y - s + lift;
+    title_mark(
+        out,
+        state,
+        details,
+        &page.item.title,
+        84.,
+        top(300.),
+        (640., 180.),
+        64.,
+    );
+    let mut meta: Vec<String> = details.map(meta_line).into_iter().collect();
+    if let Some(certification) = info
+        .map(|info| info.certification.clone())
+        .filter(|rating| !rating.is_empty())
+    {
+        meta.push(certification);
+    }
+    out.text(
+        meta.join("  ·  "),
+        Rect::new(84., top(328.), 1500., 28.),
+        text(20.8, 550, 0.),
+        c(0xffffff, 0.82),
+        false,
+    );
+    let ratings = info.map_or_else(
+        || {
+            details
+                .and_then(|details| details.rating)
+                .map(|rating| vec![format!("TMDB {rating:.1}")])
+                .unwrap_or_default()
+        },
+        |info| info.ratings.clone(),
+    );
+    if !ratings.is_empty() {
+        out.text(
+            ratings.join("     "),
+            Rect::new(84., top(368.), 1500., 26.),
+            text(19.2, 600, 0.02),
+            c(0xf3d27a, 0.95),
+            false,
+        );
+    }
+    let overview = details
+        .map(|details| details.overview.clone())
+        .filter(|overview| !overview.is_empty());
+    match (&page.info, overview) {
+        (_, Some(overview)) => out.text(
+            clip_words(&overview, 330),
+            Rect::new(84., top(410.), 1100., 116.),
+            text(20., 400, 0.).leading(1.45),
+            c(0xffffff, 0.88),
+            false,
+        ),
+        (Some(Err(error)), None) => out.text(
+            format!("Couldn't load this title: {error}"),
+            Rect::new(84., top(410.), 1100., 30.),
+            text(18.4, 450, 0.),
+            c(0xf3ddbd, 1.),
+            false,
+        ),
+        (None, None) => out.text(
+            "Loading...",
+            Rect::new(84., top(410.), 1100., 30.),
+            text(18.4, 450, 0.),
+            c(0xffffff, 0.55),
+            false,
+        ),
+        _ => {}
+    }
+    if let Some(credit) = info
+        .map(|info| info.credit.as_str())
+        .filter(|credit| !credit.is_empty())
+    {
+        out.text(
+            credit,
+            Rect::new(84., top(540.), 1100., 24.),
+            text(17.6, 500, 0.),
+            c(0xffffff, 0.6),
+            false,
+        );
+    }
+    let trakt = state.feeds.trakt_title(&page.link);
+    let series = page.series();
+    let mut x = 84.;
+    for (index, button) in page.buttons(state.feeds.trakt).into_iter().enumerate() {
+        let (label, icon) = match button {
+            TitleButton::Play => (play_label(&page.item), "play"),
+            TitleButton::Trailer => ("Trailer".into(), "tv"),
+            TitleButton::Watchlist if trakt.is_some_and(|trakt| trakt.in_watchlist) => {
+                ("In Watchlist".into(), "check")
+            }
+            TitleButton::Watchlist => ("Watchlist".into(), "bookmark"),
+            TitleButton::Watched if !series && trakt.is_some_and(|trakt| trakt.watched) => {
+                ("Watched".into(), "check")
+            }
+            TitleButton::Watched => {
+                match trakt.and_then(|trakt| trakt.next).or(page.item.episode) {
+                    Some(episode) if series => (
+                        format!("Mark {} watched", crate::feeds::episode_label(episode)),
+                        "check",
+                    ),
+                    _ => ("Mark watched".into(), "check"),
+                }
+            }
+            TitleButton::Rate => ("Rate".into(), "star"),
+            TitleButton::HideUpNext => ("Hide from Up Next".into(), "eye-off"),
+        };
+        let target = Target::TitleButton(index);
+        let rect = icon_button(
+            out,
+            assets,
+            &label,
+            icon,
+            x,
+            top(TITLE_BUTTONS_Y),
+            TITLE_BUTTON_HEIGHT,
+            state.focus == target,
+        );
+        out.control(target, rect, false);
+        x += rect.w + 16.;
+    }
+    let visible = |rect: Rect| {
+        rect.x < 1920. && rect.x + rect.w > 0. && rect.y < 1080. && rect.y + rect.h > 0.
+    };
+    for (section, section_top, _) in page.sections() {
+        let y = top(section_top);
+        match section {
+            Section::Buttons => {}
+            Section::Seasons => {
+                for (index, season) in page.seasons().iter().enumerate() {
+                    let rect = Rect::new(
+                        84. + index as f32 * SEASON_PITCH - page.scroll[0],
+                        y,
+                        SEASON_WIDTH,
+                        SEASON_HEIGHT,
+                    );
+                    if !visible(rect) {
+                        continue;
+                    }
+                    let target = Target::TitleSeason(index);
+                    let focused = state.focus == target;
+                    out.pill(rect, focused, index == page.season);
+                    out.text(
+                        // A named season ("Specials", "Limited Series") keeps its name.
+                        if season.name.is_empty()
+                            || season.name.starts_with("Season ")
+                            || season.name.chars().count() > 14
+                        {
+                            format!("Season {}", season.number)
+                        } else {
+                            season.name.clone()
+                        },
+                        Rect::new(rect.x, rect.y + 14., rect.w, 26.),
+                        text(18.4, 550, -0.01),
+                        if focused { c(0x2c2c2c, 1.) } else { WHITE },
+                        true,
+                    );
+                    if focused {
+                        out.ring(rect, rect.h / 2.);
+                    }
+                    out.control(target, rect, false);
+                }
+            }
+            Section::Episodes => {
+                let number = page.seasons().get(page.season).map(|season| season.number);
+                let loaded = number.and_then(|number| page.episodes.get(&number));
+                let Some(Ok(episodes)) = loaded else {
+                    out.text(
+                        match loaded {
+                            Some(Err(error)) => format!("Couldn't load episodes: {error}"),
+                            _ => "Loading episodes...".into(),
+                        },
+                        Rect::new(84., y + 90., 1200., 28.),
+                        text(18.4, 450, 0.),
+                        c(0xffffff, 0.55),
+                        false,
+                    );
+                    continue;
+                };
+                let mut focused_card = None;
+                for (index, episode) in episodes.iter().enumerate() {
+                    let rect = Rect::new(
+                        84. + index as f32 * EPISODE_PITCH - page.scroll[1],
+                        y,
+                        EPISODE_WIDTH,
+                        EPISODE_HEIGHT,
+                    );
+                    if !visible(rect) {
+                        continue;
+                    }
+                    let target = Target::TitleEpisode(index);
+                    out.control(target.clone(), rect, false);
+                    if state.focus == target {
+                        focused_card = Some((episode, rect, target));
+                        continue;
+                    }
+                    episode_card(out, state, assets, episode, rect, false, trakt);
+                }
+                if let Some((episode, rect, _)) = focused_card {
+                    episode_card(out, state, assets, episode, rect, true, trakt);
+                }
+            }
+            Section::Cast => {
+                out.text(
+                    "Cast",
+                    Rect::new(84., y + 3., 600., 31.),
+                    text(23.2, 550, -0.035),
+                    WHITE,
+                    false,
+                );
+                for (index, person) in page.cast().iter().enumerate() {
+                    let rect = Rect::new(
+                        84. + index as f32 * CAST_PITCH - page.scroll[2],
+                        y + SECTION_HEADER,
+                        CAST_WIDTH,
+                        CAST_HEIGHT,
+                    );
+                    if !visible(rect) {
+                        continue;
+                    }
+                    let target = Target::TitleCast(index);
+                    let focused = state.focus == target;
+                    match held_image(state, person.image.as_ref()) {
+                        Some((image, url)) => {
+                            let reveal = state.feeds.reveal(url, reduced_motion);
+                            out.draw.push(Draw::AppImage(
+                                image.clone(),
+                                rect,
+                                [1., 1., 1., reveal],
+                            ));
+                        }
+                        None => {
+                            out.draw.push(Draw::RoundedGradient(
+                                rect,
+                                crate::feeds::CARD_RADIUS,
+                                c(0x3a4048, 1.),
+                                c(0x22272d, 1.),
+                            ));
+                            let initials: String = person
+                                .name
+                                .split_whitespace()
+                                .filter_map(|word| word.chars().next())
+                                .take(2)
+                                .collect();
+                            out.text(
+                                initials,
+                                Rect::new(rect.x, rect.y + rect.h / 2. - 22., rect.w, 44.),
+                                text(36., 600, 0.),
+                                c(0xffffff, 0.6),
+                                true,
+                            );
+                        }
+                    }
+                    out.border(rect, crate::feeds::CARD_RADIUS, 1., c(0xffffff, 0.08));
+                    if focused {
+                        out.ring(rect, crate::feeds::CARD_RADIUS);
+                    }
+                    let caption = text(15.2, if focused { 600 } else { 550 }, 0.);
+                    out.text(
+                        clip_words(&person.name, 18),
+                        Rect::new(rect.x, rect.y + rect.h + 10., rect.w, 20.),
+                        caption,
+                        WHITE,
+                        false,
+                    );
+                    out.text(
+                        clip_words(&person.role, 20),
+                        Rect::new(rect.x, rect.y + rect.h + 32., rect.w, 20.),
+                        text(14.4, 400, 0.),
+                        c(0xffffff, 0.55),
+                        false,
+                    );
+                    out.control(
+                        target,
+                        Rect::new(rect.x, rect.y, rect.w, rect.h + CAST_CAPTION),
+                        false,
+                    );
+                }
+            }
+            Section::More => {
+                out.text(
+                    "More Like This",
+                    Rect::new(84., y + 3., 600., 31.),
+                    text(23.2, 550, -0.035),
+                    WHITE,
+                    false,
+                );
+                let Some(more) = page.more() else {
+                    continue;
+                };
+                let mut focused_card = None;
+                for (index, item) in more.iter().enumerate() {
+                    let rect = Rect::new(
+                        84. + index as f32 * CARD_PITCH - page.scroll[3],
+                        y + SECTION_HEADER,
+                        CARD_WIDTH,
+                        CARD_HEIGHT,
+                    );
+                    if !visible(rect) {
+                        continue;
+                    }
+                    let target = Target::TitleMore(index);
+                    out.control(target.clone(), rect, false);
+                    if state.focus == target {
+                        focused_card = Some((item, rect, target));
+                        continue;
+                    }
+                    search_card(out, state, assets, item, rect, &target);
+                }
+                if let Some((item, rect, target)) = focused_card {
+                    search_card(out, state, assets, item, rect, &target);
+                }
+            }
+        }
+    }
+    if entrance < 1. {
+        out.fade(start, entrance, 1.);
+    }
+}
+
+/// An episode's still with its number, name, length and air date, ticked when watched.
+fn episode_card(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    episode: &crate::feeds::Episode,
+    rect: Rect,
+    focused: bool,
+    trakt: Option<&crate::feeds::TraktTitle>,
+) {
+    use crate::feeds::CARD_RADIUS;
+    out.shadow(rect, CARD_RADIUS, if focused { 30. } else { 16. }, 8., 0.3);
+    match held_image(state, episode.still.as_ref()) {
+        Some((image, url)) => {
+            let reveal = state.feeds.reveal(url, state.preferences.reduced_motion);
+            let light = 0.55 + 0.45 * reveal;
+            out.draw.push(Draw::AppImage(
+                image.clone(),
+                rect,
+                [light, light, light, reveal],
+            ));
+        }
+        None => out.draw.push(Draw::RoundedGradient(
+            rect,
+            CARD_RADIUS,
+            c(0x3a4048, 1.),
+            c(0x22272d, 1.),
+        )),
+    }
+    out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
+    let watched =
+        trakt.is_some_and(|trakt| trakt.episodes.contains(&[episode.season, episode.number]));
+    if watched {
+        let badge = Rect::new(rect.x + rect.w - 44., rect.y + 12., 32., 32.);
+        out.shape(badge, 16., c(0xf3f3f3, 0.95));
+        out.icon(assets, "check", badge.inset(7.), c(0x1c1c1c, 1.));
+    }
+    if focused {
+        out.ring(rect, CARD_RADIUS);
+    }
+    out.text(
+        clip_words(&format!("{}. {}", episode.number, episode.name), 38),
+        Rect::new(rect.x + 2., rect.y + rect.h + 12., rect.w - 4., 22.),
+        text(17.6, if focused { 600 } else { 550 }, 0.),
+        WHITE,
+        false,
+    );
+    let mut details: Vec<String> = Vec::new();
+    if let Some(minutes) = episode.runtime {
+        details.push(format!("{minutes}m"));
+    }
+    if !episode.aired.is_empty() {
+        details.push(episode.aired.clone());
+    }
+    if watched {
+        details.push("Watched".into());
+    }
+    out.text(
+        details.join("  ·  "),
+        Rect::new(rect.x + 2., rect.y + rect.h + 38., rect.w - 4., 20.),
+        text(15.2, 450, 0.),
+        c(0xffffff, 0.55),
+        false,
+    );
+}
+
+/// A card's quick actions: a panel like an app's options.
+fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
+    use crate::feeds::{MenuEntry, PAGE_ENTRANCE, RATINGS};
+    let Some(menu) = &state.feeds.menu else {
+        return;
+    };
+    let start = out.draw.len();
+    out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x080b12, 0.66));
+    let series = menu.link.contains("/series/");
+    let trakt = state.feeds.trakt_title(&menu.link);
+    let rating = menu
+        .entries
+        .iter()
+        .all(|entry| matches!(entry, MenuEntry::RateValue(_)));
+    let height = 150. + menu.entries.len() as f32 * 76.8 + 24.;
+    let panel = Rect::new(680., 540. - height / 2., 560., height);
+    out.modal = Some(panel);
+    out.shadow(panel, 27.2, 120., 25., 0.47);
+    out.draw.push(Draw::RoundedGradient(
+        panel,
+        27.2,
+        c(0x34383b, 0.96),
+        c(0x24282d, 0.988),
+    ));
+    out.border(panel, 27.2, 1., c(0xffffff, 0.12));
+    out.text(
+        clip_words(&menu.item.title, 26),
+        Rect::new(717.8, panel.y + 36.2, 484., 44.),
+        text(37.6, 500, -0.055).leading(1.1),
+        WHITE,
+        false,
+    );
+    let subtitle = if rating {
+        "Rate this title on Trakt".to_owned()
+    } else if menu.item.subtitle.is_empty() {
+        "Quick actions".to_owned()
+    } else {
+        menu.item.subtitle.clone()
+    };
+    out.text(
+        subtitle,
+        Rect::new(717.8, panel.y + 88., 484., 23.),
+        text(15.2, 400, 0.).leading(1.5),
+        c(0xf5f5f5, 0.56),
+        false,
+    );
+    for (index, entry) in menu.entries.iter().enumerate() {
+        let (label, icon) = match entry {
+            MenuEntry::Details => ("Details".to_owned(), "more"),
+            MenuEntry::Trailer => ("Play trailer".to_owned(), "tv"),
+            MenuEntry::Watchlist if trakt.is_some_and(|trakt| trakt.in_watchlist) => {
+                ("Remove from Watchlist".to_owned(), "close")
+            }
+            MenuEntry::Watchlist => ("Add to Watchlist".to_owned(), "bookmark"),
+            MenuEntry::Watched => match trakt.and_then(|trakt| trakt.next).or(menu.item.episode) {
+                Some(episode) if series => (
+                    format!("Mark {} watched", crate::feeds::episode_label(episode)),
+                    "check",
+                ),
+                _ => ("Mark as watched".to_owned(), "check"),
+            },
+            MenuEntry::Rate => ("Rate...".to_owned(), "star"),
+            MenuEntry::RateValue(value) => (
+                format!(
+                    "{}  ({value}/10)",
+                    RATINGS
+                        .iter()
+                        .find(|(rating, _)| rating == value)
+                        .map_or("", |(_, label)| *label)
+                ),
+                "star",
+            ),
+            MenuEntry::HideUpNext => ("Hide from Up Next".to_owned(), "eye-off"),
+        };
+        let rect = Rect::new(717.8, panel.y + 134. + index as f32 * 76.8, 484.4, 67.2);
+        let target = Target::MenuItem(index);
+        let focused = state.focus == target;
+        out.shape(rect, 12., c(0xffffff, if focused { 0.07 } else { 0.016 }));
+        out.border(
+            rect,
+            12.,
+            if focused { 2. } else { 1. },
+            c(
+                if focused { 0xf0f0f0 } else { 0xffffff },
+                if focused { 0.95 } else { 0.05 },
+            ),
+        );
+        out.icon(
+            assets,
+            icon,
+            Rect::new(rect.x + 18.6, rect.y + 22.8, 21.6, 21.6),
+            if focused { WHITE } else { c(0xe4e4e4, 0.61) },
+        );
+        out.text(
+            label,
+            Rect::new(rect.x + 56.2, rect.y + 22., rect.w - 74., 25.),
+            text(17.6, 500, -0.015),
+            WHITE,
+            false,
+        );
+        out.control(target, rect, false);
+    }
+    if !state.preferences.reduced_motion {
+        let t = (menu.opened.elapsed().as_secs_f32() / PAGE_ENTRANCE.as_secs_f32()).min(1.);
+        if t < 1. {
+            out.fade(start, 1. - (1. - t).powi(3), 1.);
+        }
+    }
+}
+
+/// The screensaver: titles' backdrops drifting slowly, with their logos, the clock and the
+/// weather. The clock moves a little each minute so nothing stays put on an OLED panel.
+fn ambient(out: &mut Scene, state: &State, now: OffsetDateTime) {
+    use crate::feeds::{AMBIENT_FADE, AMBIENT_SLIDE};
+    let Some(screensaver) = &state.feeds.ambient else {
+        return;
+    };
+    out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x000000, 1.));
+    let reduced_motion = state.preferences.reduced_motion;
+    let slides = &screensaver.slides;
+    let fade = slides.fade(AMBIENT_FADE, reduced_motion);
+    let total = (AMBIENT_SLIDE + AMBIENT_FADE * 2).as_secs_f32();
+    let elapsed = slides.since.elapsed().as_secs_f32();
+    let count = screensaver.items.len().max(1);
+    if let Some(from) = slides.from.filter(|_| fade < 1.) {
+        let t = (AMBIENT_SLIDE.as_secs_f32() + elapsed) / total;
+        ambient_slide(out, state, &screensaver.items[from % count], from, t, 1.);
+    }
+    ambient_slide(
+        out,
+        state,
+        &screensaver.items[slides.index % count],
+        slides.index,
+        elapsed / total,
+        fade,
+    );
+    let language = state.preferences.language;
+    let shifts = [(0., 0.), (-26., 14.), (18., -10.), (-12., 24.), (24., 8.)];
+    let (dx, dy) = shifts[usize::from(now.minute()) % shifts.len()];
+    let clock = language.clock(now, state.preferences.hour_24, false);
+    out.text(
+        clock,
+        Rect::new(1236. + dx, 70. + dy, 600., 100.),
+        text(88., 500, -0.04),
+        c(0xffffff, 0.92),
+        false,
+    );
+    out.text(
+        language.date(now),
+        Rect::new(1240. + dx, 178. + dy, 600., 26.),
+        text(19.2, 550, 0.08),
+        c(0xffffff, 0.66),
+        false,
+    );
+    if state.preferences.show_weather
+        && let Some(place) = &state.preferences.weather_location
+        && let Some(reading) = state.weather.reading(place)
+    {
+        let condition = weather::condition(reading);
+        out.text(
+            format!(
+                "{}  ·  {}  ·  {}",
+                weather::format_temperature(
+                    reading.temperature,
+                    state.preferences.temperature_unit
+                ),
+                language.t(condition.key),
+                place.name
+            ),
+            Rect::new(1240. + dx, 214. + dy, 600., 26.),
+            text(19.2, 500, 0.),
+            c(0xffffff, 0.66),
+            false,
+        );
+    }
+}
+
+/// One screensaver slide at drift `t` (0 to 1): its backdrop zooming slowly towards a
+/// corner that changes from slide to slide, then its logo and caption.
+fn ambient_slide(
+    out: &mut Scene,
+    state: &State,
+    item: &crate::feeds::Item,
+    index: usize,
+    t: f32,
+    alpha: f32,
+) {
+    let reduced_motion = state.preferences.reduced_motion;
+    let t = if reduced_motion { 0. } else { t.clamp(0., 1.) };
+    let start = out.draw.len();
+    let details = state.feeds.details.get(&item.link);
+    if let Some((image, _)) = held_image(state, details.and_then(|d| d.backdrop.as_ref())) {
+        let zoom = 1.04 + 0.10 * t;
+        let (px, py) = [(-1., -1.), (1., -1.), (-1., 1.), (1., 1.)][index % 4];
+        let (w, h) = (1920. * zoom, 1080. * zoom);
+        out.draw.push(Draw::AppImage(
+            image.clone(),
+            Rect::new(
+                960. - w / 2. + px * 48. * t,
+                540. - h / 2. + py * 27. * t,
+                w,
+                h,
+            ),
+            [1., 1., 1., 1.],
+        ));
+    }
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 0., 1920., 320.),
+        0.,
+        c(0x000000, 0.5),
+        c(0x000000, 0.),
+    ));
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 560., 1920., 520.),
+        0.,
+        c(0x000000, 0.),
+        c(0x000000, 0.75),
+    ));
+    let caption = if item.subtitle.is_empty() {
+        details.map(meta_line).unwrap_or_default()
+    } else {
+        item.subtitle.clone()
+    };
+    out.text(
+        caption,
+        Rect::new(112., 952., 1400., 28.),
+        text(20.8, 550, 0.),
+        c(0xffffff, 0.75),
+        false,
+    );
+    title_mark(
+        out,
+        state,
+        details,
+        &item.title,
+        112.,
+        930.,
+        (560., 160.),
+        60.,
+    );
+    out.fade_range(start, out.draw.len(), alpha, 1.);
 }
 
 struct WeatherSummary {
@@ -2939,6 +3910,32 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
             false,
         )
     }))
+    .chain(state.feeds.rows.iter().any(|row| row.hero).then(|| {
+        (
+            12,
+            "Top Shelf",
+            "tv",
+            Some(if state.preferences.feed_hero {
+                language.t("stateOn")
+            } else {
+                language.t("stateOff")
+            }),
+            false,
+        )
+    }))
+    .chain(std::iter::once((
+        13,
+        "Screensaver",
+        "clock",
+        Some(match state.preferences.feed_ambient {
+            0 => "Off",
+            1 => "After 5 minutes",
+            2 => "After 10 minutes",
+            3 => "After 15 minutes",
+            _ => "After 30 minutes",
+        }),
+        false,
+    )))
     .chain(state.feeds.can_search.then(|| {
         (
             10,
