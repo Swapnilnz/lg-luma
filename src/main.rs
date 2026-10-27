@@ -320,23 +320,37 @@ fn effects(
                     }
                 }
             }
-            Effect::LaunchTitle(target) => {
-                if !state.launching {
-                    if platform.webos {
-                        state.launching = true;
-                        state.notify(state.preferences.language.t("opening"));
-                        platform.send(Request::LaunchTitle {
-                            id: state.feeds.app_id.clone(),
-                            target,
-                        });
-                    } else {
-                        state.notify(format!(
-                            "Desktop preview: {} would open {target}",
-                            state.feeds.app_id
-                        ));
+            Effect::LaunchTitle(item) => {
+                // Luma Player when "Play with" picks it and the card's link carries an ID.
+                let play = state
+                    .feeds
+                    .player
+                    .as_ref()
+                    .filter(|_| state.feeds.uses_player(&state.preferences))
+                    .and_then(|player| {
+                        luma_core::launch::Launch::from_nuvio_link(
+                            &item.link,
+                            item.episode,
+                            &item.title,
+                        )
+                        .map(|launch| (player.app_id.clone(), launch.to_value()))
+                    });
+                match play {
+                    Some((id, params)) if !state.launching => {
+                        if platform.webos {
+                            state.launching = true;
+                            state.feeds.played = true;
+                            state.notify(state.preferences.language.t("opening"));
+                            platform.send(Request::Play { id, params });
+                        } else {
+                            state.notify(format!("Desktop preview: {id} would play {params}"));
+                        }
                     }
+                    Some(_) => {}
+                    None => open_in_feeds_app(state, platform, item.link),
                 }
             }
+            Effect::OpenInNuvio(target) => open_in_feeds_app(state, platform, target),
             Effect::Trailer(video) => {
                 if !state.launching {
                     if platform.webos {
@@ -565,6 +579,26 @@ fn weather_tick(state: &mut State, service: &weather_service::Service, visible: 
     }
 }
 
+/// Opens a card's deep link in the feeds app (Nuvio).
+fn open_in_feeds_app(state: &mut State, platform: &Platform, target: String) {
+    if state.launching {
+        return;
+    }
+    if platform.webos {
+        state.launching = true;
+        state.notify(state.preferences.language.t("opening"));
+        platform.send(Request::LaunchTitle {
+            id: state.feeds.app_id.clone(),
+            target,
+        });
+    } else {
+        state.notify(format!(
+            "Desktop preview: {} would open {target}",
+            state.feeds.app_id
+        ));
+    }
+}
+
 /// Feed rows from their worker; coming back to Home asks it for fresh Trakt rows.
 fn feeds_tick(
     state: &mut State,
@@ -574,7 +608,12 @@ fn feeds_tick(
 ) {
     let home = visible && state.page == state::Page::Home;
     if home && !state.feeds.visible {
-        service.refresh();
+        // Back from Luma Player: Continue Watching shows what was just watched.
+        if std::mem::take(&mut state.feeds.played) {
+            service.refresh_now();
+        } else {
+            service.refresh();
+        }
     }
     state.feeds.visible = home;
     // Artwork follows the rows on screen and the preload setting; other pages keep the last set.
@@ -854,6 +893,10 @@ fn run() -> Result<(), String> {
                 feeds_config_path.display()
             );
             state.feeds.app_id = config.app_id.clone();
+            state.feeds.player = config
+                .player
+                .as_ref()
+                .map(feeds_service::PlayerConfig::player);
             state.feeds.search_keys = config.search_keys.clone();
             // The same first rows the worker fetches artwork for, until Home reports its own.
             state.feeds.near = (0..4).collect();
@@ -1541,6 +1584,14 @@ fn run() -> Result<(), String> {
                             {
                                 press = None;
                                 pending = state.open_search();
+                            } else if !repeat
+                                && state.feeds.player.as_ref().is_some_and(|player| {
+                                    player.nuvio_keys.contains(&code)
+                                        || player.nuvio_keys.contains(&scan)
+                                })
+                            {
+                                press = None;
+                                pending = state.open_in_nuvio();
                             }
                         }
                     }

@@ -6,3 +6,16 @@ dist/
 .env
 .env.*
 target/
+
+# Local config and state (feeds-state.json holds Trakt tokens)
+feeds.json
+feeds-state.json
+preferences.json
+weather-cache.json
+*.patch
+
+# Luma Player
+player/config.local.json
+player/dist/
+player/target/
+out/

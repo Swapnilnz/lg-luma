@@ -174,8 +174,11 @@ pub enum Effect {
     /// Refresh apps: read the inventory and every app icon again.
     Reload,
     Launch(String),
-    /// Open the feeds app on a title: the `contentTarget` deep link.
-    LaunchTitle(String),
+    /// Open a card's title: in Luma Player when it is set up ("Play with"), else the feeds
+    /// app on its `contentTarget` deep link.
+    LaunchTitle(crate::feeds::Item),
+    /// Open a title in the feeds app (Nuvio) this once, whatever "Play with" says.
+    OpenInNuvio(String),
     /// Listen for a search through the remote's microphone; the request's number.
     VoiceSearch(u64),
     /// Play a trailer in LG's YouTube app: its video ID.
@@ -1537,12 +1540,12 @@ impl State {
             Target::FeedVoice => return self.start_voice(),
             Target::Hero if !self.launching => {
                 if let Some(item) = self.feeds.hero_item() {
-                    return vec![Effect::LaunchTitle(item.link.clone())];
+                    return vec![Effect::LaunchTitle(item.clone())];
                 }
             }
             Target::HeroExtra(index) if !self.launching => {
-                if let Some(item) = self.feeds.shelf_minis().get(index) {
-                    return vec![Effect::LaunchTitle(item.link.clone())];
+                if let Some(&item) = self.feeds.shelf_minis().get(index) {
+                    return vec![Effect::LaunchTitle(item.clone())];
                 }
             }
             Target::HeroMore => self.open_sheet(),
@@ -1553,7 +1556,7 @@ impl State {
                     .get(row)
                     .and_then(|row| row.items.get(index))
                 {
-                    return vec![Effect::LaunchTitle(item.link.clone())];
+                    return vec![Effect::LaunchTitle(item.clone())];
                 }
             }
             Target::App(id) | Target::Input(id) if !self.launching => {
@@ -1700,6 +1703,10 @@ impl State {
                     12 => self.preferences.feed_hero = !self.preferences.feed_hero,
                     14 => self.preferences.keep_awake = !self.preferences.keep_awake,
                     15 => self.preferences.feed_wide = !self.preferences.feed_wide,
+                    16 => {
+                        self.preferences.feed_use_player =
+                            Some(!self.feeds.uses_player(&self.preferences));
+                    }
                     13 => {
                         self.preferences.feed_ambient =
                             (self.preferences.feed_ambient.min(4) + 1) % 5;

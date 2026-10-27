@@ -154,6 +154,15 @@ pub struct Row {
     pub items: Vec<Item>,
 }
 
+impl Feeds {
+    /// Whether cards play in Luma Player: it is configured and "Play with" picks it.
+    pub fn uses_player(&self, preferences: &crate::model::Preferences) -> bool {
+        self.player
+            .as_ref()
+            .is_some_and(|player| preferences.feed_use_player.unwrap_or(player.default))
+    }
+}
+
 impl Row {
     /// A finished row without items takes no space on Home.
     pub fn shown(&self) -> bool {
@@ -161,10 +170,24 @@ impl Row {
     }
 }
 
+/// Luma Player, from feeds.json's `player` block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Player {
+    pub app_id: String,
+    /// Cards play in the player unless "Play with" says otherwise.
+    pub default: bool,
+    /// Remote keys (keycodes or scancodes, as Luma logs them) that open a card in Nuvio once.
+    pub nuvio_keys: Vec<i32>,
+}
+
 #[derive(Default)]
 pub struct Feeds {
     /// The app every card launches.
     pub app_id: String,
+    /// Luma Player, when configured: cards play there instead of in `app_id`.
+    pub player: Option<Player>,
+    /// A title was sent to the player: returning to Home reloads Trakt rows at once.
+    pub played: bool,
     pub rows: Vec<Row>,
     /// Horizontal scroll per row, like `State::home_scroll` for favourites.
     pub scroll: Vec<f32>,
@@ -935,12 +958,12 @@ impl State {
             }
             Target::SearchVoice => self.start_voice(),
             Target::SearchResult(index) if !self.launching => {
-                let link = search.results.get(index).map(|item| item.link.clone());
-                match link {
+                let item = search.results.get(index).cloned();
+                match item {
                     // Search is done once a title opens: Home is back as it was on return.
-                    Some(link) => {
+                    Some(item) => {
                         self.close_search();
-                        vec![Effect::LaunchTitle(link)]
+                        vec![Effect::LaunchTitle(item)]
                     }
                     None => vec![],
                 }
@@ -1570,6 +1593,8 @@ impl TitlePage {
 pub enum MenuEntry {
     Details,
     Trailer,
+    /// "Open in Nuvio", when Luma Player plays cards.
+    Nuvio,
     Watchlist,
     Watched,
     Rate,
@@ -2058,7 +2083,10 @@ impl State {
                     return Some(vec![]);
                 };
                 match button {
-                    TitleButton::Play if !self.launching => vec![Effect::LaunchTitle(link)],
+                    TitleButton::Play if !self.launching => vec![Effect::LaunchTitle(Item {
+                        link,
+                        ..page.item.clone()
+                    })],
                     TitleButton::Play => vec![],
                     TitleButton::Trailer => self.play_trailer().unwrap_or_default(),
                     TitleButton::Watchlist => {
@@ -2081,8 +2109,18 @@ impl State {
                     }
                 }
             }
-            // Nuvio's links open a show's page, not one episode: the show it is.
-            Target::TitleEpisode(_) if !self.launching => vec![Effect::LaunchTitle(link)],
+            // Luma Player plays that episode; Nuvio's links open the show's page.
+            Target::TitleEpisode(index) if !self.launching => {
+                let episode = page
+                    .shown_episodes()
+                    .and_then(|episodes| episodes.get(index))
+                    .map(|episode| [episode.season, episode.number]);
+                vec![Effect::LaunchTitle(Item {
+                    link,
+                    episode: episode.or(page.item.episode),
+                    ..page.item.clone()
+                })]
+            }
             // Pointing and clicking a season pill shows it, as moving onto it does.
             Target::TitleSeason(index) => {
                 self.select_season(index);
@@ -2181,6 +2219,9 @@ impl State {
                 .is_none_or(|details| details.trailer.is_some());
             if trailer && self.feeds.can_search {
                 entries.push(MenuEntry::Trailer);
+            }
+            if self.feeds.player.is_some() {
+                entries.push(MenuEntry::Nuvio);
             }
             if self.feeds.trakt {
                 entries.extend([MenuEntry::Watchlist, MenuEntry::Watched, MenuEntry::Rate]);
@@ -2282,6 +2323,10 @@ impl State {
                     }
                 }
                 vec![]
+            }
+            MenuEntry::Nuvio => {
+                self.close_menu();
+                vec![Effect::OpenInNuvio(link)]
             }
             MenuEntry::Watchlist => {
                 self.close_menu();
@@ -2635,14 +2680,24 @@ impl State {
         vec![]
     }
 
-    /// OK in the sheet: the title opens in Nuvio. None when the sheet is closed.
+    /// A key from `player.nuvio_keys` on a card: that title opens in Nuvio this once.
+    pub fn open_in_nuvio(&mut self) -> Vec<Effect> {
+        if self.launching || self.feeds.player.is_none() {
+            return vec![];
+        }
+        card_item(&self.feeds, &self.focus)
+            .map(|item| vec![Effect::OpenInNuvio(item.link.clone())])
+            .unwrap_or_default()
+    }
+
+    /// OK in the sheet: the title opens. None when the sheet is closed.
     pub fn sheet_activate(&mut self) -> Option<Vec<Effect>> {
         let sheet = self.feeds.sheet.as_ref()?;
         Some(match self.focus {
             Target::SheetItem(index) if !self.launching => sheet
                 .items
                 .get(index)
-                .map(|item| vec![Effect::LaunchTitle(item.link.clone())])
+                .map(|item| vec![Effect::LaunchTitle(item.clone())])
                 .unwrap_or_default(),
             _ => vec![],
         })

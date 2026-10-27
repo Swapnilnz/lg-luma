@@ -1,0 +1,16 @@
+[package]
+name = "luma-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "MIT"
+description = "Luma and Luma Player's shared logic: launch contract, streams, Trakt, resume, next episode, subtitles. No I/O."
+
+[features]
+default = ["json"]
+# Request bodies and reply parsing. Off, the crate is std-only (the pure logic still builds).
+json = ["dep:serde_json"]
+
+[dependencies]
+serde_json = { version = "1", optional = true }

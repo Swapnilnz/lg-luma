@@ -2845,6 +2845,7 @@ fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
         let (label, icon) = match entry {
             MenuEntry::Details => ("Details".to_owned(), "more"),
             MenuEntry::Trailer => ("Play trailer".to_owned(), "tv"),
+            MenuEntry::Nuvio => ("Open in Nuvio".to_owned(), "tv"),
             MenuEntry::Watchlist if trakt.is_some_and(|trakt| trakt.in_watchlist) => {
                 ("Remove from Watchlist".to_owned(), "close")
             }
@@ -4225,6 +4226,19 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         }),
         false,
     )))
+    .chain(state.feeds.player.is_some().then(|| {
+        (
+            16,
+            "Play with",
+            "tv",
+            Some(if state.feeds.uses_player(&state.preferences) {
+                "Luma Player"
+            } else {
+                "Nuvio"
+            }),
+            false,
+        )
+    }))
     .chain(std::iter::once(keep_awake))
     .chain(std::iter::once((
         13,

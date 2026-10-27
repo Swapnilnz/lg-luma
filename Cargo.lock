@@ -285,6 +285,7 @@ dependencies = [
  "gl",
  "image",
  "libc",
+ "luma-core",
  "luma-vector-geometry",
  "owned_ttf_parser",
  "sdl2",
@@ -292,6 +293,13 @@ dependencies = [
  "serde_json",
  "time",
  "ureq",
+]
+
+[[package]]
+name = "luma-core"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

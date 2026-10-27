@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- Luma Player's dev shell: forwards the launch params to the Trunk server on the laptop.
+     scripts/player-dev-shell.sh fills in LAPTOP_IP and installs it. -->
+<html>
+  <body style="background: #000; color: #888; font: 28px sans-serif; padding: 80px">
+    Connecting to the laptop at LAPTOP_IP:8080…
+    <script>
+      var p = {};
+      try {
+        p = JSON.parse((window.PalmSystem && PalmSystem.launchParams) || "{}");
+      } catch (e) {}
+      location.replace("http://LAPTOP_IP:8080/?params=" + encodeURIComponent(JSON.stringify(p)));
+    </script>
+  </body>
+</html>

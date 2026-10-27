@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1920, height=1080, initial-scale=1" />
+    <title>Luma Player</title>
+    <link data-trunk rel="rust" data-bin="luma-player" data-wasm-opt="z" />
+    <link data-trunk rel="css" href="style.css" />
+    <link data-trunk rel="copy-file" href="appinfo.json" />
+    <link data-trunk rel="copy-file" href="icon.png" />
+    <link data-trunk rel="copy-file" href="largeIcon.png" />
+  </head>
+  <body>
+    <video id="video" preload="auto" playsinline></video>
+    <div id="subs" class="subs"></div>
+    <div id="osd" class="osd"></div>
+    <div id="nextup" class="nextup"></div>
+    <div id="stage" class="stage on">
+      <div class="backdrop plain"></div>
+      <div class="hero"><div class="status"><span class="dot"></span>Loading…</div></div>
+    </div>
+    <div id="panel" class="panel"></div>
+    <div id="spinner" class="spinner"><div></div></div>
+    <div id="toast" class="toasts"></div>
+  </body>
+</html>

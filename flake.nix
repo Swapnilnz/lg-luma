@@ -69,6 +69,50 @@
               pkgs.xvfb-run
             ];
           });
+
+          # Luma Player: Rust to WebAssembly with Trunk (`nix develop .#player`). Trunk fetches
+          # the wasm-bindgen and wasm-opt versions the player's Cargo.lock asks for.
+          player = pkgs.mkShell {
+            name = "luma-player";
+            packages = [
+              (pkgs.rust-bin.stable."1.93.0".minimal.override {
+                extensions = [
+                  "clippy"
+                  "rustfmt"
+                ];
+                targets = [ "wasm32-unknown-unknown" ];
+              })
+              pkgs.trunk
+              pkgs.cargo-watch
+              pkgs.nodejs_24
+              pnpm
+              pkgs.git
+            ];
+          };
+
+          # Luma Player for TVs before webOS 24 (Chromium < 96, no WebAssembly reference
+          # types): nightly rebuilds std for plain MVP wasm. Use with MVP=1 player-deploy.sh.
+          player-mvp = pkgs.mkShell {
+            name = "luma-player-mvp";
+            packages = [
+              (pkgs.rust-bin.selectLatestNightlyWith (
+                toolchain:
+                toolchain.minimal.override {
+                  extensions = [
+                    "clippy"
+                    "rust-src"
+                  ];
+                  targets = [ "wasm32-unknown-unknown" ];
+                }
+              ))
+              pkgs.trunk
+              pkgs.nodejs_24
+              pnpm
+              pkgs.git
+            ];
+            CARGO_UNSTABLE_BUILD_STD = "std,panic_abort";
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS = "-C target-cpu=mvp";
+          };
         }
       );
 

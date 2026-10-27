@@ -127,6 +127,26 @@ While the screensaver is on, Luma holds off LG's own screen saver so it does not
 After an hour of Luma's screensaver it lets LG's take over again, along with LG's power
 saving.
 
+## Luma Player
+
+With a `player` block in `feeds.json`, OK on a card plays the title in Luma Player
+(`player/`, its own webOS app) instead of opening it in Nuvio. Without the block, cards open
+Nuvio as before.
+
+```json
+"player": { "app_id": "com.swapnil.lumaplayer", "play_with": "player", "nuvio_keys": [] }
+```
+
+- `play_with`: `player` (default) or `nuvio`, until **Settings > Play with** is changed on the TV.
+- Cards pass their IMDb or TMDB ID, title and episode (Continue Watching, Up Next and an episode
+  picked on a title page play that episode; a show card plays the next unwatched one).
+- Holding OK on a card offers **Open in Nuvio** this once. `nuvio_keys` maps remote keys (as
+  `Luma key:` logs them, e.g. the Blue button) to the same.
+- Returning to Home from the player reloads the Trakt rows at once, skipping the two-minute
+  limit, so Continue Watching shows what was just watched.
+
+The player's own setup, dev loop and keys are in `player/README.md`.
+
 ## Trakt sign-in
 
 Create an API app at <https://trakt.tv/oauth/applications> with the redirect URI

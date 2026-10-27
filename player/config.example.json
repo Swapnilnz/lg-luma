@@ -1,0 +1,15 @@
+{
+  "aiostreams": { "manifest_url": "https://YOUR_AIOSTREAMS/stremio/.../manifest.json" },
+  "subtitle_addons": ["https://opensubtitles-v3.strem.io/manifest.json"],
+  "tmdb": { "api_key": "YOUR_TMDB_KEY" },
+  "trakt": { "client_id": "YOUR_TRAKT_CLIENT_ID" },
+  "defaults": {
+    "audio_languages": ["en"],
+    "subtitle_languages": ["en"],
+    "subtitles_on": false,
+    "autoplay_next": true,
+    "next_card_seconds_left": 45,
+    "countdown_seconds": 10
+  },
+  "dev": { "log_url": "http://192.168.6.10:8081/log" }
+}

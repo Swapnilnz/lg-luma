@@ -132,6 +132,9 @@ pub struct Preferences {
     pub feed_wide: bool,
     /// A quiet low tone every two minutes, so a soundbar that sleeps on silence stays on.
     pub keep_awake: bool,
+    /// "Play with": Luma Player (true) or the feeds app (false). None follows feeds.json's
+    /// `player.play_with`.
+    pub feed_use_player: Option<bool>,
 }
 
 impl Default for Preferences {
@@ -161,6 +164,7 @@ impl Default for Preferences {
             feed_ambient: 2,
             feed_wide: true,
             keep_awake: true,
+            feed_use_player: None,
         }
     }
 }

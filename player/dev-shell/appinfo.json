@@ -1,0 +1,14 @@
+{
+  "id": "com.swapnil.lumaplayer.dev",
+  "version": "1.0.0",
+  "vendor": "Swapnil",
+  "type": "web",
+  "main": "index.html",
+  "title": "Luma Player (dev)",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "resolution": "1920x1080",
+  "disableBackHistoryAPI": true,
+  "handlesRelaunch": true,
+  "bgColor": "#000000"
+}

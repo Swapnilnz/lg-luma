@@ -145,6 +145,11 @@ pub enum Request {
     Voice(u64),
     /// Play a YouTube video (a trailer) in LG's YouTube app.
     YouTube(String),
+    /// Launch Luma Player (`id`) with a `luma_core::launch::Launch` as its params.
+    Play {
+        id: String,
+        params: Value,
+    },
     SyncSplash(String),
     Recent {
         generation: u64,
@@ -263,6 +268,19 @@ impl Platform {
                                     "contentId": video,
                                 },
                             }),
+                        )
+                        .map(|_| ())
+                    }),
+                    Request::Play { id, params } => Response::Launched(if !webos {
+                        Ok(())
+                    } else if !valid_app_id(&id) {
+                        Err("Invalid application identifier".into())
+                    } else if params.to_string().len() > 2048 {
+                        Err("Launch params too long".into())
+                    } else {
+                        call(
+                            "luna://com.webos.applicationManager/launch",
+                            json!({"id": id, "params": params}),
                         )
                         .map(|_| ())
                     }),

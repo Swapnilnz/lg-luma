@@ -6,6 +6,11 @@
   "search_keys": [],
   "hero": ["trakt:continue", "trakt:watchlist"],
   "shelf": ["trakt:calendar", "smart:new_season"],
+  "player": {
+    "app_id": "com.swapnil.lumaplayer",
+    "play_with": "player",
+    "nuvio_keys": []
+  },
   "trakt": {
     "client_id": "YOUR_TRAKT_CLIENT_ID"
   },

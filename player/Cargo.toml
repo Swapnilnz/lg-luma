@@ -1,0 +1,58 @@
+[package]
+name = "luma-player"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "MIT"
+description = "Luma Player: a webOS web app (Rust to WebAssembly) that plays AIOStreams and scrobbles to Trakt."
+
+# Its own workspace: the player builds for wasm32 with Trunk, and keeps its dependencies out
+# of Luma's Cargo.lock, so Luma's `--locked` builds are untouched.
+[workspace]
+
+[features]
+default = []
+# Dev builds: the `url` and `t` launch params, `?params=` and the laptop log server.
+dev = []
+
+[dependencies]
+luma-core = { path = "../crates/luma-core" }
+console_error_panic_hook = "0.1"
+js-sys = "0.3.77"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+serde_json = "1"
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+
+[dependencies.web-sys]
+version = "0.3.77"
+features = [
+  "AbortController",
+  "AbortSignal",
+  "Document",
+  "Element",
+  "Event",
+  "EventTarget",
+  "Headers",
+  "HtmlElement",
+  "HtmlMediaElement",
+  "HtmlVideoElement",
+  "KeyboardEvent",
+  "Location",
+  "MediaError",
+  "Request",
+  "RequestInit",
+  "RequestMode",
+  "Response",
+  "Storage",
+  "TimeRanges",
+  "Window",
+  "console",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

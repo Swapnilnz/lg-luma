@@ -64,6 +64,39 @@ pub struct Config {
     /// Row sources shown as small posters on the Top Shelf instead of as rows. Default:
     /// `trakt:calendar` and `smart:new_season`.
     pub shelf: Vec<String>,
+    /// Luma Player: when set, cards play there instead of in `app_id`.
+    pub player: Option<PlayerConfig>,
+}
+
+/// `"player": {"app_id": "com.swapnil.lumaplayer", "play_with": "player", "nuvio_keys": []}`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PlayerConfig {
+    #[serde(default = "default_player_app")]
+    pub app_id: String,
+    /// `player` (default) or `nuvio`: where cards open until "Play with" is changed.
+    #[serde(default)]
+    pub play_with: String,
+    /// Remote keys (as Luma logs them) that open the focused card in Nuvio once.
+    #[serde(default)]
+    pub nuvio_keys: Vec<i32>,
+}
+
+fn default_player_app() -> String {
+    "com.swapnil.lumaplayer".into()
+}
+
+impl PlayerConfig {
+    pub fn player(&self) -> crate::feeds::Player {
+        crate::feeds::Player {
+            app_id: if self.app_id.trim().is_empty() {
+                default_player_app()
+            } else {
+                self.app_id.trim().to_owned()
+            },
+            default: !self.play_with.trim().eq_ignore_ascii_case("nuvio"),
+            nuvio_keys: self.nuvio_keys.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -352,6 +385,8 @@ fn now_secs() -> u64 {
 pub enum Command {
     /// Home came back on screen.
     Refresh,
+    /// Home came back from Luma Player: Trakt rows reload at once, whatever the limit.
+    RefreshNow,
     /// The rows on or near screen: only their artwork is downloaded and kept.
     /// With `keep`, posters already sent stay with Home wherever it scrolls.
     Near { rows: Vec<usize>, keep: bool },
@@ -528,6 +563,11 @@ impl Service {
 
     pub fn refresh(&self) {
         let _ = self.sender.send(Command::Refresh);
+    }
+
+    /// Back from Luma Player: Trakt rows reload now, skipping the two-minute limit.
+    pub fn refresh_now(&self) {
+        let _ = self.sender.send(Command::RefreshNow);
     }
 }
 
@@ -1788,6 +1828,10 @@ impl Worker {
                     self.refocus = true;
                 }
             }
+            Command::RefreshNow => {
+                self.last_refocus = Some(Instant::now());
+                self.refocus = true;
+            }
             Command::Near { rows, keep } => {
                 let near: HashSet<usize> = rows.into_iter().collect();
                 if near != self.near || keep != self.keep {
@@ -1831,7 +1875,7 @@ impl Worker {
                     }
                     Response::Action { link, result }
                 }
-                Command::Refresh | Command::Near { .. } => continue,
+                Command::Refresh | Command::RefreshNow | Command::Near { .. } => continue,
             };
             if self.responses.send(response).is_err() {
                 return false;
