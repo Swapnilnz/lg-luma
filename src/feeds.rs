@@ -18,6 +18,9 @@ use std::{
 pub const CARD_WIDTH: f32 = 216.;
 pub const CARD_HEIGHT: f32 = 324.;
 pub const CARD_PITCH: f32 = 240.;
+/// How much of the next row shows below the focused one on Home: its title and the top of
+/// its posters.
+pub const ROW_PEEK: f32 = 190.;
 pub const CARD_RADIUS: f32 = 14.4;
 /// How long a poster takes to fade in once it arrives.
 const REVEAL: Duration = Duration::from_millis(450);
@@ -697,6 +700,13 @@ impl State {
             }
             Target::Hero => {
                 match direction {
+                    // Right past the last poster: the calendar button, when there is one.
+                    Direction::Right
+                        if self.hero_last()
+                            && controls.iter().any(|c| c.target == Target::HeroMore) =>
+                    {
+                        self.focus(Target::HeroMore, controls);
+                    }
                     Direction::Left | Direction::Right => {
                         self.hero_step(matches!(direction, Direction::Right));
                     }
@@ -710,11 +720,13 @@ impl State {
                             self.focus(next, controls);
                         }
                     }
+                    // Down is the first row; the calendar is Right from the last poster.
                     Direction::Down => {
-                        let next = [Target::HeroExtra(0), Target::HeroMore]
-                            .into_iter()
-                            .find(|target| controls.iter().any(|c| c.target == *target))
-                            .or_else(|| nearest_feed(controls, 200., |_| true, false))?;
+                        let next = nearest_feed(controls, 200., |_| true, false).or_else(|| {
+                            [Target::HeroExtra(0), Target::HeroMore]
+                                .into_iter()
+                                .find(|target| controls.iter().any(|c| c.target == *target))
+                        })?;
                         self.focus(next, controls);
                     }
                 }
@@ -729,7 +741,11 @@ impl State {
                     .collect();
                 let position = line.iter().position(|t| *t == mini).unwrap_or(0);
                 let next = match direction {
-                    Direction::Left => position.checked_sub(1).and_then(|p| line.get(p).cloned()),
+                    // Left from the first is back on the posters.
+                    Direction::Left => position
+                        .checked_sub(1)
+                        .and_then(|p| line.get(p).cloned())
+                        .or(Some(Target::Hero)),
                     Direction::Right => line.get(position + 1).cloned(),
                     Direction::Up => Some(Target::Hero),
                     Direction::Down => nearest_feed(controls, 200., |_| true, false),
@@ -1480,6 +1496,8 @@ pub enum TraktAction {
     Rate(u8),
     /// Keep a show out of Up Next.
     HideUpNext,
+    /// Off Continue Watching: its paused playback goes, and a show leaves Up Next too.
+    RemoveContinue,
 }
 
 /// Requests for the feed workers, queued by the UI and sent each frame.
@@ -1690,6 +1708,7 @@ pub enum MenuEntry {
     Rate,
     RateValue(u8),
     HideUpNext,
+    RemoveContinue,
 }
 
 /// A card's quick actions, opened by holding OK.
@@ -1709,6 +1728,11 @@ pub const RATINGS: [(u8, &str); 5] = [
     (4, "Didn't like it"),
     (2, "Hated it"),
 ];
+
+/// Whether a card is one of Continue Watching's: paused part way, or a show's next episode.
+pub fn continuing(item: &Item) -> bool {
+    item.progress.is_some() || item.subtitle.starts_with("Next: ")
+}
 
 fn link_series(link: &str) -> bool {
     link.contains("/series/")
@@ -1890,6 +1914,49 @@ impl State {
             slides.from = None;
             self.dirty = true;
         }
+    }
+
+    /// Home pressed while Luma is already in front: whatever is open closes and Home goes back
+    /// to its very top (greeting, search bar and favourites), as Apple TV's Home does.
+    pub fn home_to_top(&mut self) {
+        let drawn = self.drawn_scroll();
+        self.feeds.menu = None;
+        self.feeds.title = None;
+        self.feeds.sheet = None;
+        self.feeds.search = None;
+        self.feeds.preview = None;
+        self.feeds.ambient = None;
+        self.overlay = None;
+        self.moving = None;
+        if self.page != Page::Home {
+            self.open(0);
+        }
+        self.home_scroll = 0.;
+        for scroll in &mut self.feeds.scroll {
+            *scroll = 0.;
+        }
+        if let Some(slides) = &mut self.feeds.hero {
+            slides.from = None;
+            slides.index = 0;
+            slides.since = Instant::now();
+        }
+        // Slide up from where Home is drawn, rather than jump.
+        self.feeds.page_slide =
+            (!self.preferences.reduced_motion && drawn > 1.).then(|| (drawn, Instant::now()));
+        self.scroll = 0.;
+        self.focus = self.first_content();
+        self.feeds.prune_images();
+        self.pointer = false;
+        self.dirty = true;
+    }
+
+    /// Whether the Top Shelf is on its last poster.
+    fn hero_last(&self) -> bool {
+        let count = self.feeds.hero_items().len();
+        self.feeds
+            .hero
+            .as_ref()
+            .is_some_and(|slides| count > 0 && slides.index % count == count - 1)
     }
 
     /// Left and Right on the Top Shelf turn its slides by hand.
@@ -2302,6 +2369,9 @@ impl State {
             if self.feeds.can_search {
                 entries.push(MenuEntry::Details);
             }
+            if self.feeds.trakt && continuing(&item) {
+                entries.push(MenuEntry::RemoveContinue);
+            }
             let trailer = self
                 .feeds
                 .details
@@ -2438,6 +2508,12 @@ impl State {
                 self.trakt_action(&link, TraktAction::HideUpNext);
                 vec![]
             }
+            MenuEntry::RemoveContinue => {
+                self.close_menu();
+                self.remove_continuing(&link);
+                self.trakt_action(&link, TraktAction::RemoveContinue);
+                vec![]
+            }
         })
     }
 
@@ -2494,6 +2570,26 @@ impl State {
         }
     }
 
+    /// Takes a title's Continue Watching cards off Home at once, before Trakt answers; the
+    /// rows reload from Trakt after.
+    fn remove_continuing(&mut self, link: &str) {
+        let mut rows = std::mem::take(&mut self.feeds.rows);
+        for row in &mut rows {
+            row.items
+                .retain(|item| item.link != link || !continuing(item));
+        }
+        if let Some(slides) = &mut self.feeds.hero {
+            slides.from = None;
+        }
+        self.set_feed_rows(rows);
+        let count = self.feeds.hero_items().len();
+        if let Some(slides) = &mut self.feeds.hero
+            && slides.index >= count
+        {
+            slides.index = count.saturating_sub(1);
+        }
+    }
+
     /// Sends a change to Trakt and shows it at once where it can (the Watchlist button).
     fn trakt_action(&mut self, link: &str, action: TraktAction) {
         let trakt = self.feeds.trakt_titles.entry(link.to_owned()).or_default();
@@ -2504,7 +2600,7 @@ impl State {
             TraktAction::Episode(season, number) => {
                 trakt.episodes.insert([*season, *number]);
             }
-            TraktAction::Rate(_) | TraktAction::HideUpNext => {}
+            TraktAction::Rate(_) | TraktAction::HideUpNext | TraktAction::RemoveContinue => {}
         }
         self.feeds
             .outbox

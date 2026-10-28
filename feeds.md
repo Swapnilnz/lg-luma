@@ -62,8 +62,10 @@ steps aside). Below it come the remaining rows.
 - Every slide's poster runs along the bottom right; the current one is lit.
 - Above them, the `shelf` rows (default `trakt:calendar` and `smart:new_season`) show as two
   small posters, the first of each (or two from This Week), with an expand button that opens
-  all of them in a grid. Down from the banner reaches them. These rows are not shown as rows
-  either.
+  all of them in a grid. Right from the last slide reaches the calendar button; Down from the
+  banner goes to the first row. These rows are not shown as rows either.
+- Pressing Home again while on Home closes whatever is open and goes back to the very top
+  (the Home key on a keyboard does the same in the desktop preview).
 - Settings > Interface > Top Shelf turns it off: every row is then a row again.
 
 | `feeds.json` key | Meaning | Default |
@@ -109,7 +111,9 @@ Letterboxd scores, the synopsis and director or creators. Below that:
 **Holding OK** on a poster opens its quick actions: Details (its page), Play trailer, and with
 Trakt: Add to / Remove from Watchlist, Mark as watched (for shows: the next episode, e.g.
 "Mark S2, E4 watched"), Rate (Loved it 10 · Liked it 8 · It was OK 6 · Didn't like it 4 ·
-Hated it 2) and Hide from Up Next. Trakt rows reload after each change. **Play** still plays
+Hated it 2) and Hide from Up Next. On Continue Watching cards, Remove from Continue Watching
+clears the title's paused playback on Trakt (and, for a show, hides it from Up Next, which
+trakt.tv can undo). Trakt rows reload after each change. **Play** still plays
 the trailer straight away. Title pages, Details and trailers need the TMDB key.
 
 Continue Watching cards show how long is left ("S1, E4 · 23m left") beside the progress bar.

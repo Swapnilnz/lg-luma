@@ -56,20 +56,15 @@ impl OsdButton {
 impl App {
     /// The control bar, in one row from Play/Pause (seeking is Left/Right on the scrubber).
     pub fn osd_buttons(&self) -> Vec<OsdButton> {
-        let mut buttons = vec![OsdButton::PlayPause];
+        // Most used first: Play/Pause, Audio & Subtitles, Streams, then a show's Episodes.
+        let mut buttons = vec![OsdButton::PlayPause, OsdButton::Tracks, OsdButton::Streams];
         if self.launch.kind == Kind::Series {
             buttons.push(OsdButton::Episodes);
             if self.next_target().is_some() {
                 buttons.push(OsdButton::Next);
             }
         }
-        buttons.extend([
-            OsdButton::Tracks,
-            OsdButton::Speed,
-            OsdButton::Streams,
-            OsdButton::Info,
-            OsdButton::Settings,
-        ]);
+        buttons.extend([OsdButton::Speed, OsdButton::Info, OsdButton::Settings]);
         buttons
     }
 

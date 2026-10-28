@@ -660,11 +660,18 @@ impl State {
                 if control.rect.y < top {
                     self.scroll = (drawn + control.rect.y - top).max(0.);
                 }
-                let bottom = if self.page == Page::Home && self.moving.is_none() {
+                let mut bottom = if self.page == Page::Home && self.moving.is_none() {
                     1041.6
                 } else {
                     982.4
                 };
+                // Moving down the rows, the next one peeks in below, as it does moving up.
+                if self.page == Page::Home
+                    && let Target::Feed(row, _) = self.focus
+                    && (row + 1..self.feeds.rows.len()).any(|next| self.feeds.row_visible(next))
+                {
+                    bottom -= crate::feeds::ROW_PEEK;
+                }
                 if control.rect.y + control.rect.h > bottom {
                     self.scroll = drawn + control.rect.y + control.rect.h - bottom;
                 }

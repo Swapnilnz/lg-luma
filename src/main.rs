@@ -1480,10 +1480,18 @@ fn run() -> Result<(), String> {
                 Event::Quit { .. } => running = false,
                 Event::User { type_, code, .. } if Some(type_) == lifecycle_event => {
                     if code == 1 {
+                        let in_front = focused && visible;
                         // A staged Home must come forward itself. If it does not, its
                         // registration would leave the Home key dead: check below.
                         if end_registration.is_some() {
-                            foreground.relaunched(Instant::now(), focused && visible);
+                            foreground.relaunched(Instant::now(), in_front);
+                        }
+                        // Home pressed again on Home: back to the very top.
+                        if in_front {
+                            if matches!(state.overlay, Some(Overlay::SystemKeyboard)) {
+                                pending.extend(state.finish_text_input());
+                            }
+                            state.home_to_top();
                         }
                         // SAFETY: the window outlives the event loop.
                         unsafe {
@@ -1611,6 +1619,11 @@ fn run() -> Result<(), String> {
                             state.options();
                         }
                         Keycode::F5 if !repeat => pending.push(Effect::Reload),
+                        // The desktop preview's stand-in for pressing the remote's Home on Home.
+                        Keycode::Home if !repeat && !state.text_input_active() => {
+                            press = None;
+                            state.home_to_top();
+                        }
                         Keycode::AudioPlay if !repeat && state.overlay.is_none() => {
                             press = None;
                             pending = state.play_trailer().unwrap_or_default();

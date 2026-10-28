@@ -86,7 +86,7 @@ nix develop .#player -c scripts/player-deploy.sh
 ## How it behaves
 
 The controls are an Apple TV-style bar: the scrubber, and below it one row of buttons from
-Play/Pause: Episodes and Next Episode (shows), Audio & Subtitles, Playback Speed, Streams,
+Play/Pause: Audio & Subtitles, Streams, Episodes and Next Episode (shows), Playback Speed,
 Info and Settings. Seeking is Left/Right on the scrubber, or Rewind/FF. Each opens as a popover above the bar; Episodes opens a shelf of
 season tabs and episode stills along the bottom.
 

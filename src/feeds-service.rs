@@ -644,6 +644,17 @@ impl Http {
             .map_err(|error| connection_error(url, error))?;
         read(response, limit)
     }
+
+    fn delete(&self, url: &str, headers: &[(&str, &str)], limit: usize) -> Result<Reply, String> {
+        let mut request = self.agent.delete(url).header("User-Agent", USER_AGENT);
+        for (key, value) in headers {
+            request = request.header(*key, *value);
+        }
+        let response = request
+            .call()
+            .map_err(|error| connection_error(url, error))?;
+        read(response, limit)
+    }
 }
 
 fn connection_error(url: &str, error: ureq::Error) -> String {
@@ -2913,6 +2924,66 @@ impl Worker {
         Err("Trakt sign-in failed".into())
     }
 
+    fn trakt_delete(&mut self, path: &str) -> Result<(), String> {
+        let trakt = self.config.trakt.clone().ok_or("Trakt is not configured")?;
+        if self.saved.token.as_ref().is_some_and(Token::expiring) {
+            self.refresh_token()?;
+        }
+        for attempt in 0..2 {
+            let token = self
+                .saved
+                .token
+                .as_ref()
+                .map(|token| token.access_token.clone())
+                .ok_or("Sign in to Trakt first")?;
+            let bearer = format!("Bearer {token}");
+            let reply = self.http.delete(
+                &format!("{TRAKT}{path}"),
+                &Self::trakt_headers(&trakt.client_id, Some(bearer.as_str())),
+                JSON_LIMIT,
+            )?;
+            // 404: already gone.
+            if reply.ok() || reply.status == 404 {
+                return Ok(());
+            }
+            if reply.status == 401 && attempt == 0 {
+                self.refresh_token()?;
+                continue;
+            }
+            return Err(format!("Trakt answered HTTP {}", reply.status));
+        }
+        Err("Trakt sign-in failed".into())
+    }
+
+    /// Takes a title off Continue Watching: every paused playback of it (a movie, or any of a
+    /// show's episodes), and a show out of Up Next as well, so it does not come back there.
+    fn remove_continue(&mut self, kind: Kind, title_ids: &Value) -> Result<String, String> {
+        let trakt = self.trakt_id(kind, title_ids)?;
+        let (group, field) = match kind {
+            Kind::Movie => ("movies", "movie"),
+            Kind::Series => ("episodes", "show"),
+        };
+        let paused = self.trakt_get(&format!("/sync/playback/{group}"), &[])?;
+        let playbacks: Vec<u64> = paused
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                item.get(field)
+                    .is_some_and(|media| ids(media).trakt == Some(trakt))
+            })
+            .filter_map(|item| item.get("id").and_then(Value::as_u64))
+            .collect();
+        for id in playbacks {
+            self.trakt_delete(&format!("/sync/playback/{id}"))?;
+        }
+        if kind == Kind::Series {
+            let body = json!({ "shows": [{ "ids": { "trakt": trakt } }] });
+            self.trakt_post("/users/hidden/progress_watched", &body)?;
+        }
+        Ok("Removed from Continue Watching".to_owned())
+    }
+
     /// Trakt's own ID for a title, found by its IMDb or TMDB ID.
     fn trakt_id(&mut self, kind: Kind, title_ids: &Value) -> Result<u64, String> {
         let (source, id) = match title_ids.get("imdb").and_then(Value::as_str) {
@@ -3022,6 +3093,9 @@ impl Worker {
             return Err("Sign in to Trakt first".into());
         }
         let (kind, title_ids) = link_ids(link).ok_or("Not a title link")?;
+        if *action == TraktAction::RemoveContinue {
+            return self.remove_continue(kind, &title_ids);
+        }
         let group = |entry: Value, group: &str| {
             let mut body = serde_json::Map::new();
             body.insert(group.to_owned(), Value::Array(vec![entry]));
@@ -3071,6 +3145,7 @@ impl Worker {
                 group(media, "shows"),
                 "Hidden from Up Next".to_owned(),
             ),
+            TraktAction::RemoveContinue => unreachable!("handled above"),
         };
         let reply = self.trakt_post(path, &body)?;
         // Trakt answers 201 even for an ID it could not match: it lists those under not_found.

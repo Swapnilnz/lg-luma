@@ -2181,20 +2181,20 @@ fn hero_banner(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
             &play_label(item),
             "play",
             112.,
-            band.y + 800.,
+            band.y + 760.,
             64.,
             focused,
         );
     }
     // Every slide's poster in a line under the button, the current one lit and raised.
-    let (thumb_w, thumb_h, thumb_pitch) = (72., 108., 84.);
-    let strip_y = band.y + 900.;
+    let (thumb_w, thumb_h, thumb_pitch) = (108., 162., 126.);
+    let strip_y = band.y + 856.;
     for index in 0..items.len() {
         let Some(item) = item_at(index) else {
             continue;
         };
         let current = index == slides.index;
-        let lift = if current { 8. } else { 0. };
+        let lift = if current { 10. } else { 0. };
         let rect = Rect::new(
             112. + index as f32 * thumb_pitch,
             strip_y - lift,
@@ -2339,10 +2339,10 @@ fn hero_slide(
                 .is_some_and(|url| !state.feeds.images.contains_key(url)));
     if loading {
         // The shape of what is coming, not a flash of plain text.
-        skeleton(out, Rect::new(x, band.y + 500., 460., 130.), 14.);
-        skeleton(out, Rect::new(x, band.y + 658., 360., 22.), 11.);
-        skeleton(out, Rect::new(x, band.y + 700., 880., 18.), 9.);
-        skeleton(out, Rect::new(x, band.y + 730., 700., 18.), 9.);
+        skeleton(out, Rect::new(x, band.y + 460., 460., 130.), 14.);
+        skeleton(out, Rect::new(x, band.y + 618., 360., 22.), 11.);
+        skeleton(out, Rect::new(x, band.y + 660., 880., 18.), 9.);
+        skeleton(out, Rect::new(x, band.y + 690., 700., 18.), 9.);
     } else {
         let caption = if item.subtitle.is_empty() {
             details.map(meta_line).unwrap_or_default()
@@ -2351,7 +2351,7 @@ fn hero_slide(
         };
         out.text(
             caption,
-            Rect::new(x, band.y + 652., 1100., 30.),
+            Rect::new(x, band.y + 612., 1100., 30.),
             text(22.4, 550, 0.),
             c(0xffffff, 0.82),
             false,
@@ -2362,7 +2362,7 @@ fn hero_slide(
         {
             out.text(
                 clip_words(overview, 190),
-                Rect::new(x, band.y + 694., 960., 84.),
+                Rect::new(x, band.y + 654., 960., 84.),
                 text(20., 400, 0.).leading(1.45),
                 c(0xffffff, 0.85),
                 false,
@@ -2374,7 +2374,7 @@ fn hero_slide(
             details,
             &item.title,
             x,
-            band.y + 630.,
+            band.y + 590.,
             (620., 180.),
             72.,
         );
@@ -2886,6 +2886,7 @@ fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
                 "star",
             ),
             MenuEntry::HideUpNext => ("Hide from Up Next".to_owned(), "eye-off"),
+            MenuEntry::RemoveContinue => ("Remove from Continue Watching".to_owned(), "close"),
         };
         let rect = Rect::new(717.8, panel.y + 134. + index as f32 * 76.8, 484.4, 67.2);
         let target = Target::MenuItem(index);
