@@ -192,6 +192,35 @@ impl Track {
         on
     }
 
+    /// Where the dialogue stops near the end, a sign the credits start: the end of the last
+    /// line, or of the last one before a gap of a minute or more in the final 15% (a scene
+    /// after the credits). Lines that are only music (♪) don't count. None when the
+    /// last line isn't in the final 15%, where it says little.
+    pub fn dialogue_end(&self, duration: f64) -> Option<f64> {
+        if duration <= 0. {
+            return None;
+        }
+        let spoken: Vec<&Cue> = self
+            .cues
+            .iter()
+            .filter(|c| c.end < duration - 5.)
+            .filter(|c| {
+                let text: String = c.html.chars().filter(|ch| ch.is_alphanumeric()).collect();
+                !text.is_empty() && !c.html.contains('♪') && !c.html.contains('♫')
+            })
+            .collect();
+        let last = spoken.last()?;
+        let tail = duration * 0.85;
+        // A long silence near the end, then more lines: the credits came between.
+        let gap = spoken
+            .windows(2)
+            .filter(|pair| pair[0].end >= tail && pair[1].start - pair[0].end >= 60.)
+            .map(|pair| pair[0].end)
+            .next();
+        let end = gap.unwrap_or(last.end);
+        (end >= duration * 0.85).then_some(end)
+    }
+
     /// The HTML to show at `seconds`, cues joined by line breaks; empty when none.
     pub fn html_at(&self, seconds: f64) -> String {
         self.at(seconds)
@@ -207,6 +236,33 @@ mod tests {
     use super::*;
 
     const SRT: &str = "1\r\n00:00:01,000 --> 00:00:03,500\r\nHello <b>there</b>\r\n<i>world</i>\r\n\r\n2\r\n00:00:03,000 --> 00:00:05,000\r\nOverlap & co\r\n\r\n3\r\n00:00:10,000 --> 00:00:09,000\r\nBackwards\r\n";
+
+    #[test]
+    fn finds_where_the_dialogue_stops() {
+        let cue = |start: f64, end: f64, html: &str| Cue {
+            start,
+            end,
+            html: html.into(),
+        };
+        let episode = Track::new(vec![
+            cue(10., 12., "Hi"),
+            cue(2500., 2510., "Bye"),
+            cue(2560., 2600., "♪ theme ♪"),
+        ]);
+        assert_eq!(episode.dialogue_end(2700.), Some(2510.));
+        // A scene after the credits: the dialogue before the long gap.
+        let film = Track::new(vec![
+            cue(10., 12., "Hi"),
+            cue(6200., 6210., "The end"),
+            cue(6650., 6660., "Post-credits"),
+        ]);
+        assert_eq!(film.dialogue_end(6800.), Some(6210.));
+        // Lines stop too early to say anything.
+        assert_eq!(
+            Track::new(vec![cue(10., 12., "Hi")]).dialogue_end(2700.),
+            None
+        );
+    }
 
     #[test]
     fn parses_srt() {

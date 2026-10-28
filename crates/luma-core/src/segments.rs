@@ -69,6 +69,16 @@ impl Segments {
             .then_some((Skip::PostCredits, scene.start))
     }
 
+    /// These segments, with `other`'s filling the gaps (IntroDB first, then AniSkip).
+    pub fn or(self, other: Segments) -> Segments {
+        Segments {
+            intro: self.intro.or(other.intro),
+            recap: self.recap.or(other.recap),
+            outro: self.outro.or(other.outro),
+            post_credits: self.post_credits.or(other.post_credits),
+        }
+    }
+
     /// A post-credits scene still to come at `seconds`: Next Up waits until it has played.
     pub fn scene_ahead(&self, seconds: f64) -> bool {
         self.post_credits.is_some_and(|scene| seconds < scene.end)

@@ -13,7 +13,7 @@ pub struct Defaults {
     pub subtitle_languages: Vec<String>,
     pub subtitles_on: bool,
     pub autoplay_next: bool,
-    /// Percent of an episode at which Next Up appears; 0 waits for the credits.
+    /// Percent of an episode at which Next Up appears; 0 is Smart (the credits' start).
     pub next_up_percent: f64,
     pub countdown_seconds: f64,
 }
@@ -82,7 +82,7 @@ pub fn load() -> Config {
                 .unwrap_or(true),
             next_up_percent: get("next_up_percent")
                 .and_then(Value::as_f64)
-                .unwrap_or(99.)
+                .unwrap_or(0.)
                 .clamp(0., 100.),
             countdown_seconds: get("countdown_seconds")
                 .and_then(Value::as_f64)

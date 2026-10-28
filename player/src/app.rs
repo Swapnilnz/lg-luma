@@ -209,6 +209,15 @@ pub struct App {
     pub scrub_hold: Option<(i8, f64, f64)>,
     /// Whether the key being handled is the remote repeating a held button.
     pub key_repeat: bool,
+    /// AniSkip's opening and ending for an anime episode, filling IntroDB's gaps.
+    pub aniskip: Option<Segments>,
+    /// Where this episode's dialogue stops (from its subtitles), once looked for.
+    pub dialogue_end: Option<f64>,
+    pub dialogue_checked: bool,
+    /// How long before the end this show's credits usually start, learned from earlier
+    /// episodes; and whether this episode's was saved.
+    pub credits_lead: Option<f64>,
+    pub lead_saved: bool,
     /// The film's Letterboxd QR code (SVG), made once per title.
     pub letterboxd_qr: Option<String>,
     /// The "Rate on Letterboxd" card offered as the credits start: since when, and whether
@@ -292,6 +301,11 @@ impl App {
             letterboxd_qr: None,
             letterboxd_card: None,
             letterboxd_done: false,
+            aniskip: None,
+            dialogue_end: None,
+            dialogue_checked: false,
+            credits_lead: None,
+            lead_saved: false,
         }
     }
 
@@ -399,6 +413,10 @@ impl App {
         self.letterboxd_qr = None;
         self.letterboxd_card = None;
         self.letterboxd_done = false;
+        self.aniskip = None;
+        self.dialogue_end = None;
+        self.dialogue_checked = false;
+        self.lead_saved = false;
         self.osd_focus = OsdFocus::Scrubber;
         self.speed = 1.;
         self.paused_at = None;
@@ -678,6 +696,14 @@ impl App {
         if self.segments.is_none() {
             spawn_local(fetch_segments(self.epoch));
         }
+        if self.launch.kind == Kind::Series {
+            self.credits_lead = self
+                .show_key()
+                .and_then(|key| store::show_prefs(&key).credits_lead);
+            if self.aniskip.is_none() && self.meta.as_ref().is_some_and(tmdb::Meta::is_anime) {
+                spawn_local(fetch_aniskip(self.epoch));
+            }
+        }
     }
 
     /// The show (or film) whose audio and subtitle picks are remembered.
@@ -917,21 +943,25 @@ impl App {
             }
         }
         let left = duration - position;
-        // At the chosen point in the episode; or, set to the credits, when IntroDB says they
-        // start (else 45 s before the end).
-        let credits = self
-            .segments
-            .and_then(|s| s.outro)
-            .filter(|outro| outro.start < duration - 5.)
-            .is_some_and(|outro| position >= outro.start);
+        if position / duration >= 0.5 {
+            self.find_dialogue_end();
+        }
+        // Smart: when the credits start, by the best sign there is (see `credits_start`),
+        // else at 99%. Or at the percentage chosen in Settings.
         let at_percent = self.settings.next_up_percent;
+        let start = self.credits_start(duration);
+        let credits = start.is_some_and(|(at, _)| position >= at);
         let near_end = if at_percent <= 0. {
-            credits || (left <= 45. && left > 1.)
+            match start {
+                Some((at, _)) => position >= at && left > 1.,
+                None => position / duration * 100. >= 99. && left > 1.,
+            }
         } else {
             position / duration * 100. >= at_percent.min(99.9) && left > 1.
         };
         // A scene after the credits plays first.
-        let near_end = near_end && !self.segments.is_some_and(|s| s.scene_ahead(position));
+        let near_end = near_end && !self.all_segments().is_some_and(|s| s.scene_ahead(position));
+        self.learn_credits(duration);
         // Guards against a card that keeps coming back: the duration must have settled for
         // 30 s, and this episode must have played for a minute.
         let settled = now - self.duration_changed_ms > 30_000.
@@ -970,6 +1000,98 @@ impl App {
             }
             self.play_next();
         }
+    }
+
+    /// IntroDB's segments with AniSkip's filling the gaps.
+    pub fn all_segments(&self) -> Option<Segments> {
+        match (self.segments, self.aniskip) {
+            (Some(introdb), Some(aniskip)) => Some(introdb.or(aniskip)),
+            (one, other) => one.or(other),
+        }
+    }
+
+    /// Where the end credits start, and how that is known, best sign first: IntroDB's or
+    /// AniSkip's timestamps; this show's other episodes; where the subtitles' dialogue stops.
+    pub fn credits_start(&self, duration: f64) -> Option<(f64, &'static str)> {
+        let fits = |at: f64| at > duration * 0.5 && at < duration - 5.;
+        let exact = self
+            .all_segments()
+            .and_then(|s| s.outro)
+            .map(|outro| outro.start)
+            .filter(|at| fits(*at))
+            .map(|at| (at, "timestamps"));
+        let learned = self
+            .credits_lead
+            .filter(|lead| *lead >= 10. && *lead <= duration * 0.25)
+            .map(|lead| duration - lead)
+            .filter(|at| fits(*at))
+            .map(|at| (at, "earlier episodes"));
+        let dialogue = self
+            .dialogue_end
+            .map(|end| end + 2.)
+            .filter(|at| fits(*at))
+            .map(|at| (at, "subtitles"));
+        exact.or(learned).or(dialogue)
+    }
+
+    /// Remembers how long before the end this show's credits start, from an episode whose
+    /// timestamps are known, for its episodes that have none.
+    fn learn_credits(&mut self, duration: f64) {
+        if self.lead_saved || self.launch.kind != Kind::Series {
+            return;
+        }
+        let Some(outro) = self.all_segments().and_then(|s| s.outro) else {
+            return;
+        };
+        let lead = duration - outro.start;
+        if lead >= 10. && lead <= duration * 0.25 && duration > 300. {
+            self.lead_saved = true;
+            self.credits_lead = Some(lead);
+            if let Some(key) = self.show_key() {
+                store::save_show_credits(&key, lead);
+            }
+        }
+    }
+
+    /// Where this episode's dialogue stops, from its subtitles: the ones on screen, else the
+    /// addons' first in the preferred language, fetched quietly. Once an episode.
+    fn find_dialogue_end(&mut self) {
+        if self.dialogue_checked {
+            return;
+        }
+        let duration = self.video.duration();
+        if let (SubChoice::Addon(_), Some(track)) = (&self.sub_choice, &self.sub_track) {
+            self.dialogue_checked = true;
+            self.dialogue_end = track.dialogue_end(duration);
+            return;
+        }
+        let wanted = self
+            .settings
+            .subtitle_languages
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let Some(sub) = self
+            .addon_subs
+            .iter()
+            .find(|s| !s.forced && luma_core::selection::same_language(&s.lang, &wanted))
+            .or_else(|| self.addon_subs.iter().find(|s| !s.forced))
+            .cloned()
+        else {
+            return;
+        };
+        self.dialogue_checked = true;
+        let epoch = self.epoch;
+        spawn_local(async move {
+            let end = match net::bytes(&sub.url, 15_000).await {
+                Ok((status, bytes)) if (200..300).contains(&status) => {
+                    Track::new(subs::parse(&subs::decode(&bytes))).dialogue_end(duration)
+                }
+                _ => None,
+            };
+            log!("Luma Player: dialogue ends at {end:?}");
+            update(epoch, move |app| app.dialogue_end = end);
+        });
     }
 
     /// Stops this episode and starts the next in the same `<video>`, without relaunching.
@@ -2328,6 +2450,35 @@ async fn replay_queue() {
 }
 
 /// IntroDB's segments for this episode (or film), for Skip Intro, Skip Recap and Next Up.
+/// AniSkip's opening and ending for an anime episode: ARM maps the TMDB season to its
+/// MyAnimeList entry, then AniSkip has the times.
+async fn fetch_aniskip(epoch: u64) {
+    use luma_core::aniskip;
+    let Some((Some(tmdb), Some((season, number)))) =
+        update(epoch, |app| (app.tmdb_id, app.launch.episode_key()))
+    else {
+        return;
+    };
+    let mal = match net::send(&aniskip::ids_request(tmdb), 8_000).await {
+        Ok(reply) if reply.ok() => aniskip::parse_mal(&reply.text, season),
+        _ => None,
+    };
+    let Some(mal) = mal else {
+        log!("Luma Player AniSkip: no MyAnimeList entry for season {season}");
+        return;
+    };
+    let segments = match net::send(&aniskip::skip_request(mal, number), 8_000).await {
+        Ok(reply) if reply.ok() => aniskip::parse_skips(&reply.text),
+        _ => Segments::default(),
+    };
+    log!(
+        "Luma Player AniSkip: opening {}, ending {}",
+        segments.intro.is_some(),
+        segments.outro.is_some()
+    );
+    update(epoch, |app| app.aniskip = Some(segments));
+}
+
 async fn fetch_segments(epoch: u64) {
     let Some((Some(base), Some(imdb), episode)) = update(epoch, |app| {
         (

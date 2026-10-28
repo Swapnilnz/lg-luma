@@ -4,6 +4,7 @@
 //! app sends them its own way (ureq on the TV, `fetch` in the player). Time comes in as
 //! milliseconds since the epoch, so every state machine here runs in plain `cargo test`.
 
+pub mod aniskip;
 pub mod http;
 pub mod ids;
 pub mod launch;

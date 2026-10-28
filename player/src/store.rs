@@ -152,6 +152,8 @@ pub struct ShowPrefs {
     pub group: Option<String>,
     /// The stream's name (source and quality, e.g. `[RD+] 4K DV`), for when no group matches.
     pub stream: Option<String>,
+    /// Seconds before the end that this show's credits start, learned from its episodes.
+    pub credits_lead: Option<f64>,
 }
 
 pub fn show_prefs(key: &str) -> ShowPrefs {
@@ -167,6 +169,10 @@ pub fn show_prefs(key: &str) -> ShowPrefs {
             .map(|s| if s == "off" { None } else { Some(s.to_owned()) }),
         group: entry.get("g").and_then(Value::as_str).map(str::to_owned),
         stream: entry.get("n").and_then(Value::as_str).map(str::to_owned),
+        credits_lead: entry
+            .get("c")
+            .and_then(Value::as_str)
+            .and_then(|lead| lead.parse().ok()),
     }
 }
 
@@ -204,6 +210,12 @@ pub fn save_show_subtitles(key: &str, language: Option<&str>) {
     save_show_field(key, "s", language.unwrap_or("off"));
 }
 
+/// How long before the end this show's credits start, for its episodes without timestamps.
+pub fn save_show_credits(key: &str, lead: f64) {
+    let lead = format!("{lead:.0}");
+    save_show_fields(key, &[("c", Some(lead.as_str()))]);
+}
+
 /// The stream that played, so the show's next episode starts from the same source.
 pub fn save_show_source(key: &str, group: Option<&str>, name: &str) {
     let name = Some(name).filter(|name| !name.trim().is_empty());
@@ -234,7 +246,8 @@ pub struct Settings {
     pub hide_spoilers: bool,
 }
 
-/// Next Up's choices in Settings: when the credits start, then percentages of the episode.
+/// Next Up's choices in Settings: Smart (when the credits start, by the best sign there is),
+/// then percentages of the episode.
 pub const NEXT_UP_AT: [f64; 7] = [0., 90., 95., 97., 98., 99., 100.];
 
 impl Settings {

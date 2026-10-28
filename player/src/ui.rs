@@ -293,7 +293,7 @@ fn settings_rows(app: &App) -> Vec<Row> {
             RowId::NextCard,
             "Next Up appears",
             match s.next_up_percent {
-                at if at <= 0. => "When the credits start".to_owned(),
+                at if at <= 0. => "Smart: when the credits start".to_owned(),
                 at if at >= 100. => "At the end".to_owned(),
                 at => format!("At {at:.0}%"),
             },

@@ -174,10 +174,12 @@ impl App {
         if duration <= 600. || self.letterboxd_url().is_none() {
             return;
         }
+        if self.video.position() / duration >= 0.5 {
+            self.find_dialogue_end();
+        }
         let credits = self
-            .segments
-            .and_then(|s| s.outro)
-            .map_or(duration * 0.94, |outro| outro.start);
+            .credits_start(duration)
+            .map_or(duration * 0.94, |(at, _)| at);
         if self.video.position() >= credits && self.ensure_letterboxd_qr() {
             log!("Luma Player: offering Letterboxd");
             self.letterboxd_card = Some(now);
@@ -193,11 +195,21 @@ impl App {
         }
     }
 
-    /// Next Episode now, using Next Up's prefetched streams when it has them.
+    /// Next Episode now, using Next Up's prefetched streams when it has them. Pressed in the
+    /// last 15% of an episode without timestamps, it teaches the show where its credits start.
     fn skip_to_next(&mut self) {
         let Some(at) = self.next_target() else {
             return;
         };
+        let (position, duration) = (self.video.position(), self.video.duration());
+        let timed = self.all_segments().is_some_and(|s| s.outro.is_some());
+        if !timed
+            && duration > 300.
+            && position / duration >= 0.85
+            && let Some(key) = self.show_key()
+        {
+            store::save_show_credits(&key, duration - position);
+        }
         if self.next.as_ref().map(|next| next.at) != Some(at) {
             self.next = Some(NextUp {
                 at,
@@ -300,7 +312,7 @@ impl App {
         {
             return None;
         }
-        let offer = self.segments?.skip_at(self.video.position())?;
+        let offer = self.all_segments()?.skip_at(self.video.position())?;
         (self.skip_hidden != Some(offer.0)).then_some(offer)
     }
 
@@ -342,11 +354,13 @@ impl App {
         if duration <= 300. {
             return;
         }
-        let segments = self.segments.unwrap_or_default();
+        let segments = self.all_segments().unwrap_or_default();
         let tagged = segments.post_credits.is_some()
             || (self.launch.kind == Kind::Movie && self.meta.as_ref().is_some_and(|m| m.stinger));
         let position = self.video.position();
-        let credits = segments.outro.map_or(duration * 0.94, |outro| outro.start);
+        let credits = self
+            .credits_start(duration)
+            .map_or(duration * 0.94, |(at, _)| at);
         if tagged
             && position >= credits
             && (segments.post_credits.is_none() || segments.scene_ahead(position))

@@ -123,10 +123,15 @@ brings the controls back; OK or Play resumes.
   pause and stop scrobbles; at most one call per 10 s; exit before 80% pauses, at 80% or later
   stops (watched). Failed calls queue locally and replay on the next launch.
 - **Next Up:** at 90% the next episode (TMDB seasons, specials skipped, unaired withheld) and
-  its streams are fetched; at 99% of the episode (Settings: 90 to 99%, at the end, or when
-  IntroDB says the credits start), an Apple TV-style card shows its full-size still, name and
-  runtime, and its Play button fills over the 10 s countdown, holding while paused. A
-  post-credits scene plays first. OK plays now, Back hides it. A season finale moves
+  its streams are fetched. By default (Settings > Next Up appears: Smart) the card shows when
+  the credits start, by the best sign there is: IntroDB's timestamps; for anime, AniSkip's
+  ending (MyAnimeList ID via ARM); how long before the end this show's credits started in
+  other episodes (learned from timestamped ones, and from pressing Next Episode late); where
+  the subtitles' dialogue stops (fetched quietly halfway in, music lines ignored); else at
+  99%. Settings can fix it at 90 to 99% or the end instead. The Apple TV-style card shows the
+  next episode's full-size still, name and runtime, and its Play button fills over the 10 s
+  countdown, holding while paused. A post-credits scene plays first. OK plays now, Back hides
+  it. A season finale moves
   to the next season; a series finale shows no card. The card waits until the episode has
   played a minute and its duration has held steady for 30 s, and autoplay never resumes an
   old watch past 80%, so it can't chain into a loop.
@@ -141,7 +146,8 @@ brings the controls back; OK or Play resumes.
   addons again for that release and picks the same language.
 - **Anime** (TMDB's Animation genre, Japanese in origin) starts with Japanese audio and
   English subtitles, unless you've picked otherwise for that show; Settings can turn it off.
-- **Skip Intro / Skip Recap:** IntroDB's community timestamps, where an episode has them. The
+- **Skip Intro / Skip Recap:** IntroDB's community timestamps (and AniSkip's openings for
+  anime IntroDB lacks), where an episode has them. The
   button shows for the segment; with the controls down OK skips and Back hides it. Settings
   can skip automatically.
 - **Post-credits scenes:** IntroDB's `post_credits` timestamps, or TMDB's "after/during
