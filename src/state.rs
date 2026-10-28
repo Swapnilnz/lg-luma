@@ -275,6 +275,9 @@ impl State {
         if self.feeds.fading() || self.feeds.finish_fades() {
             self.dirty = true;
         }
+        if self.glide_tick() {
+            self.dirty = true;
+        }
         if (self.feeds.search_animating() || self.feeds.card_animating())
             && !self.preferences.reduced_motion
         {
@@ -343,6 +346,7 @@ impl State {
             || ((self.feeds.search_animating() || self.feeds.card_animating())
                 && !self.preferences.reduced_motion)
             || self.feeds.extras_animating(self.preferences.reduced_motion)
+            || self.gliding()
             || (!self.preferences.reduced_motion
                 && self
                     .notice
@@ -651,8 +655,10 @@ impl State {
                 } else {
                     120.8
                 };
+                // Controls sit where they were drawn: measure from that scroll, which differs
+                // from the target while Home glides between rows.
                 if control.rect.y < top {
-                    self.scroll = (self.scroll + control.rect.y - top).max(0.);
+                    self.scroll = (drawn + control.rect.y - top).max(0.);
                 }
                 let bottom = if self.page == Page::Home && self.moving.is_none() {
                     1041.6
@@ -660,7 +666,7 @@ impl State {
                     982.4
                 };
                 if control.rect.y + control.rect.h > bottom {
-                    self.scroll += control.rect.y + control.rect.h - bottom;
+                    self.scroll = drawn + control.rect.y + control.rect.h - bottom;
                 }
             }
         }

@@ -60,8 +60,13 @@ const EXPAND: Duration = Duration::from_millis(180);
 const PREVIEW_IN: Duration = Duration::from_millis(550);
 const PREVIEW_OUT: Duration = Duration::from_millis(300);
 pub const KEN_BURNS: Duration = Duration::from_secs(20);
-/// Where the previewed row's posters settle on screen, below the title's details.
-const PREVIEW_CARD_Y: f32 = 640.;
+/// Where the previewed row's posters settle on screen, below the title's details: high
+/// enough that the next row's title and the tops of its posters show beneath.
+const PREVIEW_CARD_Y: f32 = 570.;
+/// How far the preview's details sit above where they were, to make that room.
+pub const PREVIEW_RAISE: f32 = 70.;
+/// How quickly Home's shown scroll follows its target: the time constant of the ease.
+const GLIDE: Duration = Duration::from_millis(70);
 /// A title's details are fetched once focus has rested this long, so scrolling past is free.
 const DETAILS_DWELL: Duration = Duration::from_millis(200);
 /// How long a preview waits for its artwork before opening with placeholders.
@@ -101,6 +106,8 @@ pub struct Preview {
 
 /// How long a preview takes to crossfade from one title's backdrop to the next.
 pub const PREVIEW_CHANGE: Duration = Duration::from_millis(320);
+/// How long the previous backdrop waits for the next one before giving way anyway.
+const PREVIEW_GIVE_UP: Duration = Duration::from_secs(4);
 /// Home's slide between its first screen and the Top Shelf.
 pub const PAGE_SLIDE: Duration = Duration::from_millis(480);
 
@@ -186,6 +193,8 @@ pub struct Feeds {
     pub app_id: String,
     /// Luma Player, when configured: cards play there instead of in `app_id`.
     pub player: Option<Player>,
+    /// Home's scroll as shown and when it last moved: it eases after the real one.
+    pub glide: Option<(f32, Instant)>,
     /// A title was sent to the player: returning to Home reloads Trakt rows at once.
     pub played: bool,
     pub rows: Vec<Row>,
@@ -420,12 +429,33 @@ impl Feeds {
         self.arrived.retain(|url, _| wanted.contains(url));
     }
 
-    /// A poster finished downloading: it fades in from now.
+    /// A poster finished downloading: it fades in from now. One already on screen (sent
+    /// again, e.g. with a title's details) keeps its place: restarting its fade made a
+    /// backdrop blink to dark and back.
     pub fn image_arrived(&mut self, url: String, image: Arc<Artwork>, reduced_motion: bool) {
-        if !reduced_motion {
+        if !reduced_motion && !self.images.contains_key(&url) {
             self.arrived.insert(url.clone(), Instant::now());
         }
         self.images.insert(url, image);
+    }
+
+    /// Whether a title's preview backdrop is fully in view: loaded and faded in (or it has
+    /// none). Until then the previous title's backdrop stays beneath it.
+    pub fn backdrop_shown(&self, link: &str, reduced_motion: bool) -> bool {
+        match self.details.get(link) {
+            None => false,
+            Some(details) => details.backdrop.as_ref().is_none_or(|url| {
+                self.images.contains_key(url) && self.reveal(url, reduced_motion) >= 1.
+            }),
+        }
+    }
+
+    /// Whether a title's preview backdrop is in memory, so it can stand beneath the next.
+    fn backdrop_loaded(&self, link: &str) -> bool {
+        self.details
+            .get(link)
+            .and_then(|details| details.backdrop.as_ref())
+            .is_some_and(|url| self.images.contains_key(url))
     }
 
     /// How far a poster has faded in, 0 to 1, eased out.
@@ -1116,12 +1146,25 @@ impl State {
             self.feeds.page_slide = None;
             self.dirty = true;
         }
-        if let Some(preview) = &mut self.feeds.preview
-            && preview.previous.is_some()
-            && preview.changed.elapsed() >= PREVIEW_CHANGE
-        {
-            preview.previous = None;
+        // The previous backdrop goes once the new one is fully in, not on a timer: a backdrop
+        // slower than the crossfade left the dark base showing until it arrived. A title whose
+        // art never comes gives way after a few seconds.
+        let reduced_motion = self.preferences.reduced_motion;
+        if let Some(link) = self.feeds.preview.as_ref().map(|p| p.link.clone()) {
+            let shown = self.feeds.backdrop_shown(&link, reduced_motion);
+            if let Some(preview) = &mut self.feeds.preview
+                && preview.previous.is_some()
+                && preview.changed.elapsed() >= PREVIEW_CHANGE
+                && (shown || preview.changed.elapsed() >= PREVIEW_GIVE_UP)
+            {
+                preview.previous = None;
+            }
         }
+        let shown_loaded = self
+            .feeds
+            .preview
+            .as_ref()
+            .is_some_and(|preview| self.feeds.backdrop_loaded(&preview.link));
         if let Some(preview) = &mut self.feeds.preview {
             let moved = preview.target != self.focus
                 || focused_link.as_deref() != Some(preview.link.as_str());
@@ -1133,8 +1176,13 @@ impl State {
                 && let Some(link) = focused_link.clone()
                 && let Some(control) = controls.iter().find(|c| c.target == self.focus)
             {
-                // The backdrop shown so far stays beneath the next one until it is in.
-                preview.previous = Some(std::mem::replace(&mut preview.link, link));
+                // The backdrop shown so far stays beneath the next one until it is in. Passing
+                // over a card whose backdrop never loaded keeps the one before it, so a quick
+                // run along a row never drops to the dark base.
+                let left = std::mem::replace(&mut preview.link, link);
+                if preview.previous.is_none() || shown_loaded {
+                    preview.previous = Some(left);
+                }
                 preview.target = self.focus.clone();
                 preview.changed = now;
                 self.scroll = (drawn_scroll + control.rect.y - PREVIEW_CARD_Y).max(0.);
@@ -1180,8 +1228,9 @@ impl State {
             && let Some(control) = controls.iter().find(|control| control.target == self.focus)
         {
             // Slide the row down to sit below the title's details; the rest of Home fades.
-            let scroll_from = self.scroll;
-            self.scroll = (self.scroll + control.rect.y - PREVIEW_CARD_Y).max(0.);
+            // From where Home is drawn, which the row's position was measured against.
+            let scroll_from = drawn_scroll;
+            self.scroll = (drawn_scroll + control.rect.y - PREVIEW_CARD_Y).max(0.);
             self.feeds.preview = Some(Preview {
                 link,
                 target: self.focus.clone(),
@@ -1196,8 +1245,49 @@ impl State {
         request
     }
 
-    /// Home's scroll as drawn: the row slides into place while the preview fades in.
+    /// Home's scroll as drawn: easing after its target, so moving between rows glides.
     pub fn drawn_scroll(&self) -> f32 {
+        match self.feeds.glide {
+            Some((shown, _)) if self.glides() => shown,
+            _ => self.scroll_target(),
+        }
+    }
+
+    fn glides(&self) -> bool {
+        self.page == Page::Home && !self.preferences.reduced_motion
+    }
+
+    /// Moves the shown scroll on towards its target, once a frame. True while it moves.
+    pub fn glide_tick(&mut self) -> bool {
+        let target = self.scroll_target();
+        if !self.glides() {
+            self.feeds.glide = None;
+            return false;
+        }
+        let now = Instant::now();
+        let (shown, at) = self.feeds.glide.unwrap_or((target, now));
+        let dt = now.duration_since(at).as_secs_f32().min(0.1);
+        let follow = 1. - (-dt / GLIDE.as_secs_f32()).exp();
+        let mut next = shown + (target - shown) * follow;
+        if (target - next).abs() < 0.5 {
+            next = target;
+        }
+        self.feeds.glide = Some((next, now));
+        next != target
+    }
+
+    /// Whether the shown scroll is still easing towards its target.
+    pub fn gliding(&self) -> bool {
+        self.glides()
+            && self
+                .feeds
+                .glide
+                .is_some_and(|(shown, _)| (shown - self.scroll_target()).abs() >= 0.5)
+    }
+
+    /// Home's scroll as laid out: the page slide, and the row sliding into place while the
+    /// preview fades in, without the ease.
+    fn scroll_target(&self) -> f32 {
         if let Some((from, since)) = self.feeds.page_slide
             && since.elapsed() < PAGE_SLIDE
         {

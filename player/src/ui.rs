@@ -4,7 +4,7 @@
 use crate::app::{App, OsdButton, OsdFocus, Panel, Screen, SubChoice};
 use crate::dom::{self, escape, now_ms};
 use luma_core::resume::Offer;
-use luma_core::selection::{language_name, normalize_language, same_language};
+use luma_core::selection::{language_name, same_language};
 use luma_core::time::{clock, short, wall_clock};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -28,6 +28,8 @@ pub enum RowId {
     SubtitlesOn,
     Trakt,
     Speed(f64),
+    ShowAllSubs,
+    Anime,
 }
 
 impl RowId {
@@ -42,6 +44,7 @@ impl RowId {
                 | RowId::NextCard
                 | RowId::Countdown
                 | RowId::AutoSkip
+                | RowId::Anime
                 | RowId::AudioLanguage
                 | RowId::SubtitleLanguage
                 | RowId::SubtitlesOn
@@ -137,8 +140,8 @@ pub fn rows(app: &App, panel: Panel) -> Vec<Row> {
                 r
             })
             .collect(),
-        // The shelf draws itself; it has no rows.
-        Panel::Episodes => vec![],
+        // The shelf and the dial draw themselves; they have no rows.
+        Panel::Episodes | Panel::Delay => vec![],
     }
 }
 
@@ -206,53 +209,54 @@ fn track_rows(app: &App) -> Vec<Row> {
     let mut off = row(RowId::SubOff, "Off", "");
     off.selected = app.sub_choice == SubChoice::Off;
     rows.push(off);
-    for (i, track) in app.video.text_tracks().iter().enumerate() {
-        let mut r = row(RowId::SubEmbedded(i), language_label(&track.language), "");
-        r.detail = if track.label.is_empty() {
-            "In the file".into()
+    let (menu, hidden) = app.sub_menu();
+    let mut options: std::collections::HashMap<String, usize> = Default::default();
+    for candidate in &menu {
+        let language = language_label(&candidate.entry.language);
+        let label = if candidate.entry.forced {
+            format!("{language} (Forced)")
         } else {
-            format!("In the file · {}", track.label)
+            language.clone()
         };
-        r.selected = app.sub_choice == SubChoice::Embedded(i);
-        rows.push(r);
-    }
-    // Addon subtitles: the preferred languages first (up to six each), then one per language.
-    let preferred = &app.settings.subtitle_languages;
-    let mut shown: Vec<usize> = vec![];
-    for want in preferred {
-        shown.extend(
-            app.addon_subs
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| same_language(&s.lang, want))
-                .map(|(i, _)| i)
-                .take(6),
-        );
-    }
-    let mut seen: Vec<String> = preferred.iter().map(|l| normalize_language(l)).collect();
-    for (i, sub) in app.addon_subs.iter().enumerate() {
-        let lang = normalize_language(&sub.lang);
-        if !seen.contains(&lang) && shown.len() < 40 {
-            seen.push(lang);
-            shown.push(i);
-        }
-    }
-    let mut count: std::collections::HashMap<String, usize> = Default::default();
-    for i in shown {
-        let sub = &app.addon_subs[i];
-        let n = count.entry(normalize_language(&sub.lang)).or_default();
-        *n += 1;
-        let mut r = row(RowId::SubAddon(i), language_label(&sub.lang), "");
-        r.detail = format!("Addon · option {n}");
-        r.selected = app.sub_choice == SubChoice::Addon(i);
-        if r.selected && app.sub_track.is_none() {
+        let id = match candidate.choice {
+            SubChoice::Embedded(i) => RowId::SubEmbedded(i),
+            SubChoice::Addon(i) => RowId::SubAddon(i),
+            SubChoice::Off => continue,
+        };
+        let mut r = row(id, label, "");
+        r.detail = if candidate.embedded {
+            if candidate.label.is_empty() {
+                "In the file".into()
+            } else {
+                format!("In the file · {}", candidate.label)
+            }
+        } else if candidate.entry.forced {
+            "Only the lines in other languages".into()
+        } else if candidate.label.is_empty() {
+            let n = options.entry(language).or_default();
+            *n += 1;
+            format!("Addon · option {n}")
+        } else {
+            candidate.label.clone()
+        };
+        r.selected = app.sub_choice == candidate.choice;
+        if r.selected && !candidate.embedded && app.sub_track.is_none() {
             r.value = "Loading…".into();
         }
         rows.push(r);
     }
-    if app.addon_subs.is_empty() && !app.config.subtitle_addons.is_empty() {
+    if hidden > 0 {
+        rows.push(row(
+            RowId::ShowAllSubs,
+            "Other languages",
+            format!("Show {hidden}"),
+        ));
+    } else if app.show_all_subs {
+        rows.push(row(RowId::ShowAllSubs, "Other languages", "Hide"));
+    }
+    if menu.is_empty() && app.addon_subs.is_empty() && !app.config.subtitle_addons.is_empty() {
         rows.push(Row {
-            label: "No addon subtitles yet".into(),
+            label: "No subtitles found yet".into(),
             ..Row::default()
         });
     }
@@ -264,17 +268,12 @@ fn track_rows(app: &App) -> Vec<Row> {
         "Background",
         on_off(app.settings.subtitle_box),
     ));
-    let offset = app.settings.subtitle_offset_ms;
     let mut timing = row(
         RowId::SubOffset,
         "Timing",
-        match offset {
-            0 => "In sync".to_owned(),
-            ms if ms > 0 => format!("{:.2} s later", f64::from(ms) / 1000.),
-            ms => format!("{:.2} s earlier", f64::from(-ms) / 1000.),
-        },
+        delay_label(app.settings.subtitle_offset_ms),
     );
-    timing.detail = "◀ ▶ to adjust · OK to reset".into();
+    timing.detail = "OK for the dial".into();
     rows.push(timing);
     rows
 }
@@ -308,6 +307,11 @@ fn settings_rows(app: &App) -> Vec<Row> {
             r
         },
         heading("Languages"),
+        {
+            let mut r = row(RowId::Anime, "Anime defaults", on_off(s.anime_defaults));
+            r.detail = "Japanese audio and English subtitles for anime".into();
+            r
+        },
         row(
             RowId::AudioLanguage,
             "Audio",
@@ -407,15 +411,24 @@ fn info_rows(app: &App) -> Vec<Row> {
 // ----- Layers -----
 
 pub fn render(app: &App) {
-    dom::set_html("stage", &stage(app));
-    dom::set_class(
-        "stage",
-        if matches!(app.screen, Screen::Playing) {
-            "stage"
-        } else {
-            "stage on"
-        },
-    );
+    // Kept while the stage fades out, so the picture appears under the full logo.
+    let stage_html = stage(app);
+    if !stage_html.is_empty() {
+        dom::set_html_with("stage", &stage_html, "lstatus");
+    }
+    let loading = matches!(app.screen, Screen::Loading(_)) || app.starting();
+    if loading {
+        dom::set_html("lstatus", &escape(&app.loading_status()));
+    }
+    dom::set_var("stage", "--p", &format!("{:.3}", app.load_progress()));
+    let stage_class = if matches!(app.screen, Screen::Playing) && !app.starting() {
+        "stage"
+    } else if loading {
+        "stage on loading"
+    } else {
+        "stage on"
+    };
+    dom::set_class("stage", stage_class);
     let pause = app.pause_screen();
     dom::set_html(
         "pause",
@@ -435,7 +448,17 @@ pub fn render(app: &App) {
     };
     dom::set_html("panel", &panel_html);
     dom::set_class("panel", panel_class);
-    dom::set_html("nextup", &if pause { String::new() } else { next_up(app) });
+    // The card is written once per episode; only its countdown changes after that, so the
+    // card's rise-in and its still don't replay every second (which made it flash).
+    let (card, count) = if pause {
+        (String::new(), String::new())
+    } else {
+        next_up(app)
+    };
+    dom::set_html_with("nextup", &card, "nextcount");
+    if !card.is_empty() {
+        dom::set_html("nextcount", &escape(&count));
+    }
     let skip = app.skip_offer().map(|(kind, _)| {
         format!(
             r#"<div class="skipbtn{}" data-skip="1">{}</div>"#,
@@ -463,7 +486,7 @@ pub fn render(app: &App) {
     );
     dom::set_class(
         "spinner",
-        if app.buffering() && app.panel.is_none() && !pause {
+        if app.buffering() && app.panel.is_none() && !pause && !app.starting() {
             "spinner on"
         } else {
             "spinner"
@@ -528,7 +551,7 @@ fn backdrop(app: &App) -> String {
 }
 
 fn hero(app: &App) -> String {
-    let title = match app.meta.as_ref().and_then(|m| m.logo.as_ref()) {
+    let mark = match app.meta.as_ref().and_then(|m| m.logo.as_ref()) {
         Some(logo) => format!(
             r#"<img class="logo" src="{}" alt="{}">"#,
             escape(logo),
@@ -536,6 +559,10 @@ fn hero(app: &App) -> String {
         ),
         None => format!(r#"<h1>{}</h1>"#, escape(&app.title())),
     };
+    // The mark twice: a faint ghost, and a copy that fills in over it as loading goes on.
+    let title = format!(
+        r#"<div class="markfill"><div class="ghost">{mark}</div><div class="fill">{mark}</div></div>"#
+    );
     let episode = app
         .episode_line()
         .map(|line| format!(r#"<div class="episode">{}</div>"#, escape(&line)))
@@ -553,12 +580,11 @@ fn button(label: &str, focused: bool, index: usize) -> String {
 
 fn stage(app: &App) -> String {
     match &app.screen {
-        Screen::Playing => String::new(),
-        Screen::Loading(status) => format!(
-            r#"{}<div class="shade"></div><div class="hero">{}<div class="status"><span class="dot"></span>{}</div></div>"#,
+        Screen::Playing if !app.starting() => String::new(),
+        Screen::Loading(_) | Screen::Playing => format!(
+            r#"{}<div class="shade"></div><div class="hero">{}<div class="status" id="lstatus"></div></div>"#,
             backdrop(app),
             hero(app),
-            escape(status)
         ),
         Screen::SignIn { code, url, qr } => format!(
             r#"{}<div class="shade strong"></div>
@@ -650,8 +676,6 @@ fn osd(app: &App) -> String {
         let icon = match b {
             OsdButton::PlayPause if paused || !app.first_frame => icons::PLAY,
             OsdButton::PlayPause => icons::PAUSE,
-            OsdButton::Back10 => icons::BACK_10,
-            OsdButton::Forward10 => icons::FORWARD_10,
             OsdButton::Episodes => icons::EPISODES,
             OsdButton::Next => icons::NEXT,
             OsdButton::Tracks => icons::SUBTITLES,
@@ -680,18 +704,7 @@ fn osd(app: &App) -> String {
             escape(&label)
         )
     };
-    let transport: String = buttons
-        .iter()
-        .enumerate()
-        .take(3)
-        .map(button_html)
-        .collect();
-    let options: String = buttons
-        .iter()
-        .enumerate()
-        .skip(3)
-        .map(button_html)
-        .collect();
+    let row: String = buttons.iter().enumerate().map(button_html).collect();
     format!(
         r#"<div class="top"><div class="t">{}</div>{episode}</div>{center}
         <div class="bottom">
@@ -699,7 +712,7 @@ fn osd(app: &App) -> String {
             <div class="bar"><div class="buf" style="width:{buffered:.2}%"></div><div class="played" style="width:{played:.2}%"></div><div class="knob" style="left:{played:.2}%"></div></div>
             <div class="times"><span>{}</span><span>{remaining}</span></div>
           </div>
-          <div class="controls"><div class="group">{transport}</div><div class="group">{options}</div></div>
+          <div class="controls"><div class="group">{row}</div></div>
         </div>"#,
         escape(&app.title()),
         if scrub_focus { " focus" } else { "" },
@@ -823,15 +836,17 @@ fn shelf(app: &App) -> String {
     )
 }
 
-fn next_up(app: &App) -> String {
+/// The Next Up card's HTML, and its countdown text (drawn into `#nextcount` separately).
+fn next_up(app: &App) -> (String, String) {
+    let none = (String::new(), String::new());
     let Some(next) = &app.next else {
-        return String::new();
+        return none;
     };
     let Some(shown) = next.shown_at else {
-        return String::new();
+        return none;
     };
     if next.dismissed || app.panel.is_some() || !matches!(app.screen, Screen::Playing) {
-        return String::new();
+        return none;
     }
     let label = luma_core::ids::episode_label(next.at);
     let name = match &next.name {
@@ -851,13 +866,64 @@ fn next_up(app: &App) -> String {
     } else {
         "Press OK to play".into()
     };
-    format!(
-        r#"<div class="card">{still}<div class="text"><div class="label">Next Episode</div><div class="name">{}</div><div class="count">{count}</div><div class="hint">OK Play now · Back Hide</div></div></div>"#,
+    let card = format!(
+        r#"<div class="card">{still}<div class="text"><div class="label">Next Episode</div><div class="name">{}</div><div class="count" id="nextcount"></div><div class="hint">OK Play now · Back Hide</div></div></div>"#,
         escape(&name)
+    );
+    (card, count)
+}
+
+/// `+0.5 s`, `−1.2 s` or `In sync`.
+fn delay_label(ms: i32) -> String {
+    match ms {
+        0 => "In sync".to_owned(),
+        ms if ms > 0 => format!("+{:.1} s", f64::from(ms) / 1000.),
+        ms => format!("−{:.1} s", f64::from(-ms) / 1000.),
+    }
+}
+
+/// The subtitle timing dial: a ruler that slides under a fixed needle, from −30 s to +30 s.
+fn delay_dial(app: &App) -> String {
+    const PX_PER_SECOND: f64 = 110.;
+    const CENTER: f64 = 289.;
+    let ms = app.settings.subtitle_offset_ms;
+    let max = crate::app::MAX_OFFSET_MS / 1000;
+    let ticks: String = (-max * 2..=max * 2)
+        .map(|half| {
+            let seconds = f64::from(half) / 2.;
+            let x = (seconds + f64::from(max)) * PX_PER_SECOND;
+            if half % 2 == 0 {
+                let label = match half / 2 {
+                    0 => "0".to_owned(),
+                    n if n > 0 => format!("+{n}"),
+                    n => format!("−{}", -n),
+                };
+                format!(r#"<div class="tk major" style="left:{x:.0}px"><span>{label}</span></div>"#)
+            } else {
+                format!(r#"<div class="tk" style="left:{x:.0}px"></div>"#)
+            }
+        })
+        .collect();
+    let offset = CENTER - (f64::from(ms) / 1000. + f64::from(max)) * PX_PER_SECOND;
+    let meaning = match ms {
+        0 => "Subtitles are in sync with the picture".to_owned(),
+        ms if ms > 0 => format!("Subtitles appear {:.1} s later", f64::from(ms) / 1000.),
+        ms => format!("Subtitles appear {:.1} s earlier", f64::from(-ms) / 1000.),
+    };
+    format!(
+        r#"<div class="sheet dial"><div class="ptitle">Subtitle Timing</div>
+        <div class="dial-value{}">{}</div><div class="dial-sub">{meaning}</div>
+        <div class="ruler"><div class="ticks" style="transform:translateX({offset:.0}px)">{ticks}</div><div class="needle"></div></div>
+        <div class="dial-hint">◀ ▶ 0.1 s · ▲ ▼ 1 s · OK Done</div></div>"#,
+        if ms == 0 { " zero" } else { "" },
+        delay_label(ms),
     )
 }
 
 fn panel(app: &App, panel: Panel) -> String {
+    if panel == Panel::Delay {
+        return delay_dial(app);
+    }
     let title = match panel {
         Panel::Picker => "Streams",
         Panel::Tracks => "Audio & Subtitles",
@@ -865,6 +931,7 @@ fn panel(app: &App, panel: Panel) -> String {
         Panel::Info => "Info",
         Panel::Speed => "Playback Speed",
         Panel::Episodes => "Episodes",
+        Panel::Delay => "Subtitle Timing",
     };
     let notice = app
         .notice
@@ -947,8 +1014,6 @@ mod icons {
 
     pub const PLAY: &str = r#"<path d="M7 4.5v15l12.5-7.5z" fill="currentColor"/>"#;
     pub const PAUSE: &str = r#"<rect x="6" y="4.5" width="4" height="15" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="4.5" width="4" height="15" rx="1" fill="currentColor" stroke="none"/>"#;
-    pub const BACK_10: &str = r#"<path d="M3 12a9 9 0 1 0 2.64-6.36L3 8.3"/><path d="M3 3.5v4.8h4.8"/><text x="12.4" y="15.6" font-size="8" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="sans-serif">10</text>"#;
-    pub const FORWARD_10: &str = r#"<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8.3"/><path d="M21 3.5v4.8h-4.8"/><text x="11.6" y="15.6" font-size="8" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none" font-family="sans-serif">10</text>"#;
     pub const EPISODES: &str = r#"<rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="13" width="7" height="7" rx="1.5"/><path d="M14 6h7M14 9.5h4.5M14 15h7M14 18.5h4.5"/>"#;
     pub const NEXT: &str =
         r#"<path d="M5 4.5v15l11-7.5z" fill="currentColor"/><path d="M19 5v14"/>"#;

@@ -1132,9 +1132,12 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     if progress > 0. {
         let end = out.draw.len();
         match previewed_row {
-            Some((row_start, row_end)) => {
+            Some((row_start, row_end, peek_end)) => {
                 out.fade_range(home_start, row_start, 1. - progress, 1.);
-                out.fade_range(row_end, end, 1. - progress, 1.);
+                // The next row stays, dimmed: its title and the tops of its posters show
+                // below, as on Apple TV.
+                out.fade_range(row_end, peek_end, 1. - progress * 0.45, 1.);
+                out.fade_range(peek_end, end, 1. - progress, 1.);
             }
             None => out.fade_range(home_start, end, 1. - progress, 1.),
         }
@@ -1175,7 +1178,8 @@ fn preview_details(out: &mut Scene, state: &State, progress: f32) {
         .unwrap_or(card_title);
     let start = out.draw.len();
     // Rises a little as it appears, like the rest of Apple TV's motion.
-    let lift = (1. - progress) * 18.;
+    // Raised by PREVIEW_RAISE so the row below the previewed one has room to peek in.
+    let lift = (1. - progress) * 18. - crate::feeds::PREVIEW_RAISE;
     let x = 84.;
     // Following focus onto a title not looked up yet: its shape at once, never Home.
     if details.is_none() {
@@ -1342,14 +1346,22 @@ fn feed_rows(
     state: &State,
     assets: &Assets,
     mut y: f32,
-) -> (f32, Option<(usize, usize)>) {
+) -> (f32, Option<(usize, usize, usize)>) {
     use crate::feeds::{CARD_HEIGHT, CARD_PITCH, CARD_RADIUS, CARD_WIDTH, Status};
-    let mut focused_row = None;
+    let mut focused_row: Option<(usize, usize)> = None;
+    // Where the row after the previewed one ends: it peeks in below a preview.
+    let mut peek_end = None;
     for (row_index, row) in state.feeds.rows.iter().enumerate() {
         if !state.feeds.row_visible(row_index) {
             continue;
         }
         let row_start = out.draw.len();
+        if let Some((_, end)) = focused_row
+            && peek_end.is_none()
+            && row_start > end
+        {
+            peek_end = Some(row_start);
+        }
         out.text(
             &row.title,
             Rect::new(84., y + 3.3, 1200., 31.),
@@ -1498,9 +1510,14 @@ fn feed_rows(
             .map_or(&state.focus, |preview| &preview.target);
         if matches!(kept, Target::Feed(row, _) if *row == row_index) {
             focused_row = Some((row_start, out.draw.len()));
+        } else if focused_row.is_some_and(|(_, end)| end == row_start) && peek_end.is_none() {
+            peek_end = Some(out.draw.len());
         }
     }
-    (y, focused_row)
+    (
+        y,
+        focused_row.map(|(start, end)| (start, end, peek_end.unwrap_or(end))),
+    )
 }
 
 /// A feed row's poster with its episode caption, grown while focused.

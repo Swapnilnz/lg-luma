@@ -74,6 +74,23 @@ pub struct Meta {
     pub imdb: Option<String>,
     pub seasons: Vec<Season>,
     pub last_aired: Option<(u32, u32)>,
+    /// TMDB genre IDs (16 is Animation).
+    pub genres: Vec<u64>,
+    /// ISO 639-1, e.g. `ja`.
+    pub original_language: String,
+    /// ISO 3166-1, e.g. `JP` (shows only).
+    pub origin_country: Vec<String>,
+}
+
+/// TMDB's Animation genre, for movies and TV alike.
+const ANIMATION: u64 = 16;
+
+impl Meta {
+    /// Japanese animation: the Animation genre, from Japan or in Japanese.
+    pub fn is_anime(&self) -> bool {
+        self.genres.contains(&ANIMATION)
+            && (self.original_language == "ja" || self.origin_country.iter().any(|c| c == "JP"))
+    }
 }
 
 fn image(path: Option<&str>, size: &str) -> Option<String> {
@@ -167,6 +184,25 @@ pub fn parse_details(text: &str, kind: Kind) -> Result<Meta, String> {
             .map(str::to_owned),
         seasons,
         last_aired,
+        genres: v
+            .get("genres")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|g| g.get("id").and_then(Value::as_u64))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        original_language: s("original_language"),
+        origin_country: v
+            .get("origin_country")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|c| c.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -264,6 +300,27 @@ mod tests {
         assert_eq!(meta.imdb.as_deref(), Some("tt0944947"));
         assert_eq!(meta.seasons.len(), 2);
         assert_eq!(meta.last_aired, Some((8, 6)));
+        assert!(!meta.is_anime());
+        let anime = parse_details(
+            r#"{"name":"Frieren","genres":[{"id":16,"name":"Animation"},{"id":10765}],
+                "original_language":"ja","origin_country":["JP"]}"#,
+            Kind::Series,
+        )
+        .unwrap();
+        assert!(anime.is_anime());
+        // Western animation and Japanese live action are not anime.
+        let western = parse_details(
+            r#"{"title":"Toy Story","genres":[{"id":16}],"original_language":"en"}"#,
+            Kind::Movie,
+        )
+        .unwrap();
+        assert!(!western.is_anime());
+        let live = parse_details(
+            r#"{"title":"Shogun","genres":[{"id":18}],"original_language":"ja"}"#,
+            Kind::Movie,
+        )
+        .unwrap();
+        assert!(!live.is_anime());
         assert!(parse_details(r#"{"status_message":"Invalid API key"}"#, Kind::Movie).is_err());
         assert_eq!(
             parse_find(

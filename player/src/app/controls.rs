@@ -16,8 +16,6 @@ pub enum OsdFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OsdButton {
     PlayPause,
-    Back10,
-    Forward10,
     Episodes,
     Next,
     Tracks,
@@ -31,8 +29,6 @@ impl OsdButton {
     pub fn label(self) -> &'static str {
         match self {
             OsdButton::PlayPause => "Play/Pause",
-            OsdButton::Back10 => "Back 10 Seconds",
-            OsdButton::Forward10 => "Forward 10 Seconds",
             OsdButton::Episodes => "Episodes",
             OsdButton::Next => "Next Episode",
             OsdButton::Tracks => "Audio & Subtitles",
@@ -58,13 +54,9 @@ impl OsdButton {
 }
 
 impl App {
-    /// The control bar: transport on the left, title and track options on the right.
+    /// The control bar, in one row from Play/Pause (seeking is Left/Right on the scrubber).
     pub fn osd_buttons(&self) -> Vec<OsdButton> {
-        let mut buttons = vec![
-            OsdButton::PlayPause,
-            OsdButton::Back10,
-            OsdButton::Forward10,
-        ];
+        let mut buttons = vec![OsdButton::PlayPause];
         if self.launch.kind == Kind::Series {
             buttons.push(OsdButton::Episodes);
             if self.next_target().is_some() {
@@ -121,8 +113,6 @@ impl App {
     pub fn press_button(&mut self, button: OsdButton) {
         match button {
             OsdButton::PlayPause => self.toggle_play(),
-            OsdButton::Back10 => self.seek_by(-10.),
-            OsdButton::Forward10 => self.seek_by(10.),
             OsdButton::Episodes => self.open_episodes(),
             OsdButton::Next => self.skip_to_next(),
             OsdButton::Tracks => self.open_panel(Panel::Tracks),
@@ -400,6 +390,59 @@ impl App {
         self.save_position(true);
         let launch = self.launch.with_episode(at);
         spawn_local(async move { begin(launch, None, false) });
+    }
+
+    // ----- Loading screen -----
+
+    /// A stream is loading and the picture hasn't started: the logo screen stays up.
+    pub fn starting(&self) -> bool {
+        matches!(self.screen, Screen::Playing)
+            && self.current.is_some()
+            && self.wants_play
+            && !self.first_frame
+            && self.panel.is_none()
+    }
+
+    /// How far loading has got, 0 to 1, for the logo fill: details, streams, the stream
+    /// loading, its first frame. Within a stage it creeps on, so a slow AIOStreams never
+    /// looks stuck.
+    pub fn load_progress(&self) -> f64 {
+        let (stage, from, to) = if self.first_frame {
+            (5, 1., 1.)
+        } else if self.metadata {
+            (4, 0.82, 0.96)
+        } else if self.current.is_some() {
+            (3, 0.62, 0.8)
+        } else if !self.streams.is_empty() {
+            (2, 0.5, 0.6)
+        } else if self.meta.is_some() {
+            (1, 0.22, 0.48)
+        } else {
+            (0, 0.06, 0.2)
+        };
+        let now = now_ms();
+        let (seen, since) = self.load_stage.get();
+        let since = if seen == stage {
+            since
+        } else {
+            self.load_stage.set((stage, now));
+            now
+        };
+        let creep = 1. - (-(now - since) / 6_000.).exp();
+        from + (to - from) * creep
+    }
+
+    pub fn loading_status(&self) -> String {
+        match &self.screen {
+            Screen::Loading(status) => status.clone(),
+            _ if self.metadata => "Buffering…".into(),
+            _ => match self.current.and_then(|i| self.streams.get(i)) {
+                Some(stream) if !stream.name.is_empty() => {
+                    format!("Starting {}", stream.name.replace('\n', " "))
+                }
+                _ => "Starting…".into(),
+            },
+        }
     }
 
     // ----- Pause screen -----

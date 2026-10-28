@@ -25,12 +25,47 @@ pub fn now_ms() -> f64 {
     js_sys::Date::now()
 }
 
+thread_local! {
+    /// The HTML last written to each layer. Compared instead of `innerHTML`, which the
+    /// browser re-serialises (`&#39;` comes back as `'`): reading it back made titles with
+    /// an apostrophe rewrite their layer, and reload its images, on every tick.
+    static WRITTEN: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        Default::default();
+}
+
+/// Like `set_html`, for a layer that holds another updated element (`child`): rewriting the
+/// layer makes a fresh, empty child, so the child's cached HTML is forgotten too.
+pub fn set_html_with(id: &str, html: &str, child: &str) {
+    if set_html(id, html) {
+        WRITTEN.with(|w| w.borrow_mut().remove(child));
+    }
+}
+
 /// Sets an element's HTML only when it changed, so the TV doesn't lay out for nothing.
-pub fn set_html(id: &str, html: &str) {
-    if let Some(el) = by_id(id)
-        && el.inner_html() != html
-    {
+/// True when it was written.
+pub fn set_html(id: &str, html: &str) -> bool {
+    let changed = WRITTEN.with(|w| {
+        let mut written = w.borrow_mut();
+        if written.get(id).map(String::as_str) == Some(html) {
+            false
+        } else {
+            written.insert(id.to_owned(), html.to_owned());
+            true
+        }
+    });
+    if changed && let Some(el) = by_id(id) {
         el.set_inner_html(html);
+    }
+    changed
+}
+
+/// Sets a CSS custom property on an element (only when it changed).
+pub fn set_var(id: &str, name: &str, value: &str) {
+    if let Some(el) = by_id(id) {
+        let style = el.style();
+        if style.get_property_value(name).ok().as_deref() != Some(value) {
+            let _ = style.set_property(name, value);
+        }
     }
 }
 

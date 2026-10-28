@@ -170,6 +170,83 @@ pub fn pick_track(languages: &[String], preferred: &[String]) -> Option<usize> {
         .find_map(|want| languages.iter().position(|have| same_language(have, want)))
 }
 
+/// Whether a track's label, ID or file name marks it as forced (foreign dialogue only).
+pub fn is_forced(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("forced") || lower.contains("foreign parts") || lower.contains("foreign only")
+}
+
+/// One subtitle choice, for ordering the Tracks panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubEntry {
+    pub language: String,
+    pub forced: bool,
+}
+
+/// The Tracks panel's subtitle order, as indexes into `entries`: forced tracks in the
+/// preferred languages first, then the rest in those languages (at most `per_language` of
+/// each), in preference order. Other languages come after only with `show_all`; the second
+/// value is how many were left out.
+pub fn subtitle_order(
+    entries: &[SubEntry],
+    preferred: &[String],
+    show_all: bool,
+    per_language: usize,
+) -> (Vec<usize>, usize) {
+    let mut order: Vec<usize> = vec![];
+    for want in preferred {
+        order.extend(
+            (0..entries.len())
+                .filter(|&i| entries[i].forced && same_language(&entries[i].language, want)),
+        );
+    }
+    for want in preferred {
+        order.extend(
+            (0..entries.len())
+                .filter(|&i| !entries[i].forced && same_language(&entries[i].language, want))
+                .take(per_language),
+        );
+    }
+    let others: Vec<usize> = (0..entries.len())
+        .filter(|&i| {
+            !preferred
+                .iter()
+                .any(|want| same_language(&entries[i].language, want))
+        })
+        .collect();
+    let hidden = if show_all {
+        // One language at a time, a few options each, forced ones first.
+        let mut languages: Vec<String> = vec![];
+        for &i in &others {
+            let language = normalize_language(&entries[i].language);
+            if !languages.contains(&language) {
+                languages.push(language);
+            }
+        }
+        for language in languages {
+            let mut of_language: Vec<usize> = others
+                .iter()
+                .copied()
+                .filter(|&i| normalize_language(&entries[i].language) == language)
+                .collect();
+            of_language.sort_by_key(|&i| !entries[i].forced);
+            order.extend(of_language.into_iter().take(per_language));
+        }
+        0
+    } else {
+        others.len()
+    };
+    (order, hidden)
+}
+
+/// The forced track to show when subtitles are off but the audio is in `language`: the one
+/// that subtitles only the foreign-language lines.
+pub fn forced_for(entries: &[SubEntry], language: &str) -> Option<usize> {
+    entries
+        .iter()
+        .position(|e| e.forced && same_language(&e.language, language))
+}
+
 /// A language's display name for track lists: `en` → `English`; unknown codes upper-cased.
 pub fn language_name(value: &str) -> String {
     let code = normalize_language(value);
@@ -271,6 +348,40 @@ mod tests {
         attempts.fail(0, "x");
         attempts.fail(1, "x");
         assert!(attempts.exhausted());
+    }
+
+    fn entry(language: &str, forced: bool) -> SubEntry {
+        SubEntry {
+            language: language.into(),
+            forced,
+        }
+    }
+
+    #[test]
+    fn orders_subtitles_forced_first_and_hides_other_languages() {
+        let entries = [
+            entry("fre", false),
+            entry("eng", false),
+            entry("eng", true),
+            entry("spa", false),
+            entry("en", false),
+            entry("fre", true),
+        ];
+        let english = ["en".to_owned()];
+        let (order, hidden) = subtitle_order(&entries, &english, false, 6);
+        assert_eq!(order, [2, 1, 4]);
+        assert_eq!(hidden, 3);
+        let (order, hidden) = subtitle_order(&entries, &english, true, 6);
+        // French with its forced track first, then Spanish.
+        assert_eq!(order, [2, 1, 4, 5, 0, 3]);
+        assert_eq!(hidden, 0);
+        let (order, _) = subtitle_order(&entries, &english, false, 1);
+        assert_eq!(order, [2, 1]);
+        assert!(is_forced("Show.S01E01.en.FORCED.srt"));
+        assert!(is_forced("English (Foreign parts)"));
+        assert!(!is_forced("English SDH"));
+        assert_eq!(forced_for(&entries, "eng"), Some(2));
+        assert_eq!(forced_for(&entries, "ja"), None);
     }
 
     #[test]

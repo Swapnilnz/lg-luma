@@ -59,6 +59,12 @@ ssh root@192.168.6.184 'luna-send -n 1 luna://com.webos.applicationManager/launc
 Set `"player": {"app_id": "com.swapnil.lumaplayer.dev"}` in Luma's `feeds.json` to open your
 live code from posters.
 
+**Everything at once** (Luma Player, `feeds.json`, Luma as Home):
+
+```sh
+sh scripts/deploy-all.sh            # --player, --luma or --no-feeds for less
+```
+
 **3. Packaged** (file://, the real install):
 
 ```sh
@@ -68,9 +74,9 @@ nix develop .#player -c scripts/player-deploy.sh
 
 ## How it behaves
 
-The controls are an Apple TV-style bar: the scrubber, and below it Play/Pause, back and
-forward 10 s, then Episodes and Next Episode (shows), Audio & Subtitles, Playback Speed,
-Streams, Info and Settings. Each opens as a popover above the bar; Episodes opens a shelf of
+The controls are an Apple TV-style bar: the scrubber, and below it one row of buttons from
+Play/Pause: Episodes and Next Episode (shows), Audio & Subtitles, Playback Speed, Streams,
+Info and Settings. Seeking is Left/Right on the scrubber, or Rewind/FF. Each opens as a popover above the bar; Episodes opens a shelf of
 season tabs and episode stills along the bottom.
 
 | Key | Controls hidden | On the scrubber | On the buttons | In a panel |
@@ -88,8 +94,10 @@ Paused for 10 s, the controls give way to a pause screen: the title or logo, the
 its synopsis, where you paused and how long is left, and the time of day top right. Any key
 brings the controls back; OK or Play resumes.
 
-- **Start:** TMDB backdrop and logo while AIOStreams answers (15 s, one automatic retry). The
-  top stream plays, or the one in the same `bingeGroup` as the last episode.
+- **Start:** the TMDB backdrop, with the title's logo (or name) filling in as loading goes on:
+  details, streams found, the stream loading, its first frame. It stays until the picture
+  starts. AIOStreams gets 15 s and one automatic retry. The top stream plays, or the one in
+  the same `bingeGroup` as the last episode.
 - **Resume:** the newer of Trakt's playback point and the local one (saved every 15 s). Past
   2 minutes and before 95% it asks "Resume from 1:12:30" or "Start over"; the stream buffers
   meanwhile. An autoplayed next episode resumes without asking.
@@ -108,9 +116,15 @@ brings the controls back; OK or Play resumes.
   old watch past 80%, so it can't chain into a loop.
 - **Tracks:** audio and subtitles picked in the panel are remembered per show (or film), as
   Netflix does; new titles start from the preferred languages in Settings. Subtitles come
-  from the file (if the TV lists them) or addons, rendered by the player with size,
-  background and 250 ms timing steps. Switching streams asks the addons again for that
-  release and picks the same language.
+  from the file (if the TV lists them) or addons, rendered by the player with size and
+  background options. The list shows forced tracks first (foreign-dialogue-only, flagged by
+  the addon or named "forced"), then the preferred languages; others sit behind "Other
+  languages". With subtitles off by default, a forced track in the first preferred language
+  turns on by itself; choosing Off turns everything off. Timing opens a dial: Left/Right
+  0.1 s, Up/Down 1 s, from −30 s (earlier) to +30 s (later). Switching streams asks the
+  addons again for that release and picks the same language.
+- **Anime** (TMDB's Animation genre, Japanese in origin) starts with Japanese audio and
+  English subtitles, unless you've picked otherwise for that show; Settings can turn it off.
 - **Skip Intro / Skip Recap:** IntroDB's community timestamps, where an episode has them. The
   button shows for the segment; with the controls down OK skips and Back hides it. Settings
   can skip automatically. IntroDB's credits start, when known, is when Next Up appears.

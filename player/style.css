@@ -421,7 +421,6 @@ svg {
 
 .controls {
   display: flex;
-  justify-content: space-between;
   margin-top: 30px;
 }
 .group {
@@ -1021,4 +1020,150 @@ svg {
   height: 100%;
   border-radius: 3px;
   background: #fff;
+}
+
+/* ----- Loading: the logo fills in as the stream comes up ----- */
+
+/* Registered so `--p` animates (Chromium 85+); older engines step instead. */
+@property --p {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+.stage {
+  transition:
+    opacity 0.6s var(--ease),
+    --p 1.1s var(--ease);
+}
+.stage.loading .status {
+  margin-top: 6px;
+}
+.markfill {
+  position: relative;
+  display: inline-block;
+  margin-bottom: 26px;
+}
+.markfill .logo,
+.markfill h1 {
+  margin: 0;
+}
+.markfill .ghost {
+  opacity: 0.16;
+  filter: grayscale(1) brightness(1.6);
+  animation: breathe 2.6s ease-in-out infinite;
+}
+.markfill .fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* A feathered diagonal edge that sweeps across as --p goes from 0 to 1. */
+  -webkit-mask-image: linear-gradient(
+    105deg,
+    #000 0%,
+    #000 calc(var(--p) * 118% - 18%),
+    transparent calc(var(--p) * 118%)
+  );
+  mask-image: linear-gradient(
+    105deg,
+    #000 0%,
+    #000 calc(var(--p) * 118% - 18%),
+    transparent calc(var(--p) * 118%)
+  );
+  filter: drop-shadow(0 0 18px rgba(255, 255, 255, 0.18));
+}
+/* Not loading (Resume, messages): the mark is simply whole. */
+.stage:not(.loading) .markfill .fill {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+.stage:not(.loading) .markfill .ghost {
+  animation: none;
+  opacity: 0;
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.12;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+
+/* ----- Subtitle timing dial ----- */
+
+.sheet.dial {
+  padding-bottom: 30px;
+}
+.dial-value {
+  margin: 10px 22px 4px;
+  font-size: 72px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.dial-value.zero {
+  color: var(--dim);
+}
+.dial-sub {
+  margin: 0 22px 26px;
+  font-size: 23px;
+  color: var(--dim);
+}
+.ruler {
+  position: relative;
+  height: 96px;
+  margin: 0 22px;
+  overflow: hidden;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
+}
+.ticks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  transition: transform 0.18s var(--ease);
+}
+.tk {
+  position: absolute;
+  top: 14px;
+  width: 2px;
+  height: 22px;
+  margin-left: -1px;
+  background: var(--faint);
+}
+.tk.major {
+  height: 34px;
+  background: var(--dim);
+}
+.tk span {
+  position: absolute;
+  top: 42px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.needle {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 289px;
+  width: 4px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+}
+.dial-hint {
+  margin: 22px 22px 0;
+  font-size: 21px;
+  color: var(--faint);
 }

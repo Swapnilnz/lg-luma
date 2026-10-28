@@ -26,7 +26,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 mod controls;
+mod subtitles;
 pub use controls::{OsdButton, OsdFocus, SPEEDS};
+pub use subtitles::MAX_OFFSET_MS;
 
 const STREAMS_TIMEOUT_MS: i32 = 15_000;
 const STREAM_CACHE_MS: f64 = 10. * 60_000.;
@@ -88,6 +90,8 @@ pub enum Panel {
     Speed,
     /// The Episodes shelf along the bottom: season tabs over episode stills.
     Episodes,
+    /// The subtitle timing dial.
+    Delay,
 }
 
 /// Where a stream starts once its duration is known.
@@ -173,6 +177,10 @@ pub struct App {
     /// 0: the season tabs, 1: the episodes.
     pub shelf_row: u8,
     pub shelf_focus: usize,
+    /// "Other languages" opened in the Tracks panel.
+    pub show_all_subs: bool,
+    /// The loading stage last drawn and since when, for the logo fill's creep.
+    pub load_stage: std::cell::Cell<(u8, f64)>,
     /// IntroDB's intro, recap and credits for this episode.
     pub segments: Option<Segments>,
     /// A skip the viewer hid with Back, so it stays hidden for that segment.
@@ -249,6 +257,8 @@ impl App {
             shelf_season: 1,
             shelf_row: 1,
             shelf_focus: 0,
+            show_all_subs: false,
+            load_stage: std::cell::Cell::new((0, 0.)),
             segments: None,
             skip_hidden: None,
             skipped: vec![],
@@ -628,16 +638,8 @@ impl App {
         // Subtitles: an embedded track in the wanted language, else the addons' (each new
         // stream asks the addons again, for subtitles that match its release).
         self.video.set_text(None);
-        if let Some(language) = self.subtitle_wish() {
-            let embedded: Vec<String> = self
-                .video
-                .text_tracks()
-                .iter()
-                .map(|t| t.language.clone())
-                .collect();
-            if let Some(index) = selection::pick_track(&embedded, &[language]) {
-                self.set_subtitles(SubChoice::Embedded(index));
-            }
+        if let Some(choice) = self.auto_subtitles(false) {
+            self.set_subtitles(choice);
         }
         self.request_subtitles();
         if self.segments.is_none() {
@@ -656,9 +658,14 @@ impl App {
             self.show_key()
                 .and_then(|key| store::show_prefs(&key).audio)
         });
+        let defaults = if self.anime() {
+            vec!["ja".to_owned()]
+        } else {
+            self.settings.audio_languages.clone()
+        };
         remembered
             .map(|language| vec![language])
-            .unwrap_or_else(|| self.settings.audio_languages.clone())
+            .unwrap_or(defaults)
             .into_iter()
             .filter(|language| language != "original")
             .collect()
@@ -676,10 +683,15 @@ impl App {
         {
             return remembered;
         }
-        self.settings
-            .subtitles_on
+        // Anime with Japanese audio gets subtitles in the viewer's language.
+        (self.settings.subtitles_on || self.anime())
             .then(|| self.settings.subtitle_languages.first().cloned())
             .flatten()
+    }
+
+    /// Anime, with the anime defaults on: Japanese audio and subtitles by default.
+    pub fn anime(&self) -> bool {
+        self.settings.anime_defaults && self.meta.as_ref().is_some_and(tmdb::Meta::is_anime)
     }
 
     /// Addon subtitles in the wanted language, once the list is in, unless some are on.
@@ -687,12 +699,8 @@ impl App {
         if self.sub_choice != SubChoice::Off {
             return;
         }
-        let Some(language) = self.subtitle_wish() else {
-            return;
-        };
-        let languages: Vec<String> = self.addon_subs.iter().map(|s| s.lang.clone()).collect();
-        if let Some(index) = selection::pick_track(&languages, &[language]) {
-            self.set_subtitles(SubChoice::Addon(index));
+        if let Some(choice) = self.auto_subtitles(true) {
+            self.set_subtitles(choice);
         }
     }
 
@@ -1106,6 +1114,9 @@ impl App {
     // ----- Panels -----
 
     pub fn open_panel(&mut self, panel: Panel) {
+        if panel == Panel::Tracks && !matches!(self.panel, Some(Panel::Tracks | Panel::Delay)) {
+            self.show_all_subs = false;
+        }
         self.panel = Some(panel);
         let rows = ui::rows(self, panel);
         // Focus what's current: the playing stream, the chosen track, else the first row.
@@ -1176,17 +1187,25 @@ impl App {
                 }
             }
             R::AutoSkip => self.settings.auto_skip = !self.settings.auto_skip,
+            R::Anime => self.settings.anime_defaults = !self.settings.anime_defaults,
             R::SubSize => {
                 self.settings.subtitle_size =
                     ((i32::from(self.settings.subtitle_size) + step + 3) % 3) as u8;
             }
             R::SubBox => self.settings.subtitle_box = !self.settings.subtitle_box,
+            // OK opens the dial; Left/Right nudge it from the list.
             R::SubOffset => {
-                self.settings.subtitle_offset_ms = if adjust == 0 {
-                    0
+                if adjust == 0 {
+                    self.open_panel(Panel::Delay);
                 } else {
-                    (self.settings.subtitle_offset_ms + 250 * adjust).clamp(-30_000, 30_000)
-                };
+                    self.nudge_delay(100 * adjust);
+                }
+            }
+            R::ShowAllSubs => {
+                if adjust == 0 {
+                    self.show_all_subs = !self.show_all_subs;
+                    self.focus_row(R::ShowAllSubs);
+                }
             }
             R::Autoplay => self.settings.autoplay_next = !self.settings.autoplay_next,
             R::NextCard => {
@@ -1307,6 +1326,10 @@ impl App {
         }
         if self.panel == Some(Panel::Episodes) {
             self.shelf_key(key);
+            return true;
+        }
+        if self.panel == Some(Panel::Delay) {
+            self.delay_key(key);
             return true;
         }
         if let Some(panel) = self.panel {

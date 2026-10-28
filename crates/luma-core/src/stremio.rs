@@ -24,6 +24,11 @@ pub struct Subtitle {
     pub url: String,
     /// As the addon gives it: usually ISO 639-2 (`eng`), sometimes 639-1 or a name.
     pub lang: String,
+    /// The addon's own label, when it gives one (release name, "Forced", "SDH").
+    pub label: String,
+    /// Forced (foreign-dialogue-only) subtitles: flagged by the addon, or "forced" in the
+    /// label, ID or URL.
+    pub forced: bool,
 }
 
 /// A manifest URL without `manifest.json` and trailing slashes: the addon's base.
@@ -110,10 +115,21 @@ mod json {
             .iter()
             .filter_map(|sub| {
                 let url = text(sub, "url").filter(|url| url.starts_with("http"))?;
+                let id = text(sub, "id").unwrap_or_else(|| url.clone());
+                let label = text(sub, "label")
+                    .or_else(|| text(sub, "title"))
+                    .or_else(|| text(sub, "name"))
+                    .unwrap_or_default();
+                let forced = sub.get("forced").and_then(Value::as_bool).unwrap_or(false)
+                    || crate::selection::is_forced(&label)
+                    || crate::selection::is_forced(&id)
+                    || crate::selection::is_forced(&url);
                 Some(Subtitle {
-                    id: text(sub, "id").unwrap_or_else(|| url.clone()),
+                    id,
                     url,
                     lang: text(sub, "lang").unwrap_or_else(|| "und".into()),
+                    label,
+                    forced,
                 })
             })
             .collect())
@@ -171,10 +187,16 @@ mod tests {
         assert!(parse_streams(r#"{"error":"x"}"#).is_err());
 
         let subs = parse_subtitles(
-            r#"{"subtitles":[{"id":"1","url":"https://s/1.srt","lang":"eng"},{"id":"2","lang":"fre"}]}"#,
+            r#"{"subtitles":[{"id":"1","url":"https://s/1.srt","lang":"eng"},{"id":"2","lang":"fre"},
+                {"id":"3","url":"https://s/Show.S01E01.FORCED.srt","lang":"eng"},
+                {"id":"4","url":"https://s/4.srt","lang":"eng","label":"English SDH"}]}"#,
         )
         .unwrap();
-        assert_eq!(subs.len(), 1);
+        assert_eq!(subs.len(), 3);
         assert_eq!(subs[0].lang, "eng");
+        assert!(!subs[0].forced);
+        assert!(subs[1].forced);
+        assert_eq!(subs[2].label, "English SDH");
+        assert!(!subs[2].forced);
     }
 }

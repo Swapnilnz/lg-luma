@@ -203,6 +203,8 @@ pub struct Settings {
     pub subtitle_offset_ms: i32,
     /// Skip intros and recaps without asking, where IntroDB has them.
     pub auto_skip: bool,
+    /// Anime starts with Japanese audio and English subtitles (until picked otherwise).
+    pub anime_defaults: bool,
 }
 
 impl Settings {
@@ -251,6 +253,10 @@ impl Settings {
                 .and_then(Value::as_i64)
                 .map_or(0, |n| n.clamp(-30_000, 30_000) as i32),
             auto_skip: v.get("auto_skip").and_then(Value::as_bool).unwrap_or(false),
+            anime_defaults: v
+                .get("anime_defaults")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
         }
     }
 
@@ -268,6 +274,7 @@ impl Settings {
                 "subtitle_box": self.subtitle_box,
                 "subtitle_offset_ms": self.subtitle_offset_ms,
                 "auto_skip": self.auto_skip,
+                "anime_defaults": self.anime_defaults,
             })
             .to_string(),
         );
