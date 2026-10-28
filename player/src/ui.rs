@@ -143,7 +143,7 @@ pub fn rows(app: &App, panel: Panel) -> Vec<Row> {
             })
             .collect(),
         // The shelf and the dial draw themselves; they have no rows.
-        Panel::Episodes | Panel::Delay => vec![],
+        Panel::Episodes | Panel::Delay | Panel::Letterboxd => vec![],
     }
 }
 
@@ -466,6 +466,12 @@ pub fn render(app: &App) {
     } else {
         next_up(app)
     };
+    // A film's credits: the Letterboxd card in Next Up's place (films have no Next Up).
+    let card = if card.is_empty() && !pause {
+        letterboxd_card(app)
+    } else {
+        card
+    };
     dom::set_html_with("nextup", &card, "nextcount");
     if !card.is_empty() {
         dom::set_html("nextcount", &escape(&count));
@@ -694,6 +700,7 @@ fn osd(app: &App) -> String {
             OsdButton::Tracks => icons::SUBTITLES,
             OsdButton::Speed => icons::SPEED,
             OsdButton::Streams => icons::STREAMS,
+            OsdButton::Letterboxd => icons::LETTERBOXD,
             OsdButton::Info => icons::INFO,
             OsdButton::Settings => icons::SETTINGS,
         };
@@ -914,6 +921,29 @@ fn next_up(app: &App) -> (String, String, f64) {
     (card, count, run)
 }
 
+/// The Letterboxd QR code over the film: scan it to rate, review or log it on a phone.
+fn letterboxd_sheet(app: &App) -> String {
+    format!(
+        r#"<div class="sheet lbx"><div class="ptitle">Rate on Letterboxd</div><div class="lbx-body"><div class="lbx-qr">{}</div><div class="lbx-copy"><p>Scan with your phone to rate, review or log <b>{}</b>, or add it to your watchlist.</p><div class="dial-hint">OK or Back to close</div></div></div></div>"#,
+        app.letterboxd_qr.clone().unwrap_or_default(),
+        escape(&app.title()),
+    )
+}
+
+/// As a film's credits roll: a small card offering Letterboxd, with its QR code.
+fn letterboxd_card(app: &App) -> String {
+    if app.letterboxd_card.is_none()
+        || app.panel.is_some()
+        || !matches!(app.screen, Screen::Playing)
+    {
+        return String::new();
+    }
+    format!(
+        r#"<div class="card lbxcard"><div class="lbx-qr small">{}</div><div class="lbx-text"><div class="label">Enjoyed it?</div><div class="name">Rate it on Letterboxd</div><div class="hint">Scan the code · OK to enlarge · Back to hide</div></div></div>"#,
+        app.letterboxd_qr.clone().unwrap_or_default(),
+    )
+}
+
 /// `+0.5 s`, `−1.2 s` or `In sync`.
 fn delay_label(ms: i32) -> String {
     match ms {
@@ -965,6 +995,9 @@ fn panel(app: &App, panel: Panel) -> String {
     if panel == Panel::Delay {
         return delay_dial(app);
     }
+    if panel == Panel::Letterboxd {
+        return letterboxd_sheet(app);
+    }
     let title = match panel {
         Panel::Picker => "Streams",
         Panel::Tracks => "Audio & Subtitles",
@@ -973,6 +1006,7 @@ fn panel(app: &App, panel: Panel) -> String {
         Panel::Speed => "Playback Speed",
         Panel::Episodes => "Episodes",
         Panel::Delay => "Subtitle Timing",
+        Panel::Letterboxd => "Rate on Letterboxd",
     };
     let notice = app
         .notice
@@ -1061,6 +1095,8 @@ mod icons {
     pub const SUBTITLES: &str = r#"<rect x="2.5" y="4.5" width="19" height="15" rx="3"/><path d="M7 15h4M14 15h3M7 11.5h2M12 11.5h5"/>"#;
     pub const SPEED: &str = r#"<path d="M12 14.5l4-4.5"/><path d="M3.4 18.5a10 10 0 1 1 17.2 0"/><circle cx="12" cy="14.5" r="1" fill="currentColor"/>"#;
     pub const STREAMS: &str = r#"<path d="M12.8 2.2a2 2 0 0 0-1.6 0L2.6 6.1a1 1 0 0 0 0 1.8l8.6 3.9a2 2 0 0 0 1.6 0l8.6-3.9a1 1 0 0 0 0-1.8z"/><path d="M2 12.6l9.2 4.2a2 2 0 0 0 1.6 0L22 12.6"/><path d="M2 17.6l9.2 4.2a2 2 0 0 0 1.6 0L22 17.6"/>"#;
+    /// Letterboxd's three dots.
+    pub const LETTERBOXD: &str = r#"<circle cx="5.5" cy="12" r="3.3" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="3.3" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="3.3" fill="currentColor" stroke="none"/>"#;
     pub const INFO: &str = r#"<circle cx="12" cy="12" r="9.5"/><path d="M12 16.5v-5M12 7.8h.01"/>"#;
     pub const SETTINGS: &str = r#"<path d="M20 7h-9M14 17H4"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>"#;
     pub const CHECK: &str = r#"<path d="M20 6 9 17l-5-5"/>"#;

@@ -86,7 +86,8 @@ nix develop .#player -c scripts/player-deploy.sh
 ## How it behaves
 
 The controls are an Apple TV-style bar: the scrubber, and below it one row of buttons from
-Play/Pause: Audio & Subtitles, Streams, Episodes and Next Episode (shows), Playback Speed,
+Play/Pause: Audio & Subtitles, Streams, Episodes and Next Episode (shows) or Rate on
+Letterboxd (films), Playback Speed,
 Info and Settings. Seeking is Left/Right on the scrubber, or Rewind/FF. Each opens as a popover above the bar; Episodes opens a shelf of
 season tabs and episode stills along the bottom.
 
@@ -147,6 +148,11 @@ brings the controls back; OK or Play resumes.
   credits stinger" keywords for films. As the credits start a toast says a scene is coming,
   and with IntroDB's timestamps a Skip to Post-Credits Scene button jumps to it (never
   automatic). Next Up waits until the scene has played.
+- **Letterboxd:** films get a Rate on Letterboxd button (after Streams), and as the credits
+  start a card with a QR code for the film's Letterboxd page (`letterboxd.com/imdb/<id>/`),
+  so you rate, review, log or watchlist it on your phone, signed in there. OK enlarges it,
+  Back hides it; it goes after a minute. Letterboxd has no public API, so nothing is sent
+  from the TV.
 - **Scrubbing:** Left/Right seek 10 s a press; held, faster the longer they are held (30 s of
   video a second, rising to 8 minutes a second after 5 s).
 - **Episodes shelf:** episodes not out yet are dimmed and show their date ("Out 13 Nov", or

@@ -21,6 +21,8 @@ pub enum OsdButton {
     Tracks,
     Speed,
     Streams,
+    /// A film's Letterboxd page as a QR code, to rate it from a phone.
+    Letterboxd,
     Info,
     Settings,
 }
@@ -34,6 +36,7 @@ impl OsdButton {
             OsdButton::Tracks => "Audio & Subtitles",
             OsdButton::Speed => "Playback Speed",
             OsdButton::Streams => "Streams",
+            OsdButton::Letterboxd => "Rate on Letterboxd",
             OsdButton::Info => "Info",
             OsdButton::Settings => "Settings",
         }
@@ -48,6 +51,7 @@ impl OsdButton {
             OsdButton::Streams => Some(Panel::Picker),
             OsdButton::Info => Some(Panel::Info),
             OsdButton::Settings => Some(Panel::Settings),
+            OsdButton::Letterboxd => Some(Panel::Letterboxd),
             _ => None,
         }
     }
@@ -63,6 +67,9 @@ impl App {
             if self.next_target().is_some() {
                 buttons.push(OsdButton::Next);
             }
+        }
+        if self.letterboxd_url().is_some() {
+            buttons.push(OsdButton::Letterboxd);
         }
         buttons.extend([OsdButton::Speed, OsdButton::Info, OsdButton::Settings]);
         buttons
@@ -115,6 +122,65 @@ impl App {
             OsdButton::Streams => self.open_panel(Panel::Picker),
             OsdButton::Info => self.open_panel(Panel::Info),
             OsdButton::Settings => self.open_panel(Panel::Settings),
+            OsdButton::Letterboxd => self.open_letterboxd(),
+        }
+    }
+
+    // ----- Letterboxd -----
+
+    /// The film's page on Letterboxd, which redirects from its IMDb or TMDB ID. Films only:
+    /// Letterboxd doesn't list TV episodes.
+    pub fn letterboxd_url(&self) -> Option<String> {
+        if self.launch.kind != Kind::Movie {
+            return None;
+        }
+        match (&self.launch.imdb, self.tmdb_id.or(self.launch.tmdb)) {
+            (Some(imdb), _) => Some(format!("https://letterboxd.com/imdb/{imdb}/")),
+            (None, Some(tmdb)) => Some(format!("https://letterboxd.com/tmdb/{tmdb}/")),
+            (None, None) => None,
+        }
+    }
+
+    /// Makes the QR code once per film.
+    fn ensure_letterboxd_qr(&mut self) -> bool {
+        if self.letterboxd_qr.is_none()
+            && let Some(url) = self.letterboxd_url()
+        {
+            self.letterboxd_qr = Some(qr_svg(&url)).filter(|svg| !svg.is_empty());
+        }
+        self.letterboxd_qr.is_some()
+    }
+
+    /// The QR code, large, over the paused film.
+    pub(super) fn open_letterboxd(&mut self) {
+        if self.ensure_letterboxd_qr() {
+            self.open_panel(Panel::Letterboxd);
+        }
+    }
+
+    /// As the credits start (IntroDB's, else the last 6%), a card offers rating the film on
+    /// Letterboxd, once; it goes after a minute.
+    pub(super) fn letterboxd_offer(&mut self, now: f64) {
+        if let Some(shown) = self.letterboxd_card
+            && now - shown > 60_000.
+        {
+            self.letterboxd_card = None;
+            self.letterboxd_done = true;
+        }
+        if self.letterboxd_done || self.letterboxd_card.is_some() || !self.first_frame {
+            return;
+        }
+        let duration = self.video.duration();
+        if duration <= 600. || self.letterboxd_url().is_none() {
+            return;
+        }
+        let credits = self
+            .segments
+            .and_then(|s| s.outro)
+            .map_or(duration * 0.94, |outro| outro.start);
+        if self.video.position() >= credits && self.ensure_letterboxd_qr() {
+            log!("Luma Player: offering Letterboxd");
+            self.letterboxd_card = Some(now);
         }
     }
 

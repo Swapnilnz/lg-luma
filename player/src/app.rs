@@ -92,6 +92,8 @@ pub enum Panel {
     Episodes,
     /// The subtitle timing dial.
     Delay,
+    /// A QR code for the film's Letterboxd page, to rate or log it from a phone.
+    Letterboxd,
 }
 
 /// Where a stream starts once its duration is known.
@@ -207,6 +209,12 @@ pub struct App {
     pub scrub_hold: Option<(i8, f64, f64)>,
     /// Whether the key being handled is the remote repeating a held button.
     pub key_repeat: bool,
+    /// The film's Letterboxd QR code (SVG), made once per title.
+    pub letterboxd_qr: Option<String>,
+    /// The "Rate on Letterboxd" card offered as the credits start: since when, and whether
+    /// it was put away.
+    pub letterboxd_card: Option<f64>,
+    pub letterboxd_done: bool,
 }
 
 impl App {
@@ -281,6 +289,9 @@ impl App {
             stinger_told: false,
             scrub_hold: None,
             key_repeat: false,
+            letterboxd_qr: None,
+            letterboxd_card: None,
+            letterboxd_done: false,
         }
     }
 
@@ -385,6 +396,9 @@ impl App {
         self.duration_changed_ms = now_ms();
         self.stinger_told = false;
         self.scrub_hold = None;
+        self.letterboxd_qr = None;
+        self.letterboxd_card = None;
+        self.letterboxd_done = false;
         self.osd_focus = OsdFocus::Scrubber;
         self.speed = 1.;
         self.paused_at = None;
@@ -843,6 +857,7 @@ impl App {
             }
             self.next_up(now);
             self.stinger_notice();
+            self.letterboxd_offer(now);
         }
         self.render();
     }
@@ -1375,6 +1390,18 @@ impl App {
             self.delay_key(key);
             return true;
         }
+        // The Letterboxd QR: OK or Back puts it away.
+        if self.panel == Some(Panel::Letterboxd) {
+            match key {
+                Key::Ok | Key::Back => {
+                    self.panel = None;
+                    self.show_osd();
+                }
+                Key::Stop => self.exit(),
+                other => self.media_key_pressed(other),
+            }
+            return true;
+        }
         if let Some(panel) = self.panel {
             match key {
                 Key::Back => {
@@ -1419,6 +1446,23 @@ impl App {
                 }
                 Key::Back => {
                     self.skip_hidden = Some(kind);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        // Rate on Letterboxd, as the credits roll: OK shows the QR code large, Back hides it.
+        if self.letterboxd_card.is_some() && !self.osd_visible() {
+            match key {
+                Key::Ok => {
+                    self.letterboxd_card = None;
+                    self.letterboxd_done = true;
+                    self.open_letterboxd();
+                    return true;
+                }
+                Key::Back => {
+                    self.letterboxd_card = None;
+                    self.letterboxd_done = true;
                     return true;
                 }
                 _ => {}
