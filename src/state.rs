@@ -1579,8 +1579,9 @@ impl State {
                     .rows
                     .get(row)
                     .and_then(|row| row.items.get(index))
+                    .cloned()
                 {
-                    return vec![Effect::LaunchTitle(item.clone())];
+                    return self.select_card(item);
                 }
             }
             Target::App(id) | Target::Input(id) if !self.launching => {
@@ -1729,6 +1730,10 @@ impl State {
                     15 => self.preferences.feed_wide = !self.preferences.feed_wide,
                     17 => {
                         self.preferences.feed_hide_spoilers = !self.preferences.feed_hide_spoilers;
+                    }
+                    18 => {
+                        self.preferences.feed_select_details =
+                            !self.preferences.feed_select_details;
                     }
                     16 => {
                         self.preferences.feed_use_player =

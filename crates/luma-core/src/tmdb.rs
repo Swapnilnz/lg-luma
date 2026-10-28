@@ -250,6 +250,8 @@ pub struct Episode {
     pub overview: String,
     pub runtime: Option<f64>,
     pub still: Option<String>,
+    /// Air date, `YYYY-MM-DD`; empty when TMDB has none yet.
+    pub aired: String,
 }
 
 pub fn parse_season(text: &str) -> Vec<Episode> {
@@ -275,6 +277,11 @@ pub fn parse_season(text: &str) -> Vec<Episode> {
                             .into(),
                         runtime: e.get("runtime").and_then(Value::as_f64),
                         still: image(e.get("still_path").and_then(Value::as_str), "w300"),
+                        aired: e
+                            .get("air_date")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
                     })
                 })
                 .collect()

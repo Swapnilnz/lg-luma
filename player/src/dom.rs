@@ -173,3 +173,14 @@ pub fn palm_call(method: &str) {
         let _ = f.call0(&palm);
     }
 }
+
+/// Today's date on the TV, `YYYY-MM-DD`, to compare with TMDB's air dates.
+pub fn today() -> String {
+    let date = js_sys::Date::new_0();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.get_full_year(),
+        date.get_month() + 1,
+        date.get_date()
+    )
+}

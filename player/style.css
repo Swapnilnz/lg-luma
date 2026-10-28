@@ -1083,6 +1083,13 @@ svg {
   height: 24px;
   stroke-width: 3;
 }
+/* Not out yet: dimmed, with its date where the length goes. */
+.ep.soon .thumb {
+  opacity: 0.45;
+}
+.ep.soon .en {
+  color: var(--faint);
+}
 /* Hide spoilers: episodes not started yet are blurred (scaled so the edges stay filled). */
 .ep.spoiler .thumb img {
   -webkit-filter: blur(16px) brightness(0.7);

@@ -414,6 +414,17 @@ impl App {
             self.panel = None;
             return;
         }
+        let today = crate::dom::today();
+        if let Some(episode) = self
+            .seasons
+            .get(&at.0)
+            .and_then(|list| list.iter().find(|e| e.number == at.1))
+            && !luma_core::time::released(&episode.aired, &today)
+        {
+            let when = luma_core::time::coming_label(&episode.aired, &today);
+            self.toast(format!("This episode isn't out yet ({when})"));
+            return;
+        }
         self.exit_scrobble(false);
         self.save_position(true);
         let launch = self.launch.with_episode(at);

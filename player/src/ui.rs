@@ -772,6 +772,7 @@ fn shelf(app: &App) -> String {
     const PITCH: i32 = 428;
     const WINDOW: i32 = 1680;
     let current = app.launch.episode_key();
+    let today = dom::today();
     let tabs: String = app
         .shelf_seasons()
         .iter()
@@ -809,7 +810,13 @@ fn shelf(app: &App) -> String {
                         Some(url) => format!(r#"<img src="{}" alt="">"#, escape(url)),
                         None => format!(r#"<div class="noimg">{}</div>"#, e.number),
                     };
-                    let meta = e.runtime.map(|m| short(m * 60.)).unwrap_or_default();
+                    // Not out yet: its date instead of its length, and dimmed.
+                    let soon = !luma_core::time::released(&e.aired, &today);
+                    let meta = if soon {
+                        luma_core::time::coming_label(&e.aired, &today)
+                    } else {
+                        e.runtime.map(|m| short(m * 60.)).unwrap_or_default()
+                    };
                     let at = (app.shelf_season, e.number);
                     // Watched: a tick. Partly watched: how far, as Apple TV draws it.
                     let watched = app.watched.contains(&at) && !now;
@@ -832,11 +839,12 @@ fn shelf(app: &App) -> String {
                         String::new()
                     };
                     format!(
-                        r#"<div class="ep{}{}{}{}" data-ep="{i}"><div class="thumb">{thumb}{}{tick}{progress}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
+                        r#"<div class="ep{}{}{}{}{}" data-ep="{i}"><div class="thumb">{thumb}{}{tick}{progress}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
                         if focus { " focus" } else { "" },
                         if now { " now" } else { "" },
                         if watched { " watched" } else { "" },
                         if spoiler { " spoiler" } else { "" },
+                        if soon { " soon" } else { "" },
                         if now { r#"<span class="nowtag">Now Playing</span>"# } else { "" },
                         e.number,
                         if meta.is_empty() { String::new() } else { format!(" · {meta}") },

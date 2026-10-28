@@ -39,6 +39,37 @@ pub fn wall_clock(hours: u32, minutes: u32) -> String {
     format!("{hour}:{:02} {suffix}", minutes % 60)
 }
 
+/// Whether an episode aired on `aired` (`YYYY-MM-DD`) is out by `today`. No date means TMDB
+/// lists it before it has one: not out.
+pub fn released(aired: &str, today: &str) -> bool {
+    !aired.is_empty() && aired <= today
+}
+
+/// When an episode not out yet comes: "Out 13 Nov", "Out 13 Nov 2027", or "Not out yet".
+pub fn coming_label(aired: &str, today: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut parts = aired.split('-');
+    let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
+        return "Not out yet".into();
+    };
+    let (Some(month), Ok(day)) = (
+        month
+            .parse::<usize>()
+            .ok()
+            .and_then(|m| MONTHS.get(m.wrapping_sub(1))),
+        day.parse::<u32>(),
+    ) else {
+        return "Not out yet".into();
+    };
+    if today.starts_with(year) {
+        format!("Out {day} {month}")
+    } else {
+        format!("Out {day} {month} {year}")
+    }
+}
+
 /// How fast a held Left or Right scrubs, in seconds of video per second held: it speeds up
 /// the longer the button is down, as Apple TV's does.
 pub fn scrub_speed(held_ms: f64) -> f64 {
@@ -101,6 +132,17 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_episodes_not_out_yet() {
+        assert!(released("2026-10-01", "2026-10-28"));
+        assert!(released("2026-10-28", "2026-10-28"));
+        assert!(!released("2026-11-13", "2026-10-28"));
+        assert!(!released("", "2026-10-28"));
+        assert_eq!(coming_label("2026-11-13", "2026-10-28"), "Out 13 Nov");
+        assert_eq!(coming_label("2027-01-05", "2026-10-28"), "Out 5 Jan 2027");
+        assert_eq!(coming_label("", "2026-10-28"), "Not out yet");
+    }
 
     #[test]
     fn scrubbing_speeds_up_while_held() {

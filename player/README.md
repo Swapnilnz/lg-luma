@@ -149,7 +149,8 @@ brings the controls back; OK or Play resumes.
   automatic). Next Up waits until the scene has played.
 - **Scrubbing:** Left/Right seek 10 s a press; held, faster the longer they are held (30 s of
   video a second, rising to 8 minutes a second after 5 s).
-- **Episodes shelf:** watched episodes get a tick and partly watched ones a progress bar, from
+- **Episodes shelf:** episodes not out yet are dimmed and show their date ("Out 13 Nov", or
+  "Not out yet") and can't be played; watched episodes get a tick and partly watched ones a progress bar, from
   Trakt (and the player's own resume points). With Hide spoilers on (Settings, on by default)
   stills of episodes not started are blurred, and Next Up shows the show's backdrop instead.
 - **On a laptop**, a stream whose audio Chrome can't decode (Dolby, DTS) plays silent; after

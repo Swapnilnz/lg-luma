@@ -92,8 +92,10 @@ and the interval. Luma logs `Luma keep-awake:` lines if the TV gives it no audio
 
 ## Title pages
 
-**Menu** on any poster (in a row, the Top Shelf, Search, or a title page's More Like This)
-opens the title's page: logo, year, length, genres and classification (Australia's first,
+**OK** on a poster in a row, Search or the This Week sheet opens the title's page too
+(Settings > Interface > Selecting a poster: Opens its page, the default, or Plays it); the
+Top Shelf's OK still plays. **Menu** on any poster (in a row, the Top Shelf, Search, or a
+title page's More Like This) opens the title's page: logo, year, length, genres and classification (Australia's first,
 else the US one), TMDB's score and, with an MDBList key, IMDb, Rotten Tomatoes, Metacritic and
 Letterboxd scores, the synopsis and director or creators. Below that:
 
@@ -101,7 +103,9 @@ Letterboxd scores, the synopsis and director or creators. Below that:
   Trakt: Watchlist, Mark watched, Rate, and for shows Hide from Up Next.
 - For shows, season pills and that season's episodes with stills; watched ones are ticked.
   With Settings > Interface > Hide spoilers (on by default), episodes not watched yet show
-  the show's backdrop, dimmed, instead of their still.
+  the show's backdrop, dimmed, instead of their still. Episodes not out yet are dimmed and
+  marked with their date ("Out 13 Nov"), or "Not out yet" when TMDB has none; OK on one
+  says so instead of playing.
   The page opens on the season of the card's episode, or of the next one to watch. OK on an
   episode opens the show in Nuvio (Nuvio's links open a show, not one episode); holding OK on
   an episode marks it watched on Trakt.

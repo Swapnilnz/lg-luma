@@ -2761,6 +2761,8 @@ fn episode_card(
     out.shadow(rect, CARD_RADIUS, if focused { 30. } else { 16. }, 8., 0.3);
     let watched =
         trakt.is_some_and(|trakt| trakt.episodes.contains(&[episode.season, episode.number]));
+    let today = crate::feeds::today();
+    let upcoming = !crate::feeds::released(&episode.aired, &today);
     // Hide spoilers: an episode not watched yet shows the show's backdrop, dimmed, not its
     // still.
     let hidden = state.preferences.feed_hide_spoilers && !watched;
@@ -2782,7 +2784,8 @@ fn episode_card(
         }
         Some((image, url)) => {
             let reveal = state.feeds.reveal(url, state.preferences.reduced_motion);
-            let light = 0.55 + 0.45 * reveal;
+            // Not out yet: dimmed, under its date.
+            let light = (0.55 + 0.45 * reveal) * if upcoming { 0.5 } else { 1. };
             out.draw.push(Draw::AppImage(
                 image.clone(),
                 rect,
@@ -2806,6 +2809,18 @@ fn episode_card(
         out.icon(assets, "eye-off", mark, c(0xffffff, 0.75));
     }
     out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
+    let coming = upcoming.then(|| crate::feeds::coming_label(&episode.aired, &today));
+    if let Some(coming) = &coming {
+        let badge = Rect::new(rect.x + 12., rect.y + 12., 150., 32.);
+        out.shape(badge, 16., c(0x080b12, 0.82));
+        out.text(
+            coming.as_str(),
+            Rect::new(badge.x + 14., badge.y + 6., badge.w - 20., 20.),
+            text(15.2, 600, 0.),
+            WHITE,
+            false,
+        );
+    }
     if watched {
         let badge = Rect::new(rect.x + rect.w - 44., rect.y + 12., 32., 32.);
         out.shape(badge, 16., c(0xf3f3f3, 0.95));
@@ -2825,8 +2840,10 @@ fn episode_card(
     if let Some(minutes) = episode.runtime {
         details.push(format!("{minutes}m"));
     }
-    if !episode.aired.is_empty() {
-        details.push(episode.aired.clone());
+    match coming {
+        Some(coming) => details.push(coming),
+        None if !episode.aired.is_empty() => details.push(episode.aired.clone()),
+        None => {}
     }
     if watched {
         details.push("Watched".into());
@@ -4273,6 +4290,19 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         }),
         false,
     )))
+    .chain(state.feeds.can_search.then(|| {
+        (
+            18,
+            "Selecting a poster",
+            "play",
+            Some(if state.preferences.feed_select_details {
+                "Opens its page"
+            } else {
+                "Plays it"
+            }),
+            false,
+        )
+    }))
     .chain(state.feeds.can_search.then(|| {
         (
             17,

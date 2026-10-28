@@ -137,6 +137,8 @@ pub struct Preferences {
     pub feed_use_player: Option<bool>,
     /// A title page's unwatched episodes show no stills, so nothing is given away.
     pub feed_hide_spoilers: bool,
+    /// OK on a poster opens its title page (true) or plays it at once (false).
+    pub feed_select_details: bool,
 }
 
 impl Default for Preferences {
@@ -168,6 +170,7 @@ impl Default for Preferences {
             keep_awake: true,
             feed_use_player: None,
             feed_hide_spoilers: true,
+            feed_select_details: true,
         }
     }
 }

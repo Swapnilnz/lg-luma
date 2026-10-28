@@ -1006,7 +1006,12 @@ impl State {
             Target::SearchResult(index) if !self.launching => {
                 let item = search.results.get(index).cloned();
                 match item {
-                    // Search is done once a title opens: Home is back as it was on return.
+                    // The title's page, over Search, when OK opens pages.
+                    Some(item) if self.opens_pages() => {
+                        self.open_title(item, Target::SearchResult(index));
+                        vec![]
+                    }
+                    // Search is done once a title plays: Home is back as it was on return.
                     Some(item) => {
                         self.close_search();
                         vec![Effect::LaunchTitle(item)]
@@ -1750,6 +1755,19 @@ pub fn episode_label([season, number]: [u32; 2]) -> String {
     format!("S{season}, E{number}")
 }
 
+/// Today as `YYYY-MM-DD` (UTC), to compare with TMDB's air dates.
+pub fn today() -> String {
+    let date = time::OffsetDateTime::now_utc().date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
+}
+
+pub use luma_core::time::{coming_label, released};
+
 impl Feeds {
     /// Whether the Top Shelf, screensaver, title page or menu is still moving.
     pub fn extras_animating(&self, reduced_motion: bool) -> bool {
@@ -2045,6 +2063,22 @@ impl State {
         self.open_title(item, restore);
     }
 
+    /// Whether OK on a poster opens its page (Settings), which needs TMDB.
+    pub fn opens_pages(&self) -> bool {
+        self.preferences.feed_select_details && self.feeds.can_search
+    }
+
+    /// OK on a poster: its title page, or (Settings, or without TMDB) it plays at once.
+    pub fn select_card(&mut self, item: Item) -> Vec<Effect> {
+        if self.opens_pages() {
+            let restore = self.focus.clone();
+            self.open_title(item, restore);
+            vec![]
+        } else {
+            vec![Effect::LaunchTitle(item)]
+        }
+    }
+
     /// Opens a title's page over Home (or Search), and asks for its data.
     pub fn open_title(&mut self, item: Item, restore: Target) {
         let link = item.link.clone();
@@ -2280,10 +2314,19 @@ impl State {
             }
             // Luma Player plays that episode; Nuvio's links open the show's page.
             Target::TitleEpisode(index) if !self.launching => {
-                let episode = page
+                let shown = page
                     .shown_episodes()
-                    .and_then(|episodes| episodes.get(index))
-                    .map(|episode| [episode.season, episode.number]);
+                    .and_then(|episodes| episodes.get(index));
+                // Not out yet: nothing to play.
+                if let Some(episode) = shown
+                    && !released(&episode.aired, &today())
+                {
+                    let label = episode_label([episode.season, episode.number]);
+                    let when = coming_label(&episode.aired, &today());
+                    self.notify(format!("{label} isn't out yet ({when})"));
+                    return Some(vec![]);
+                }
+                let episode = shown.map(|episode| [episode.season, episode.number]);
                 // Another episode than the card's has no place to resume from here: the player
                 // finds its own, and asks.
                 let same = episode.is_none() || episode == page.item.episode;
@@ -2907,11 +2950,10 @@ impl State {
     pub fn sheet_activate(&mut self) -> Option<Vec<Effect>> {
         let sheet = self.feeds.sheet.as_ref()?;
         Some(match self.focus {
-            Target::SheetItem(index) if !self.launching => sheet
-                .items
-                .get(index)
-                .map(|item| vec![Effect::LaunchTitle(item.clone())])
-                .unwrap_or_default(),
+            Target::SheetItem(index) if !self.launching => match sheet.items.get(index).cloned() {
+                Some(item) => self.select_card(item),
+                None => vec![],
+            },
             _ => vec![],
         })
     }
