@@ -1237,6 +1237,9 @@ fn run() -> Result<(), String> {
     // A mic press left from before this start must not set Luma listening.
     let _ = std::fs::remove_file(feeds::VOICE_TRIGGER);
     let mut voice_trigger = true;
+    // When the mic button last asked Luma to listen: its script also "launches" Home, which
+    // must not be taken for the Home button.
+    let mut voice_at: Option<Instant> = None;
     // The last remote or pointer input, for the screensaver; and whether LG's own screen saver
     // is held off while ours is due.
     let mut last_input = Instant::now();
@@ -1394,6 +1397,7 @@ fn run() -> Result<(), String> {
                 eprintln!("Luma voice trigger: {error}; mic button disabled");
                 voice_trigger = false;
             } else if visible {
+                voice_at = Some(Instant::now());
                 if state.page != state::Page::Home && state.overlay.is_none() {
                     state.open(0);
                 }
@@ -1494,8 +1498,16 @@ fn run() -> Result<(), String> {
                         if end_registration.is_some() {
                             foreground.relaunched(Instant::now(), in_front);
                         }
-                        // Home pressed again on Home: back to the very top.
-                        if in_front {
+                        // The mic button's script launches Home too, just after asking for
+                        // voice search: that relaunch is the mic, not the Home button.
+                        let from_mic = std::path::Path::new(feeds::VOICE_TRIGGER).exists()
+                            || voice_at.is_some_and(|at| at.elapsed() < Duration::from_secs(3));
+                        // Home pressed again on Home: back to the very top. Visible is
+                        // enough: webOS doesn't always report focus back to Luma.
+                        eprintln!(
+                            "Luma lifecycle: relaunch (visible {visible}, focused {focused}, mic {from_mic})"
+                        );
+                        if visible && !from_mic {
                             if matches!(state.overlay, Some(Overlay::SystemKeyboard)) {
                                 pending.extend(state.finish_text_input());
                             }
@@ -1628,7 +1640,9 @@ fn run() -> Result<(), String> {
                         }
                         Keycode::F5 if !repeat => pending.push(Effect::Reload),
                         // The desktop preview's stand-in for pressing the remote's Home on Home.
-                        Keycode::Home if !repeat && !state.text_input_active() => {
+                        Keycode::Home | Keycode::AcHome
+                            if !repeat && !state.text_input_active() =>
+                        {
                             press = None;
                             state.home_to_top();
                         }
