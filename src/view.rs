@@ -2513,6 +2513,7 @@ fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
     for (index, button) in page.buttons(state.feeds.trakt).into_iter().enumerate() {
         let (label, icon) = match button {
             TitleButton::Play => (play_label(&page.item), "play"),
+            TitleButton::StartOver => ("Start Over".into(), "refresh"),
             TitleButton::Trailer => ("Trailer".into(), "tv"),
             TitleButton::Watchlist if trakt.is_some_and(|trakt| trakt.in_watchlist) => {
                 ("In Watchlist".into(), "check")
@@ -2758,7 +2759,27 @@ fn episode_card(
 ) {
     use crate::feeds::CARD_RADIUS;
     out.shadow(rect, CARD_RADIUS, if focused { 30. } else { 16. }, 8., 0.3);
-    match held_image(state, episode.still.as_ref()) {
+    let watched =
+        trakt.is_some_and(|trakt| trakt.episodes.contains(&[episode.season, episode.number]));
+    // Hide spoilers: an episode not watched yet shows the show's backdrop, dimmed, not its
+    // still.
+    let hidden = state.preferences.feed_hide_spoilers && !watched;
+    let backdrop = state
+        .feeds
+        .title
+        .as_ref()
+        .and_then(|page| state.feeds.details.get(&page.link))
+        .and_then(|details| details.backdrop.as_ref());
+    let still = if hidden {
+        backdrop
+    } else {
+        episode.still.as_ref()
+    };
+    match held_image(state, still) {
+        Some((image, _)) if hidden => {
+            out.draw
+                .push(Draw::AppImage(image.clone(), rect, [0.4, 0.4, 0.4, 1.]));
+        }
         Some((image, url)) => {
             let reveal = state.feeds.reveal(url, state.preferences.reduced_motion);
             let light = 0.55 + 0.45 * reveal;
@@ -2775,9 +2796,16 @@ fn episode_card(
             c(0x22272d, 1.),
         )),
     }
+    if hidden {
+        let mark = Rect::new(
+            rect.x + rect.w / 2. - 22.,
+            rect.y + rect.h / 2. - 22.,
+            44.,
+            44.,
+        );
+        out.icon(assets, "eye-off", mark, c(0xffffff, 0.75));
+    }
     out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
-    let watched =
-        trakt.is_some_and(|trakt| trakt.episodes.contains(&[episode.season, episode.number]));
     if watched {
         let badge = Rect::new(rect.x + rect.w - 44., rect.y + 12., 32., 32.);
         out.shape(badge, 16., c(0xf3f3f3, 0.95));
@@ -2887,6 +2915,7 @@ fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
             ),
             MenuEntry::HideUpNext => ("Hide from Up Next".to_owned(), "eye-off"),
             MenuEntry::RemoveContinue => ("Remove from Continue Watching".to_owned(), "close"),
+            MenuEntry::StartOver => ("Start Over".to_owned(), "refresh"),
         };
         let rect = Rect::new(717.8, panel.y + 134. + index as f32 * 76.8, 484.4, 67.2);
         let target = Target::MenuItem(index);
@@ -4244,6 +4273,19 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         }),
         false,
     )))
+    .chain(state.feeds.can_search.then(|| {
+        (
+            17,
+            "Hide spoilers",
+            "eye-off",
+            Some(if state.preferences.feed_hide_spoilers {
+                language.t("stateOn")
+            } else {
+                language.t("stateOff")
+            }),
+            false,
+        )
+    }))
     .chain(state.feeds.player.is_some().then(|| {
         (
             16,

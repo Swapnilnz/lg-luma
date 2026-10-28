@@ -137,6 +137,7 @@ impl App {
                 at,
                 name: None,
                 still: None,
+                runtime: None,
                 streams: None,
                 shown_at: None,
                 dismissed: false,
@@ -245,19 +246,51 @@ impl App {
         }
     }
 
-    /// With "Skip intros automatically", each intro and recap is skipped once.
+    /// With "Skip intros automatically", each intro and recap is skipped once. The credits are
+    /// never skipped for you: the scene after them is offered instead.
     pub(super) fn auto_skip(&mut self) {
+        use luma_core::segments::Skip;
         if !self.settings.auto_skip || self.video.paused() {
             return;
         }
         if let Some((kind, _)) = self.skip_offer()
+            && kind != Skip::PostCredits
             && !self.skipped.contains(&kind)
         {
             self.skip_now();
             self.toast(match kind {
-                luma_core::segments::Skip::Intro => "Skipped the intro",
-                luma_core::segments::Skip::Recap => "Skipped the recap",
+                Skip::Intro => "Skipped the intro",
+                Skip::Recap => "Skipped the recap",
+                Skip::PostCredits => "Skipped to the scene after the credits",
             });
+        }
+    }
+
+    /// A scene during or after the credits (TMDB's tag, or IntroDB's timestamps): said once,
+    /// as the credits start, so nobody stops watching too soon.
+    pub(super) fn stinger_notice(&mut self) {
+        if self.stinger_told || !self.first_frame || self.video.paused() {
+            return;
+        }
+        let duration = self.video.duration();
+        if duration <= 300. {
+            return;
+        }
+        let segments = self.segments.unwrap_or_default();
+        let tagged = segments.post_credits.is_some()
+            || (self.launch.kind == Kind::Movie && self.meta.as_ref().is_some_and(|m| m.stinger));
+        let position = self.video.position();
+        let credits = segments.outro.map_or(duration * 0.94, |outro| outro.start);
+        if tagged
+            && position >= credits
+            && (segments.post_credits.is_none() || segments.scene_ahead(position))
+        {
+            self.stinger_told = true;
+            log!("Luma Player: post-credits scene ahead");
+            self.toast = Some((
+                "There's a scene after the credits. Keep watching!".into(),
+                now_ms() + 8_000.,
+            ));
         }
     }
 

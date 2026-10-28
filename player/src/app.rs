@@ -113,6 +113,8 @@ pub struct NextUp {
     pub at: (u32, u32),
     pub name: Option<String>,
     pub still: Option<String>,
+    /// Minutes, from TMDB.
+    pub runtime: Option<f64>,
     pub streams: Option<Vec<Stream>>,
     pub shown_at: Option<f64>,
     pub dismissed: bool,
@@ -199,6 +201,12 @@ pub struct App {
     /// stream still being indexed can report a duration that grows as it plays.
     pub duration_seen: f64,
     pub duration_changed_ms: f64,
+    /// The film's post-credits scene was mentioned, once.
+    pub stinger_told: bool,
+    /// Left or Right held down: which way, since when, and the last key event.
+    pub scrub_hold: Option<(i8, f64, f64)>,
+    /// Whether the key being handled is the remote repeating a held button.
+    pub key_repeat: bool,
 }
 
 impl App {
@@ -270,6 +278,9 @@ impl App {
             audio_checked: false,
             duration_seen: 0.,
             duration_changed_ms: 0.,
+            stinger_told: false,
+            scrub_hold: None,
+            key_repeat: false,
         }
     }
 
@@ -372,6 +383,8 @@ impl App {
         self.subtitle_choice_wish = None;
         self.duration_seen = 0.;
         self.duration_changed_ms = now_ms();
+        self.stinger_told = false;
+        self.scrub_hold = None;
         self.osd_focus = OsdFocus::Scrubber;
         self.speed = 1.;
         self.paused_at = None;
@@ -513,7 +526,7 @@ impl App {
                         app.streams = streams;
                         app.from_cache = false;
                         app.attempts = Attempts::new(app.streams.len());
-                        let pick = selection::binge_pick(&app.streams, app.binge_group.as_deref());
+                        let pick = app.source_pick(&app.streams);
                         app.play_index(pick, start);
                     }
                     _ => app.open_picker_after_failures(),
@@ -622,6 +635,12 @@ impl App {
         );
         if let Some(stream) = self.current.and_then(|i| self.streams.get(i)) {
             self.binge_group = stream.binge_group.clone();
+            // The show's next episode starts from the same source, even another day.
+            if self.launch.kind == Kind::Series
+                && let Some(key) = self.show_key()
+            {
+                store::save_show_source(&key, stream.binge_group.as_deref(), &stream.name);
+            }
         }
         self.first_frame_ms = now_ms();
         self.audio_checked = false;
@@ -650,6 +669,22 @@ impl App {
     /// The show (or film) whose audio and subtitle picks are remembered.
     fn show_key(&self) -> Option<String> {
         self.launch.imdb.clone()
+    }
+
+    /// The stream to start: from the source this show last played from (this session's, else
+    /// the one remembered), else AIOStreams' top pick.
+    fn source_pick(&self, streams: &[Stream]) -> usize {
+        let remembered = if self.launch.kind == Kind::Series {
+            self.show_key().map(|key| store::show_prefs(&key))
+        } else {
+            None
+        };
+        let group = self
+            .binge_group
+            .clone()
+            .or_else(|| remembered.as_ref().and_then(|prefs| prefs.group.clone()));
+        let name = remembered.and_then(|prefs| prefs.stream);
+        selection::remembered_pick(streams, group.as_deref(), name.as_deref())
     }
 
     /// Audio languages in order of preference, "Original" left out.
@@ -807,6 +842,7 @@ impl App {
                 self.save_position(false);
             }
             self.next_up(now);
+            self.stinger_notice();
         }
         self.render();
     }
@@ -857,6 +893,7 @@ impl App {
                     at,
                     name: None,
                     still: None,
+                    runtime: None,
                     streams: None,
                     shown_at: None,
                     dismissed: false,
@@ -865,13 +902,21 @@ impl App {
             }
         }
         let left = duration - position;
-        // Credits from IntroDB when known, else a fixed time before the end.
+        // At the chosen point in the episode; or, set to the credits, when IntroDB says they
+        // start (else 45 s before the end).
         let credits = self
             .segments
             .and_then(|s| s.outro)
             .filter(|outro| outro.start < duration - 5.)
             .is_some_and(|outro| position >= outro.start);
-        let near_end = credits || (left <= self.settings.next_card_seconds && left > 1.);
+        let at_percent = self.settings.next_up_percent;
+        let near_end = if at_percent <= 0. {
+            credits || (left <= 45. && left > 1.)
+        } else {
+            position / duration * 100. >= at_percent.min(99.9) && left > 1.
+        };
+        // A scene after the credits plays first.
+        let near_end = near_end && !self.segments.is_some_and(|s| s.scene_ahead(position));
         // Guards against a card that keeps coming back: the duration must have settled for
         // 30 s, and this episode must have played for a minute.
         let settled = now - self.duration_changed_ms > 30_000.
@@ -1209,12 +1254,10 @@ impl App {
             }
             R::Autoplay => self.settings.autoplay_next = !self.settings.autoplay_next,
             R::NextCard => {
-                self.settings.next_card_seconds = cycle(
-                    self.settings.next_card_seconds,
-                    &[30., 45., 60., 90., 120.],
-                    step,
-                );
+                self.settings.next_up_percent =
+                    cycle(self.settings.next_up_percent, &store::NEXT_UP_AT, step);
             }
+            R::Spoilers => self.settings.hide_spoilers = !self.settings.hide_spoilers,
             R::Countdown => {
                 self.settings.countdown_seconds =
                     cycle(self.settings.countdown_seconds, &[5., 10., 15., 20.], step);
@@ -1418,8 +1461,8 @@ impl App {
                 self.show_osd();
                 self.osd_focus = OsdFocus::Button(self.default_button());
             }
-            Key::Left => self.seek_by(-10.),
-            Key::Right => self.seek_by(10.),
+            Key::Left => self.scrub(false),
+            Key::Right => self.scrub(true),
             Key::Back => {
                 if self.osd_visible() && !self.video.paused() {
                     self.osd_until = 0.;
@@ -1478,6 +1521,28 @@ impl App {
             self.video.pause();
         }
         self.show_osd();
+    }
+
+    /// Left or Right: 10 s a press; held, faster the longer it is held (the remote repeats
+    /// the key while it is down).
+    fn scrub(&mut self, forward: bool) {
+        let now = now_ms();
+        let direction: i8 = if forward { 1 } else { -1 };
+        let step = match self.scrub_hold {
+            // A repeat, or (where the TV doesn't flag repeats) a press hard on the last one.
+            Some((held, since, last))
+                if held == direction && (self.key_repeat || now - last < 160.) =>
+            {
+                self.scrub_hold = Some((direction, since, now));
+                let elapsed = (now - last).clamp(0., 250.) / 1000.;
+                (luma_core::time::scrub_speed(now - since) * elapsed).max(1.)
+            }
+            _ => {
+                self.scrub_hold = Some((direction, now, now));
+                10.
+            }
+        };
+        self.seek_by(f64::from(direction) * step);
     }
 
     /// Seeks add up while the remote is pressed and land 600 ms after the last press.
@@ -1540,7 +1605,13 @@ fn install(video: &Video) {
             }
             return;
         };
-        if with(|app| app.on_key(key)).unwrap_or(false) {
+        let repeat = event.repeat();
+        if with(|app| {
+            app.key_repeat = repeat;
+            app.on_key(key)
+        })
+        .unwrap_or(false)
+        {
             event.prevent_default();
         }
     });
@@ -1847,7 +1918,7 @@ async fn prepare(epoch: u64, carried: Option<Vec<Stream>>) {
         app.streams = streams;
         app.from_cache = from_cache;
         app.attempts = Attempts::new(app.streams.len());
-        let index = selection::binge_pick(&app.streams, app.binge_group.as_deref());
+        let index = app.source_pick(&app.streams);
         let runtime = app
             .episode_runtime
             .or_else(|| app.meta.as_ref().and_then(|m| m.runtime))
@@ -1855,6 +1926,12 @@ async fn prepare(epoch: u64, carried: Option<Vec<Stream>>) {
         let offer = resume::offer(point, runtime);
         match (app.launch.start, offer) {
             (Some(t), _) => app.play_index(index, Start::At(t)),
+            // Resume or Start Over, already chosen in Luma.
+            (None, _) if app.launch.resume == Some(false) => app.play_index(index, Start::Zero),
+            (None, Some(offer)) if app.launch.resume == Some(true) => {
+                app.toast(format!("Resuming from {}", ui::offer_label(&offer)));
+                app.play_index(index, Start::Percent(offer.percent));
+            }
             (None, Some(offer)) if app.auto_resume && offer.percent < 80. => {
                 app.toast(format!("Resuming from {}", ui::offer_label(&offer)));
                 app.play_index(index, Start::Percent(offer.percent));
@@ -2027,6 +2104,7 @@ async fn prefetch_next(epoch: u64, at: (u32, u32)) {
             if let (Some(next), Some(episode)) = (&mut app.next, episode) {
                 next.name = Some(episode.name).filter(|n| !n.is_empty());
                 next.still = episode.still;
+                next.runtime = episode.runtime;
             }
         });
     }
@@ -2035,10 +2113,12 @@ async fn prefetch_next(epoch: u64, at: (u32, u32)) {
         None => fetch_streams(&config, &launch, epoch).await.ok(),
     };
     update(epoch, |app| {
+        let pick = streams
+            .as_ref()
+            .map_or(0, |streams| app.source_pick(streams));
         if let Some(next) = &mut app.next {
             // Same source as now when its bingeGroup matches: put that stream first.
             if let Some(mut streams) = streams {
-                let pick = selection::binge_pick(&streams, app.binge_group.as_deref());
                 if pick > 0 {
                     let stream = streams.remove(pick);
                     streams.insert(0, stream);

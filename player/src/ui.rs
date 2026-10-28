@@ -30,6 +30,7 @@ pub enum RowId {
     Speed(f64),
     ShowAllSubs,
     Anime,
+    Spoilers,
 }
 
 impl RowId {
@@ -45,6 +46,7 @@ impl RowId {
                 | RowId::Countdown
                 | RowId::AutoSkip
                 | RowId::Anime
+                | RowId::Spoilers
                 | RowId::AudioLanguage
                 | RowId::SubtitleLanguage
                 | RowId::SubtitlesOn
@@ -290,7 +292,11 @@ fn settings_rows(app: &App) -> Vec<Row> {
         row(
             RowId::NextCard,
             "Next Up appears",
-            format!("{:.0} s before the end", s.next_card_seconds),
+            match s.next_up_percent {
+                at if at <= 0. => "When the credits start".to_owned(),
+                at if at >= 100. => "At the end".to_owned(),
+                at => format!("At {at:.0}%"),
+            },
         ),
         row(
             RowId::Countdown,
@@ -304,6 +310,11 @@ fn settings_rows(app: &App) -> Vec<Row> {
                 on_off(s.auto_skip),
             );
             r.detail = "Intros and recaps from IntroDB; off shows a Skip button".into();
+            r
+        },
+        {
+            let mut r = row(RowId::Spoilers, "Hide spoilers", on_off(s.hide_spoilers));
+            r.detail = "Blur stills of episodes you haven't watched".into();
             r
         },
         heading("Languages"),
@@ -450,14 +461,16 @@ pub fn render(app: &App) {
     dom::set_class("panel", panel_class);
     // The card is written once per episode; only its countdown changes after that, so the
     // card's rise-in and its still don't replay every second (which made it flash).
-    let (card, count) = if pause {
-        (String::new(), String::new())
+    let (card, count, run) = if pause {
+        (String::new(), String::new(), 0.)
     } else {
         next_up(app)
     };
     dom::set_html_with("nextup", &card, "nextcount");
     if !card.is_empty() {
         dom::set_html("nextcount", &escape(&count));
+        // The Play button fills as the countdown runs; it holds while paused.
+        dom::set_var("nextup", "--run", &format!("{run:.3}"));
     }
     let skip = app.skip_offer().map(|(kind, _)| {
         format!(
@@ -800,6 +813,11 @@ fn shelf(app: &App) -> String {
                     let at = (app.shelf_season, e.number);
                     // Watched: a tick. Partly watched: how far, as Apple TV draws it.
                     let watched = app.watched.contains(&at) && !now;
+                    // Hide spoilers: stills of episodes not started yet are blurred.
+                    let spoiler = app.settings.hide_spoilers
+                        && !now
+                        && !app.watched.contains(&at)
+                        && !app.partial.contains_key(&at);
                     let progress = app
                         .partial
                         .get(&at)
@@ -814,10 +832,11 @@ fn shelf(app: &App) -> String {
                         String::new()
                     };
                     format!(
-                        r#"<div class="ep{}{}{}" data-ep="{i}"><div class="thumb">{thumb}{}{tick}{progress}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
+                        r#"<div class="ep{}{}{}{}" data-ep="{i}"><div class="thumb">{thumb}{}{tick}{progress}</div><div class="en">Episode {}{}</div><div class="et">{}</div></div>"#,
                         if focus { " focus" } else { "" },
                         if now { " now" } else { "" },
                         if watched { " watched" } else { "" },
+                        if spoiler { " spoiler" } else { "" },
                         if now { r#"<span class="nowtag">Now Playing</span>"# } else { "" },
                         e.number,
                         if meta.is_empty() { String::new() } else { format!(" · {meta}") },
@@ -836,9 +855,11 @@ fn shelf(app: &App) -> String {
     )
 }
 
-/// The Next Up card's HTML, and its countdown text (drawn into `#nextcount` separately).
-fn next_up(app: &App) -> (String, String) {
-    let none = (String::new(), String::new());
+/// The Next Up card's HTML, its countdown text (drawn into `#nextcount` separately) and how
+/// far the countdown has run, 0 to 1. Apple TV's: a large 16:9 still, full size, with the
+/// episode over it and a Play button that fills as the countdown runs.
+fn next_up(app: &App) -> (String, String, f64) {
+    let none = (String::new(), String::new(), 0.);
     let Some(next) = &app.next else {
         return none;
     };
@@ -849,28 +870,40 @@ fn next_up(app: &App) -> (String, String) {
         return none;
     }
     let label = luma_core::ids::episode_label(next.at);
-    let name = match &next.name {
-        Some(name) => format!("{label} · {name}"),
-        None => label,
-    };
+    let name = next.name.clone().unwrap_or_default();
+    // Hide spoilers: the show's backdrop rather than a still from the episode.
+    let spoiler = app.settings.hide_spoilers && !app.watched.contains(&next.at);
+    let backdrop = app.meta.as_ref().and_then(|m| m.backdrop.clone());
     let still = next
         .still
-        .as_ref()
-        .map(|url| format!(r#"<img class="still" src="{}" alt="">"#, escape(url)))
+        .as_deref()
+        .filter(|_| !spoiler)
+        .map(luma_core::tmdb::full_size);
+    let art = still
+        .or(backdrop)
+        .map(|url| format!(r#"<img class="still" src="{}" alt="">"#, escape(&url)))
+        .unwrap_or_else(|| r#"<div class="still plain"></div>"#.to_owned());
+    let runtime = next
+        .runtime
+        .filter(|minutes| *minutes > 0.)
+        .map(|minutes| format!(r#"<div class="meta">{}</div>"#, short(minutes * 60.)))
         .unwrap_or_default();
-    let count = if app.settings.autoplay_next && !app.ended {
-        let left = (app.settings.countdown_seconds - (now_ms() - shown) / 1000.)
-            .ceil()
-            .max(0.);
-        format!("Playing in {left:.0}")
+    let counting = app.settings.autoplay_next && !app.ended;
+    let countdown = app.settings.countdown_seconds.max(1.);
+    let elapsed = ((now_ms() - shown) / 1000.).clamp(0., countdown);
+    let (count, run) = if counting {
+        let left = (countdown - elapsed).ceil().max(0.);
+        (format!("Playing in {left:.0}"), elapsed / countdown)
     } else {
-        "Press OK to play".into()
+        ("Play".to_owned(), 0.)
     };
     let card = format!(
-        r#"<div class="card">{still}<div class="text"><div class="label">Next Episode</div><div class="name">{}</div><div class="count" id="nextcount"></div><div class="hint">OK Play now · Back Hide</div></div></div>"#,
-        escape(&name)
+        r#"<div class="card"><div class="art">{art}<div class="artshade"></div><div class="over"><div class="label">Up Next</div><div class="ep">{}</div><div class="name">{}</div>{runtime}</div></div><div class="actions"><div class="play"><div class="fill"></div><div class="pl">{}<span id="nextcount"></span></div></div><div class="hint">Back to keep watching</div></div></div>"#,
+        escape(&label),
+        escape(&name),
+        icons::svg(icons::PLAY),
     );
-    (card, count)
+    (card, count, run)
 }
 
 /// `+0.5 s`, `−1.2 s` or `In sync`.

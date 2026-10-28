@@ -44,7 +44,7 @@ pub fn details(key: &str, kind: Kind, id: u64) -> Request {
         key,
         &format!("/{}/{id}", tmdb_kind(kind)),
         &[
-            ("append_to_response", "images,external_ids"),
+            ("append_to_response", "images,external_ids,keywords"),
             ("include_image_language", "en,null"),
         ],
     )
@@ -80,16 +80,32 @@ pub struct Meta {
     pub original_language: String,
     /// ISO 3166-1, e.g. `JP` (shows only).
     pub origin_country: Vec<String>,
+    /// TMDB tags it with a scene during or after the credits.
+    pub stinger: bool,
 }
 
 /// TMDB's Animation genre, for movies and TV alike.
 const ANIMATION: u64 = 16;
+/// TMDB's keywords for a scene after the credits, and one during them.
+const STINGERS: [u64; 2] = [179430, 179431];
 
 impl Meta {
     /// Japanese animation: the Animation genre, from Japan or in Japanese.
     pub fn is_anime(&self) -> bool {
         self.genres.contains(&ANIMATION)
             && (self.original_language == "ja" || self.origin_country.iter().any(|c| c == "JP"))
+    }
+}
+
+/// A TMDB image at full size, for one shown large (Next Up's still). TMDB serves stills only
+/// at w92, w185, w300 and original.
+pub fn full_size(url: &str) -> String {
+    match url.strip_prefix(IMAGES) {
+        Some(rest) => match rest.trim_start_matches('/').split_once('/') {
+            Some((_, path)) => format!("{IMAGES}/original/{path}"),
+            None => url.to_owned(),
+        },
+        None => url.to_owned(),
     }
 }
 
@@ -203,6 +219,17 @@ pub fn parse_details(text: &str, kind: Kind) -> Result<Meta, String> {
                     .collect()
             })
             .unwrap_or_default(),
+        // Movies list keywords under `keywords`, shows under `results`.
+        stinger: ["/keywords/keywords", "/keywords/results"]
+            .iter()
+            .filter_map(|path| v.pointer(path).and_then(Value::as_array))
+            .flatten()
+            .any(|keyword| {
+                keyword
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|id| STINGERS.contains(&id))
+            }),
     })
 }
 
@@ -337,5 +364,9 @@ mod tests {
             r#"{"episodes":[{"episode_number":1,"name":"Winter Is Coming","still_path":"/s.jpg"}]}"#,
         );
         assert_eq!(eps[0].name, "Winter Is Coming");
+        assert_eq!(
+            full_size(eps[0].still.as_deref().unwrap_or_default()),
+            "https://image.tmdb.org/t/p/original/s.jpg"
+        );
     }
 }

@@ -9,7 +9,7 @@
     "subtitle_languages": ["en"],
     "subtitles_on": false,
     "autoplay_next": true,
-    "next_card_seconds_left": 45,
+    "next_up_percent": 99,
     "countdown_seconds": 10
   },
   "dev": { "log_url": "http://192.168.6.10:8081/log" }

@@ -269,6 +269,51 @@ impl BackButton {
     }
 }
 
+/// Opens a card's title: in Luma Player when "Play with" picks it and the card's link carries
+/// an ID, else in the feeds app. `resume` is the Resume or Start Over choice made in Luma.
+fn launch_title(state: &mut State, platform: &Platform, item: feeds::Item, resume: Option<bool>) {
+    // Luma Player when "Play with" picks it and the card's link carries an ID.
+    let play = state
+        .feeds
+        .player
+        .as_ref()
+        .filter(|_| state.feeds.uses_player(&state.preferences))
+        .and_then(|player| {
+            luma_core::launch::Launch::from_nuvio_link(&item.link, item.episode, &item.title).map(
+                |launch| {
+                    let launch = luma_core::launch::Launch { resume, ..launch };
+                    (player.app_id.clone(), launch.to_value())
+                },
+            )
+        });
+    match play {
+        Some((id, params)) if !state.launching => {
+            if platform.webos {
+                state.launching = true;
+                state.feeds.played = true;
+                state.notify(state.preferences.language.t("opening"));
+                platform.send(Request::Play { id, params });
+            } else {
+                // Desktop preview: the player's dev server, in the browser.
+                let url = format!(
+                    "{}?params={}",
+                    desktop_player_url(),
+                    luma_core::http::encode(&params.to_string())
+                );
+                match open_in_browser(&url) {
+                    Ok(()) => state.notify("Opening Luma Player in the browser"),
+                    Err(error) => {
+                        eprintln!("Luma desktop: {error}");
+                        state.notify(format!("Desktop preview: {id} would play {params}"));
+                    }
+                }
+            }
+        }
+        Some(_) => {}
+        None => open_in_feeds_app(state, platform, item.link),
+    }
+}
+
 fn effects(
     effects: Vec<Effect>,
     state: &mut State,
@@ -321,49 +366,12 @@ fn effects(
                 }
             }
             Effect::LaunchTitle(item) => {
-                // Luma Player when "Play with" picks it and the card's link carries an ID.
-                let play = state
-                    .feeds
-                    .player
-                    .as_ref()
-                    .filter(|_| state.feeds.uses_player(&state.preferences))
-                    .and_then(|player| {
-                        luma_core::launch::Launch::from_nuvio_link(
-                            &item.link,
-                            item.episode,
-                            &item.title,
-                        )
-                        .map(|launch| (player.app_id.clone(), launch.to_value()))
-                    });
-                match play {
-                    Some((id, params)) if !state.launching => {
-                        if platform.webos {
-                            state.launching = true;
-                            state.feeds.played = true;
-                            state.notify(state.preferences.language.t("opening"));
-                            platform.send(Request::Play { id, params });
-                        } else {
-                            // Desktop preview: the player's dev server, in the browser.
-                            let url = format!(
-                                "{}?params={}",
-                                desktop_player_url(),
-                                luma_core::http::encode(&params.to_string())
-                            );
-                            match open_in_browser(&url) {
-                                Ok(()) => state.notify("Opening Luma Player in the browser"),
-                                Err(error) => {
-                                    eprintln!("Luma desktop: {error}");
-                                    state.notify(format!(
-                                        "Desktop preview: {id} would play {params}"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    Some(_) => {}
-                    None => open_in_feeds_app(state, platform, item.link),
-                }
+                // A card part-watched resumes straight away, as Apple TV's do; Start Over is
+                // on its page and its quick actions.
+                let resume = item.progress.is_some().then_some(true);
+                launch_title(state, platform, item, resume);
             }
+            Effect::StartOver(item) => launch_title(state, platform, item, Some(false)),
             Effect::OpenInNuvio(target) => open_in_feeds_app(state, platform, target),
             Effect::Trailer(video) => {
                 if !state.launching {

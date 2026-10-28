@@ -21,6 +21,9 @@ pub struct Launch {
     pub url: Option<String>,
     /// Dev only: start here, in seconds.
     pub start: Option<f64>,
+    /// Chosen in Luma: Some(true) resumes where it was left without asking, Some(false) starts
+    /// over. None asks, when there is a place to resume from.
+    pub resume: Option<bool>,
 }
 
 impl Launch {
@@ -38,6 +41,7 @@ impl Launch {
             episode: Some(number),
             url: None,
             start: None,
+            resume: None,
             ..self.clone()
         }
     }
@@ -135,6 +139,9 @@ mod json {
             if let Some(start) = self.start {
                 map.insert("t".into(), json!(start));
             }
+            if let Some(resume) = self.resume {
+                map.insert("resume".into(), json!(resume));
+            }
             Value::Object(map)
         }
 
@@ -174,6 +181,15 @@ mod json {
                 title: text("title"),
                 url: text("url"),
                 start: number("t").filter(|t| *t >= 0.),
+                resume: match object.get("resume") {
+                    Some(Value::Bool(resume)) => Some(*resume),
+                    Some(Value::String(text)) => match text.trim() {
+                        "true" | "1" => Some(true),
+                        "false" | "0" => Some(false),
+                        _ => None,
+                    },
+                    _ => None,
+                },
             };
             launch.validate()?;
             Ok(launch)
@@ -277,6 +293,7 @@ mod tests {
             title: Some("Game of Thrones".into()),
             url: None,
             start: None,
+            resume: Some(false),
         };
         let text = launch.to_value().to_string();
         assert_eq!(Launch::from_json(&text).unwrap(), launch);

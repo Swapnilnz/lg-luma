@@ -141,12 +141,17 @@ pub fn queue_take() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// Audio and subtitles last chosen for one show or film, as Netflix remembers them.
+/// Audio, subtitles and the stream source last used for one show or film, as Netflix and
+/// Stremio remember them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShowPrefs {
     pub audio: Option<String>,
     /// Some(None) means subtitles off; None means never chosen.
     pub subtitles: Option<Option<String>>,
+    /// The stream's `bingeGroup`, which AIOStreams keeps for one source and release style.
+    pub group: Option<String>,
+    /// The stream's name (source and quality, e.g. `[RD+] 4K DV`), for when no group matches.
+    pub stream: Option<String>,
 }
 
 pub fn show_prefs(key: &str) -> ShowPrefs {
@@ -160,17 +165,29 @@ pub fn show_prefs(key: &str) -> ShowPrefs {
             .get("s")
             .and_then(Value::as_str)
             .map(|s| if s == "off" { None } else { Some(s.to_owned()) }),
+        group: entry.get("g").and_then(Value::as_str).map(str::to_owned),
+        stream: entry.get("n").and_then(Value::as_str).map(str::to_owned),
     }
 }
 
 fn save_show_field(key: &str, field: &str, value: &str) {
+    save_show_fields(key, &[(field, Some(value))]);
+}
+
+/// Sets (or, with None, clears) some of a show's remembered fields at once.
+fn save_show_fields(key: &str, fields: &[(&str, Option<&str>)]) {
     let mut all = match json_or(SHOW_PREFS, json!({})) {
         Value::Object(map) => map,
         _ => Map::new(),
     };
     let entry = all.entry(key.to_owned()).or_insert_with(|| json!({}));
     if let Some(entry) = entry.as_object_mut() {
-        entry.insert(field.into(), json!(value));
+        for (field, value) in fields {
+            match value {
+                Some(value) => entry.insert((*field).into(), json!(value)),
+                None => entry.remove(*field),
+            };
+        }
     }
     // A few hundred shows is plenty; past that, start afresh rather than grow forever.
     if all.len() > 400 {
@@ -187,11 +204,18 @@ pub fn save_show_subtitles(key: &str, language: Option<&str>) {
     save_show_field(key, "s", language.unwrap_or("off"));
 }
 
+/// The stream that played, so the show's next episode starts from the same source.
+pub fn save_show_source(key: &str, group: Option<&str>, name: &str) {
+    let name = Some(name).filter(|name| !name.trim().is_empty());
+    save_show_fields(key, &[("g", group), ("n", name)]);
+}
+
 /// What the viewer changes in Settings and Tracks; overrides the config's defaults.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub autoplay_next: bool,
-    pub next_card_seconds: f64,
+    /// How far into an episode Next Up appears, in percent; 0 is when the credits start.
+    pub next_up_percent: f64,
     pub countdown_seconds: f64,
     pub audio_languages: Vec<String>,
     pub subtitle_languages: Vec<String>,
@@ -205,7 +229,13 @@ pub struct Settings {
     pub auto_skip: bool,
     /// Anime starts with Japanese audio and English subtitles (until picked otherwise).
     pub anime_defaults: bool,
+    /// Episodes not watched yet show blurred stills on the shelf, and Next Up shows the
+    /// show's artwork instead of the episode's.
+    pub hide_spoilers: bool,
 }
+
+/// Next Up's choices in Settings: when the credits start, then percentages of the episode.
+pub const NEXT_UP_AT: [f64; 7] = [0., 90., 95., 97., 98., 99., 100.];
 
 impl Settings {
     pub fn load(defaults: &Defaults) -> Self {
@@ -226,10 +256,11 @@ impl Settings {
                 .get("autoplay_next")
                 .and_then(Value::as_bool)
                 .unwrap_or(defaults.autoplay_next),
-            next_card_seconds: v
-                .get("next_card_seconds")
+            next_up_percent: v
+                .get("next_up_percent")
                 .and_then(Value::as_f64)
-                .unwrap_or(defaults.next_card_seconds_left),
+                .filter(|percent| NEXT_UP_AT.iter().any(|at| (at - percent).abs() < 0.01))
+                .unwrap_or(defaults.next_up_percent),
             countdown_seconds: v
                 .get("countdown_seconds")
                 .and_then(Value::as_f64)
@@ -257,6 +288,10 @@ impl Settings {
                 .get("anime_defaults")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            hide_spoilers: v
+                .get("hide_spoilers")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
         }
     }
 
@@ -265,7 +300,7 @@ impl Settings {
             SETTINGS,
             &json!({
                 "autoplay_next": self.autoplay_next,
-                "next_card_seconds": self.next_card_seconds,
+                "next_up_percent": self.next_up_percent,
                 "countdown_seconds": self.countdown_seconds,
                 "audio_languages": self.audio_languages,
                 "subtitle_languages": self.subtitle_languages,
@@ -275,6 +310,7 @@ impl Settings {
                 "subtitle_offset_ms": self.subtitle_offset_ms,
                 "auto_skip": self.auto_skip,
                 "anime_defaults": self.anime_defaults,
+                "hide_spoilers": self.hide_spoilers,
             })
             .to_string(),
         );

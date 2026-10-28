@@ -135,6 +135,8 @@ pub struct Preferences {
     /// "Play with": Luma Player (true) or the feeds app (false). None follows feeds.json's
     /// `player.play_with`.
     pub feed_use_player: Option<bool>,
+    /// A title page's unwatched episodes show no stills, so nothing is given away.
+    pub feed_hide_spoilers: bool,
 }
 
 impl Default for Preferences {
@@ -165,6 +167,7 @@ impl Default for Preferences {
             feed_wide: true,
             keep_awake: true,
             feed_use_player: None,
+            feed_hide_spoilers: true,
         }
     }
 }

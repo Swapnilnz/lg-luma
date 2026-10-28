@@ -19,13 +19,22 @@ pub fn playable(streams: Vec<Stream>) -> Vec<Stream> {
 
 /// The stream to start: the first in the same `bingeGroup` as the last episode's, else the top.
 pub fn binge_pick(streams: &[Stream], group: Option<&str>) -> usize {
-    group
-        .and_then(|group| {
-            streams
-                .iter()
-                .position(|s| s.binge_group.as_deref() == Some(group))
-        })
-        .unwrap_or(0)
+    remembered_pick(streams, group, None)
+}
+
+/// The stream to start for a show: the first in the `bingeGroup` it last played from, else
+/// one with the same name (the same source and quality, such as `[RD+] 4K DV`), else the top.
+pub fn remembered_pick(streams: &[Stream], group: Option<&str>, name: Option<&str>) -> usize {
+    let by_group = group.and_then(|group| {
+        streams
+            .iter()
+            .position(|s| s.binge_group.as_deref() == Some(group))
+    });
+    let by_name = || {
+        name.filter(|name| !name.trim().is_empty())
+            .and_then(|name| streams.iter().position(|s| s.name == name))
+    };
+    by_group.or_else(by_name).unwrap_or(0)
 }
 
 /// Streams tried for one title, so fallback never repeats one and knows when to give up.
@@ -321,6 +330,20 @@ mod tests {
         assert_eq!(binge_pick(&streams, Some("rd|4k")), 1);
         assert_eq!(binge_pick(&streams, Some("other")), 0);
         assert_eq!(binge_pick(&streams, None), 0);
+        let mut named = streams.to_vec();
+        named.push(Stream {
+            name: "[RD+] 1080p".into(),
+            ..stream("https://c", Some("tb|1080"))
+        });
+        assert_eq!(
+            remembered_pick(&named, Some("gone"), Some("[RD+] 1080p")),
+            2
+        );
+        assert_eq!(
+            remembered_pick(&named, Some("rd|4k"), Some("[RD+] 1080p")),
+            1
+        );
+        assert_eq!(remembered_pick(&named, None, Some("")), 0);
     }
 
     #[test]

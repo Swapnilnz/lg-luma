@@ -97,9 +97,11 @@ opens the title's page: logo, year, length, genres and classification (Australia
 else the US one), TMDB's score and, with an MDBList key, IMDb, Rotten Tomatoes, Metacritic and
 Letterboxd scores, the synopsis and director or creators. Below that:
 
-- Buttons: Play or Resume (opens Nuvio), Trailer, and with Trakt: Watchlist, Mark watched,
-  Rate, and for shows Hide from Up Next.
+- Buttons: Play or Resume (opens Nuvio), Start Over when part-watched, Trailer, and with
+  Trakt: Watchlist, Mark watched, Rate, and for shows Hide from Up Next.
 - For shows, season pills and that season's episodes with stills; watched ones are ticked.
+  With Settings > Interface > Hide spoilers (on by default), episodes not watched yet show
+  the show's backdrop, dimmed, instead of their still.
   The page opens on the season of the card's episode, or of the next one to watch. OK on an
   episode opens the show in Nuvio (Nuvio's links open a show, not one episode); holding OK on
   an episode marks it watched on Trakt.
@@ -111,7 +113,8 @@ Letterboxd scores, the synopsis and director or creators. Below that:
 **Holding OK** on a poster opens its quick actions: Details (its page), Play trailer, and with
 Trakt: Add to / Remove from Watchlist, Mark as watched (for shows: the next episode, e.g.
 "Mark S2, E4 watched"), Rate (Loved it 10 · Liked it 8 · It was OK 6 · Didn't like it 4 ·
-Hated it 2) and Hide from Up Next. On Continue Watching cards, Remove from Continue Watching
+Hated it 2) and Hide from Up Next. A part-watched card's Play resumes straight away; Start
+Over (here and on its page) plays from the beginning. On Continue Watching cards, Remove from Continue Watching
 clears the title's paused playback on Trakt (and, for a show, hides it from Up Next, which
 trakt.tv can undo). Trakt rows reload after each change. **Play** still plays
 the trailer straight away. Title pages, Details and trailers need the TMDB key.

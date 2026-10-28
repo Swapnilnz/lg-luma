@@ -1512,6 +1512,8 @@ pub enum Outgoing {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TitleButton {
     Play,
+    /// From the beginning, for a title part-watched.
+    StartOver,
     Trailer,
     Watchlist,
     Watched,
@@ -1580,6 +1582,9 @@ impl TitlePage {
 
     pub fn buttons(&self, trakt: bool) -> Vec<TitleButton> {
         let mut buttons = vec![TitleButton::Play];
+        if self.item.progress.is_some() {
+            buttons.push(TitleButton::StartOver);
+        }
         if self
             .info()
             .is_some_and(|info| info.details.trailer.is_some())
@@ -1709,6 +1714,8 @@ pub enum MenuEntry {
     RateValue(u8),
     HideUpNext,
     RemoveContinue,
+    /// Play from the beginning, for a card part-watched.
+    StartOver,
 }
 
 /// A card's quick actions, opened by holding OK.
@@ -2245,6 +2252,11 @@ impl State {
                         ..page.item.clone()
                     })],
                     TitleButton::Play => vec![],
+                    TitleButton::StartOver if !self.launching => vec![Effect::StartOver(Item {
+                        link,
+                        ..page.item.clone()
+                    })],
+                    TitleButton::StartOver => vec![],
                     TitleButton::Trailer => self.play_trailer().unwrap_or_default(),
                     TitleButton::Watchlist => {
                         self.toggle_watchlist(&link);
@@ -2272,9 +2284,13 @@ impl State {
                     .shown_episodes()
                     .and_then(|episodes| episodes.get(index))
                     .map(|episode| [episode.season, episode.number]);
+                // Another episode than the card's has no place to resume from here: the player
+                // finds its own, and asks.
+                let same = episode.is_none() || episode == page.item.episode;
                 vec![Effect::LaunchTitle(Item {
                     link,
                     episode: episode.or(page.item.episode),
+                    progress: page.item.progress.filter(|_| same),
                     ..page.item.clone()
                 })]
             }
@@ -2368,6 +2384,9 @@ impl State {
             let mut entries = Vec::new();
             if self.feeds.can_search {
                 entries.push(MenuEntry::Details);
+            }
+            if item.progress.is_some() {
+                entries.push(MenuEntry::StartOver);
             }
             if self.feeds.trakt && continuing(&item) {
                 entries.push(MenuEntry::RemoveContinue);
@@ -2507,6 +2526,14 @@ impl State {
                 self.close_menu();
                 self.trakt_action(&link, TraktAction::HideUpNext);
                 vec![]
+            }
+            MenuEntry::StartOver => {
+                self.close_menu();
+                if self.launching {
+                    vec![]
+                } else {
+                    vec![Effect::StartOver(item)]
+                }
             }
             MenuEntry::RemoveContinue => {
                 self.close_menu();

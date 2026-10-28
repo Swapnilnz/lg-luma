@@ -39,6 +39,18 @@ pub fn wall_clock(hours: u32, minutes: u32) -> String {
     format!("{hour}:{:02} {suffix}", minutes % 60)
 }
 
+/// How fast a held Left or Right scrubs, in seconds of video per second held: it speeds up
+/// the longer the button is down, as Apple TV's does.
+pub fn scrub_speed(held_ms: f64) -> f64 {
+    match held_ms {
+        ms if ms < 1_000. => 30.,
+        ms if ms < 2_000. => 60.,
+        ms if ms < 3_500. => 120.,
+        ms if ms < 5_000. => 240.,
+        _ => 480.,
+    }
+}
+
 /// Milliseconds since the epoch from an RFC 3339 UTC time such as `2026-10-27T09:12:00.000Z`.
 /// Offsets other than `Z` are applied; anything else is None.
 pub fn parse_rfc3339_ms(text: &str) -> Option<f64> {
@@ -89,6 +101,14 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrubbing_speeds_up_while_held() {
+        assert_eq!(scrub_speed(0.), 30.);
+        assert!(scrub_speed(1_500.) > scrub_speed(500.));
+        assert!(scrub_speed(4_000.) > scrub_speed(2_500.));
+        assert_eq!(scrub_speed(60_000.), 480.);
+    }
 
     #[test]
     fn formats_clocks() {

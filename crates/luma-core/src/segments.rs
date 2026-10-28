@@ -1,4 +1,5 @@
-//! Skip Intro and Skip Recap, from IntroDB's community timestamps (https://introdb.app/docs):
+//! Skip Intro, Skip Recap and Skip to the post-credits scene, from IntroDB's community
+//! timestamps (https://introdb.app/docs):
 //! `GET {base}/segments?imdb_id=tt…&season=1&episode=2`, no key needed for reads.
 
 use crate::http::{Request, encode};
@@ -25,12 +26,17 @@ pub struct Segments {
     pub recap: Option<Span>,
     /// The end credits: Next Up shows when they start.
     pub outro: Option<Span>,
+    /// A scene after (or during) the credits: Next Up waits for it, and the credits offer a
+    /// skip straight to it.
+    pub post_credits: Option<Span>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
     Intro,
     Recap,
+    /// From the credits to the scene after them.
+    PostCredits,
 }
 
 impl Skip {
@@ -38,6 +44,7 @@ impl Skip {
         match self {
             Skip::Intro => "Skip Intro",
             Skip::Recap => "Skip Recap",
+            Skip::PostCredits => "Skip to Post-Credits Scene",
         }
     }
 }
@@ -51,6 +58,20 @@ impl Segments {
                 span.filter(|s| s.offers_skip(seconds))
                     .map(|s| (kind, s.end))
             })
+            .or_else(|| self.credits_skip(seconds))
+    }
+
+    /// In the credits before a post-credits scene: a skip to where the scene starts.
+    fn credits_skip(&self, seconds: f64) -> Option<(Skip, f64)> {
+        let scene = self.post_credits?;
+        let credits = self.outro?;
+        (scene.start > credits.start + 5. && seconds >= credits.start && seconds < scene.start - 2.)
+            .then_some((Skip::PostCredits, scene.start))
+    }
+
+    /// A post-credits scene still to come at `seconds`: Next Up waits until it has played.
+    pub fn scene_ahead(&self, seconds: f64) -> bool {
+        self.post_credits.is_some_and(|scene| seconds < scene.end)
     }
 }
 
@@ -92,6 +113,7 @@ pub fn parse(text: &str) -> Segments {
         intro: span("intro"),
         recap: span("recap"),
         outro: span("outro"),
+        post_credits: span("post_credits").or_else(|| span("post-credits")),
     }
 }
 
@@ -123,12 +145,33 @@ mod tests {
                 end: 55.,
             }),
             outro: None,
+            post_credits: None,
         };
         assert_eq!(segments.skip_at(10.), Some((Skip::Recap, 55.)));
         assert_eq!(segments.skip_at(57.), None);
         assert_eq!(segments.skip_at(60.), Some((Skip::Intro, 120.)));
         assert_eq!(segments.skip_at(118.5), None);
         assert_eq!(segments.skip_at(200.), None);
+    }
+
+    #[test]
+    fn credits_offer_the_post_credits_scene() {
+        let segments = Segments {
+            outro: Some(Span {
+                start: 2600.,
+                end: 2700.,
+            }),
+            post_credits: Some(Span {
+                start: 2705.,
+                end: 2760.,
+            }),
+            ..Segments::default()
+        };
+        assert_eq!(segments.skip_at(2500.), None);
+        assert_eq!(segments.skip_at(2610.), Some((Skip::PostCredits, 2705.)));
+        assert_eq!(segments.skip_at(2704.), None);
+        assert!(segments.scene_ahead(2710.));
+        assert!(!segments.scene_ahead(2760.));
     }
 
     #[cfg(feature = "json")]

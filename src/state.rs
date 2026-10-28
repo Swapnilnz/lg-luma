@@ -177,6 +177,8 @@ pub enum Effect {
     /// Open a card's title: in Luma Player when it is set up ("Play with"), else the feeds
     /// app on its `contentTarget` deep link.
     LaunchTitle(crate::feeds::Item),
+    /// The same, from the beginning: Luma Player skips its Resume question.
+    StartOver(crate::feeds::Item),
     /// Open a title in the feeds app (Nuvio) this once, whatever "Play with" says.
     OpenInNuvio(String),
     /// Listen for a search through the remote's microphone; the request's number.
@@ -623,6 +625,15 @@ impl State {
             self.feeds.page_slide = None;
         }
         let drawn = self.drawn_scroll();
+        // A title preview places its row itself (below the details) and slides Home there:
+        // revealing the card as well fought that slide and pulled the row back to the top.
+        let previewing = self.page == Page::Home
+            && matches!(self.focus, Target::Feed(..))
+            && self
+                .feeds
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.hiding.is_none());
         let previous = self.scroll;
         let previous_home = self.home_scroll;
         let previous_feeds = self.feeds.scroll.clone();
@@ -649,7 +660,7 @@ impl State {
                     | Target::Sidebar(_)
             ) {
                 self.scroll = 0.;
-            } else if control.scrollable {
+            } else if control.scrollable && !previewing {
                 let top = if self.page == Page::Apps {
                     164.8
                 } else {
@@ -1716,6 +1727,9 @@ impl State {
                     12 => self.preferences.feed_hero = !self.preferences.feed_hero,
                     14 => self.preferences.keep_awake = !self.preferences.keep_awake,
                     15 => self.preferences.feed_wide = !self.preferences.feed_wide,
+                    17 => {
+                        self.preferences.feed_hide_spoilers = !self.preferences.feed_hide_spoilers;
+                    }
                     16 => {
                         self.preferences.feed_use_player =
                             Some(!self.feeds.uses_player(&self.preferences));

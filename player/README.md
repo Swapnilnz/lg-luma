@@ -17,7 +17,7 @@ cp player/config.example.json player/config.local.json   # then fill it in (giti
 | `subtitle_addons` | Stremio subtitle addon manifest URLs |
 | `tmdb.api_key` | v3 key or v4 token: artwork, IMDb lookups, episode names, Next Up |
 | `trakt.client_id` | The same Trakt app as Luma's (`client_secret` only for old apps) |
-| `defaults` | Languages, subtitles on/off, autoplay, Next Up timing; overridden by Settings on the TV |
+| `defaults` | Languages, subtitles on/off, autoplay, Next Up timing (`next_up_percent`, 0 for the credits); overridden by Settings on the TV |
 | `dev.log_url` | Dev builds post their log here (`node tools/devlog.mjs`) |
 | `introdb` | Skip Intro / Recap from [IntroDB](https://introdb.app/docs): on unless `"enabled": false`; `base_url` overrides the API |
 
@@ -107,11 +107,13 @@ brings the controls back; OK or Play resumes.
 
 - **Start:** the TMDB backdrop, with the title's logo (or name) filling in as loading goes on:
   details, streams found, the stream loading, its first frame. It stays until the picture
-  starts. AIOStreams gets 15 s and one automatic retry. The top stream plays, or the one in
-  the same `bingeGroup` as the last episode.
+  starts. AIOStreams gets 15 s and one automatic retry. The top stream plays, or, for a
+  show, one from the source it last played from (its `bingeGroup`, else the same stream
+  name such as `[RD+] 4K DV`), remembered per show across launches as Stremio does.
 - **Resume:** the newer of Trakt's playback point and the local one (saved every 15 s). Past
   2 minutes and before 95% it asks "Resume from 1:12:30" or "Start over"; the stream buffers
-  meanwhile. An autoplayed next episode resumes without asking.
+  meanwhile. An autoplayed next episode resumes without asking, and so does a title opened
+  with Resume or Start Over chosen in Luma (`"resume": true` or `false` in the launch params).
 - **Fallback:** an error, no picture in 12 s, or a 20 s stall in the first minute moves to the
   next stream with a toast; after 5 the picker opens with each failure shown. Later stalls of
   15 s reload the same stream at the position once, then fall back. A cached list (10 min) is
@@ -120,8 +122,10 @@ brings the controls back; OK or Play resumes.
   pause and stop scrobbles; at most one call per 10 s; exit before 80% pauses, at 80% or later
   stops (watched). Failed calls queue locally and replay on the next launch.
 - **Next Up:** at 90% the next episode (TMDB seasons, specials skipped, unaired withheld) and
-  its streams are fetched; when the credits start (IntroDB) or 45 s before the end, a card
-  counts down 10 s, holding while paused. OK plays now, Back hides it. A season finale moves
+  its streams are fetched; at 99% of the episode (Settings: 90 to 99%, at the end, or when
+  IntroDB says the credits start), an Apple TV-style card shows its full-size still, name and
+  runtime, and its Play button fills over the 10 s countdown, holding while paused. A
+  post-credits scene plays first. OK plays now, Back hides it. A season finale moves
   to the next season; a series finale shows no card. The card waits until the episode has
   played a minute and its duration has held steady for 30 s, and autoplay never resumes an
   old watch past 80%, so it can't chain into a loop.
@@ -138,9 +142,16 @@ brings the controls back; OK or Play resumes.
   English subtitles, unless you've picked otherwise for that show; Settings can turn it off.
 - **Skip Intro / Skip Recap:** IntroDB's community timestamps, where an episode has them. The
   button shows for the segment; with the controls down OK skips and Back hides it. Settings
-  can skip automatically. IntroDB's credits start, when known, is when Next Up appears.
+  can skip automatically.
+- **Post-credits scenes:** IntroDB's `post_credits` timestamps, or TMDB's "after/during
+  credits stinger" keywords for films. As the credits start a toast says a scene is coming,
+  and with IntroDB's timestamps a Skip to Post-Credits Scene button jumps to it (never
+  automatic). Next Up waits until the scene has played.
+- **Scrubbing:** Left/Right seek 10 s a press; held, faster the longer they are held (30 s of
+  video a second, rising to 8 minutes a second after 5 s).
 - **Episodes shelf:** watched episodes get a tick and partly watched ones a progress bar, from
-  Trakt (and the player's own resume points).
+  Trakt (and the player's own resume points). With Hide spoilers on (Settings, on by default)
+  stills of episodes not started are blurred, and Next Up shows the show's backdrop instead.
 - **On a laptop**, a stream whose audio Chrome can't decode (Dolby, DTS) plays silent; after
   6 s a toast says so. The TV decodes those in hardware.
 

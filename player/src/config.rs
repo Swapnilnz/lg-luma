@@ -13,7 +13,8 @@ pub struct Defaults {
     pub subtitle_languages: Vec<String>,
     pub subtitles_on: bool,
     pub autoplay_next: bool,
-    pub next_card_seconds_left: f64,
+    /// Percent of an episode at which Next Up appears; 0 waits for the credits.
+    pub next_up_percent: f64,
     pub countdown_seconds: f64,
 }
 
@@ -79,10 +80,10 @@ pub fn load() -> Config {
             autoplay_next: get("autoplay_next")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
-            next_card_seconds_left: get("next_card_seconds_left")
+            next_up_percent: get("next_up_percent")
                 .and_then(Value::as_f64)
-                .unwrap_or(45.)
-                .clamp(10., 300.),
+                .unwrap_or(99.)
+                .clamp(0., 100.),
             countdown_seconds: get("countdown_seconds")
                 .and_then(Value::as_f64)
                 .unwrap_or(10.)
