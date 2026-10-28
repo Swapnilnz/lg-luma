@@ -31,6 +31,17 @@ Luma side: add the `player` block to `feeds.json` (see `feeds.md`, "Luma Player"
 cargo test -p luma-core
 ```
 
+**Everything locally** (Luma's desktop preview, with posters opening Luma Player in your
+browser, served live so saves reload it):
+
+```sh
+sh scripts/dev-local.sh             # --player for the player alone, on a sample episode
+```
+
+It needs `player/config.local.json` and a `feeds.json` with the `player` block in the repo
+folder. `NIXGL=nixGLNvidia` (or `nixGLMesa`) if Intel's doesn't suit your GPU; `PORT=` for
+another port; `LUMA_BROWSER=` to pick the browser.
+
 **1. Laptop** (Chrome, device toolbar at 1920 x 1080):
 
 ```sh

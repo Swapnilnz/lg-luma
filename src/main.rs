@@ -343,7 +343,21 @@ fn effects(
                             state.notify(state.preferences.language.t("opening"));
                             platform.send(Request::Play { id, params });
                         } else {
-                            state.notify(format!("Desktop preview: {id} would play {params}"));
+                            // Desktop preview: the player's dev server, in the browser.
+                            let url = format!(
+                                "{}?params={}",
+                                desktop_player_url(),
+                                luma_core::http::encode(&params.to_string())
+                            );
+                            match open_in_browser(&url) {
+                                Ok(()) => state.notify("Opening Luma Player in the browser"),
+                                Err(error) => {
+                                    eprintln!("Luma desktop: {error}");
+                                    state.notify(format!(
+                                        "Desktop preview: {id} would play {params}"
+                                    ));
+                                }
+                            }
                         }
                     }
                     Some(_) => {}
@@ -358,7 +372,10 @@ fn effects(
                         state.notify("Opening the trailer...");
                         platform.send(Request::YouTube(video));
                     } else {
-                        state.notify(format!("Desktop preview: YouTube would play {video}"));
+                        let url = format!("https://www.youtube.com/watch?v={video}");
+                        if open_in_browser(&url).is_err() {
+                            state.notify(format!("Desktop preview: YouTube would play {video}"));
+                        }
                     }
                 }
             }
@@ -577,6 +594,37 @@ fn weather_tick(state: &mut State, service: &weather_service::Service, visible: 
             }
         }
     }
+}
+
+/// Where the desktop preview finds Luma Player: its Trunk dev server, or `LUMA_PLAYER_URL`.
+fn desktop_player_url() -> String {
+    std::env::var("LUMA_PLAYER_URL")
+        .ok()
+        .filter(|url| url.starts_with("http"))
+        .unwrap_or_else(|| "http://localhost:8080/".into())
+}
+
+/// Opens a URL in the desktop's browser, for the preview: `LUMA_BROWSER` if set, Windows'
+/// browser under WSL, else the desktop's opener.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let wsl = std::fs::read_to_string("/proc/version")
+        .is_ok_and(|version| version.to_ascii_lowercase().contains("microsoft"));
+    let custom = std::env::var("LUMA_BROWSER")
+        .ok()
+        .filter(|b| !b.trim().is_empty());
+    let candidates: Vec<&str> = match &custom {
+        Some(browser) => vec![browser.as_str()],
+        None if wsl => vec!["wslview", "explorer.exe"],
+        None if cfg!(target_os = "macos") => vec!["open"],
+        None => vec!["xdg-open"],
+    };
+    for program in candidates {
+        // Spawned, not waited on: the preview keeps running while the browser opens.
+        if std::process::Command::new(program).arg(url).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("no browser opener found (set LUMA_BROWSER)".into())
 }
 
 /// Opens a card's deep link in the feeds app (Nuvio).
