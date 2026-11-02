@@ -252,6 +252,25 @@ pub struct Feeds {
     pub sheet: Option<Sheet>,
     /// Home sliding between its first screen and the Top Shelf: from which scroll, since when.
     pub page_slide: Option<(f32, Instant)>,
+    /// Settings > Lists: feeds.json's own MDBList rows (until Settings changes them), whether
+    /// an MDBList key is set, lists found to add, and the list being moved.
+    pub config_lists: Vec<crate::model::FeedList>,
+    pub mdblist: bool,
+    pub list_query: String,
+    pub list_results: Option<Result<Vec<ListInfo>, String>>,
+    pub list_moving: Option<usize>,
+    /// The lists changed: `main` restarts the feed worker with them.
+    pub lists_changed: bool,
+}
+
+/// An MDBList list offered in Settings > Lists > Add.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListInfo {
+    pub title: String,
+    /// `mdblist:<id>`.
+    pub source: String,
+    /// "by user · 120 titles".
+    pub detail: String,
 }
 
 impl Feeds {
@@ -1512,6 +1531,8 @@ pub enum Outgoing {
     Season(String, u32),
     TraktState(String),
     Trakt(String, TraktAction),
+    /// MDBList lists to add: your own and the most liked, or those matching a search.
+    Lists(Option<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

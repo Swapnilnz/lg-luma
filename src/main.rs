@@ -8,6 +8,8 @@ mod branding;
 mod damage;
 mod diagnostics;
 mod egl_damage;
+#[path = "feed-lists.rs"]
+mod feed_lists;
 mod feeds;
 #[path = "feeds-service.rs"]
 mod feeds_service;
@@ -712,6 +714,7 @@ fn feeds_tick(
             }
             feeds::Outgoing::TraktState(link) => service.trakt_state(link),
             feeds::Outgoing::Trakt(link, action) => service.trakt_action(link, action),
+            feeds::Outgoing::Lists(query) => service.lists(query),
         }
     }
     while let Ok(response) = service.receiver.try_recv() {
@@ -748,6 +751,7 @@ fn feeds_tick(
                 state.dirty = true;
             }
             feeds_service::Response::Action { link, result } => state.trakt_done(link, result),
+            feeds_service::Response::Lists(result) => state.lists_found(result),
         }
     }
     // A title page may have asked for a season while its data arrived: send it now.
@@ -942,7 +946,11 @@ fn run() -> Result<(), String> {
     let feeds_state_path = feeds_service::state_path(&preferences_path);
     let feeds_saved = feeds_service::load_state(&feeds_state_path);
     let feeds_config = match feeds_service::load_config(&feeds_config_path) {
-        Ok(Some(config)) => {
+        Ok(Some(mut config)) => {
+            // Settings > Lists' MDBList rows, in place of feeds.json's.
+            state.feeds.config_lists = feeds_service::config_lists(&config);
+            state.feeds.mdblist = feeds_service::has_mdblist(&config);
+            feeds_service::apply_lists(&mut config, state.preferences.feed_lists.as_deref());
             eprintln!(
                 "Luma feeds: {} rows from {}",
                 config.rows.len(),
@@ -976,8 +984,12 @@ fn run() -> Result<(), String> {
             None
         }
     };
-    let feeds_service =
-        feeds_service::Service::new(feeds_config, feeds_saved, feeds_state_path, local_offset);
+    let mut feeds_service = feeds_service::Service::new(
+        feeds_config,
+        feeds_saved,
+        feeds_state_path.clone(),
+        local_offset,
+    );
     state.feeds.can_search = feeds_service.can_search();
     state.feeds.trakt = feeds_service.trakt();
     let platform = Platform::new(
@@ -1358,6 +1370,29 @@ fn run() -> Result<(), String> {
             }
         }
         weather_tick(&mut state, &weather_service, visible);
+        // Settings > Lists changed the MDBList rows: the feed worker starts again with them.
+        if std::mem::take(&mut state.feeds.lists_changed) {
+            match feeds_service::load_config(&feeds_config_path) {
+                Ok(Some(mut config)) => {
+                    feeds_service::apply_lists(
+                        &mut config,
+                        state.preferences.feed_lists.as_deref(),
+                    );
+                    let saved = feeds_service::load_state(&feeds_state_path);
+                    state.feeds.near = (0..4).collect();
+                    state.set_feed_rows(feeds_service::initial_rows(&config, &saved));
+                    feeds_service = feeds_service::Service::new(
+                        Some(config),
+                        saved,
+                        feeds_state_path.clone(),
+                        local_offset,
+                    );
+                    eprintln!("Luma feeds: rows changed in Settings; worker restarted");
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("Luma feeds: {error}"),
+            }
+        }
         feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
         state.ambient_tick(last_input.elapsed(), visible);
         keep_awake_tick(&state, audio.as_ref(), &mut tone_playing, &mut last_tone);

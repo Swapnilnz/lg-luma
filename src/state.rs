@@ -12,6 +12,8 @@ pub const WEATHER_SECTION: usize = 2;
 pub const INPUTS_SECTION: usize = 3;
 pub const SYSTEM_SECTION: usize = 4;
 pub const SECTION_COUNT: usize = 5;
+/// Settings > Lists: the MDBList rows on Home, after System, shown with an MDBList key.
+pub const LISTS_SECTION: usize = 5;
 pub const APPS_COLUMNS: usize = 6;
 /// Automatic inventory retries before the error shows: with the 6.5 s Luna timeout about 50 s.
 pub const INVENTORY_RETRIES: u32 = 5;
@@ -96,6 +98,13 @@ pub enum Target {
     WeatherSearch,
     WeatherClear,
     WeatherResult(usize),
+    /// Settings > Lists: Add a list, each list (OK moves it), and its remove button.
+    ListAdd,
+    ListItem(usize),
+    ListRemove(usize),
+    /// Settings > Lists > Add: the search field, and the lists found.
+    ListSearch,
+    ListResult(usize),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -147,6 +156,8 @@ pub enum Subpage {
     Temperature,
     Language,
     TextRendering,
+    /// Settings > Lists > Add a list.
+    AddList,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -156,6 +167,8 @@ pub enum TextField {
     Location,
     Name,
     InputName,
+    /// Settings > Lists > Add: searching MDBList.
+    ListSearch,
 }
 
 #[derive(Clone, Copy)]
@@ -748,8 +761,18 @@ impl State {
             .count()
     }
 
+    /// Settings' sections: Lists joins them when feeds.json has an MDBList key.
+    pub fn section_count(&self) -> usize {
+        if self.feeds.mdblist {
+            SECTION_COUNT + 1
+        } else {
+            SECTION_COUNT
+        }
+    }
+
     fn section_entry(&self) -> Target {
         match self.section {
+            LISTS_SECTION => Target::ListAdd,
             1 => Target::Background(
                 BACKGROUNDS
                     .iter()
@@ -768,7 +791,7 @@ impl State {
         }
     }
 
-    fn close_subpage(&mut self) {
+    pub(crate) fn close_subpage(&mut self) {
         if self.subpage == Some(Subpage::WeatherLocation) {
             self.weather.cancel_search();
         }
@@ -791,6 +814,7 @@ impl State {
             Some(Subpage::Temperature) => Target::WeatherTemperature,
             Some(Subpage::Language) => Target::Setting(4),
             Some(Subpage::TextRendering) => Target::Setting(7),
+            Some(Subpage::AddList) => Target::ListAdd,
             None => Target::Sidebar(self.section),
         };
         self.scroll = 0.;
@@ -897,6 +921,9 @@ impl State {
                     return vec![];
                 }
             }
+            if let Some(effects) = self.lists_direction(direction, controls) {
+                return effects;
+            }
             let setting_rows = match self.subpage {
                 Some(Subpage::Greeting) => Some([Target::GreetingName, Target::GreetingNameClear]),
                 Some(Subpage::AppNames) => Some([Target::AppNamesHome, Target::AppNamesApps]),
@@ -996,9 +1023,10 @@ impl State {
                         },
                         controls,
                     ),
-                    Direction::Down => {
-                        self.focus(Target::Sidebar((index + 1) % SECTION_COUNT), controls)
-                    }
+                    Direction::Down => self.focus(
+                        Target::Sidebar((index + 1) % self.section_count()),
+                        controls,
+                    ),
                     Direction::Left => {}
                 }
                 return vec![];
@@ -1316,6 +1344,17 @@ impl State {
                 self.dirty = true;
                 return;
             }
+            if self.keyboard_field == TextField::ListSearch {
+                let query = &mut self.feeds.list_query;
+                let length = query.chars().count();
+                query.extend(
+                    text.chars()
+                        .filter(|c| !c.is_control())
+                        .take(80usize.saturating_sub(length)),
+                );
+                self.dirty = true;
+                return;
+            }
             if self.keyboard_field == TextField::InputName {
                 let length = self.input_name.chars().count();
                 self.input_name.extend(
@@ -1351,6 +1390,8 @@ impl State {
                 self.greeting_name_draft.pop();
             } else if self.keyboard_field == TextField::InputName {
                 self.input_name.pop();
+            } else if self.keyboard_field == TextField::ListSearch {
+                self.feeds.list_query.pop();
             } else {
                 self.query.pop();
             }
@@ -1384,6 +1425,9 @@ impl State {
                 search.edited = None;
             }
             return vec![];
+        }
+        if self.keyboard_field == TextField::ListSearch {
+            return self.search_lists();
         }
         if self.keyboard_field == TextField::Name {
             let name = std::mem::take(&mut self.greeting_name_draft);
@@ -1443,6 +1487,8 @@ impl State {
             self.greeting_name_draft = query;
         } else if self.keyboard_field == TextField::InputName {
             self.input_name = query;
+        } else if self.keyboard_field == TextField::ListSearch {
+            self.feeds.list_query = query;
         } else {
             self.query = query;
             self.scroll = 0.;
@@ -1455,6 +1501,7 @@ impl State {
             TextField::Location => &self.weather.query,
             TextField::Name => &self.greeting_name_draft,
             TextField::InputName => &self.input_name,
+            TextField::ListSearch => &self.feeds.list_query,
             TextField::Apps => &self.query,
             TextField::Search => self
                 .feeds
@@ -1468,6 +1515,9 @@ impl State {
         if field == TextField::Name {
             // SDL-webOS cannot pre-fill the system keyboard's text model.
             self.greeting_name_draft.clear();
+        }
+        if field == TextField::ListSearch {
+            self.feeds.list_query.clear();
         }
         if field == TextField::InputName {
             // The TV keyboard starts empty, so a new name replaces the old one.
@@ -1483,6 +1533,7 @@ impl State {
                 TextField::Location => Target::WeatherQuery,
                 TextField::Name => Target::GreetingName,
                 TextField::InputName => Target::InputRename,
+                TextField::ListSearch => Target::ListSearch,
                 TextField::Apps => Target::Search,
                 TextField::Search => Target::SearchField,
             };
@@ -1512,6 +1563,7 @@ impl State {
             TextField::Location => Target::WeatherSearch,
             TextField::Name => Target::GreetingName,
             TextField::InputName => Target::InputRename,
+            TextField::ListSearch => Target::ListSearch,
             TextField::Apps => Target::Search,
             TextField::Search => Target::SearchField,
         }
@@ -1525,6 +1577,11 @@ impl State {
                 Target::RecentRetry => self.recent_request(Command::List),
                 _ => vec![],
             };
+        }
+        if self.overlay.is_none()
+            && let Some(effects) = self.lists_activate()
+        {
+            return effects;
         }
         if self.overlay.is_none()
             && let Some(effects) = self.menu_activate()
@@ -1834,7 +1891,8 @@ impl State {
                         Subpage::WeatherLocation
                         | Subpage::Greeting
                         | Subpage::AppNames
-                        | Subpage::Clock,
+                        | Subpage::Clock
+                        | Subpage::AddList,
                     ) => {
                         return vec![];
                     }
@@ -1919,6 +1977,7 @@ impl State {
                     TextField::Location => self.weather.edit(String::new()),
                     TextField::Name => self.greeting_name_draft.clear(),
                     TextField::InputName => self.input_name.clear(),
+                    TextField::ListSearch => self.feeds.list_query.clear(),
                     TextField::Apps => self.query.clear(),
                     TextField::Search => {
                         if let Some(search) = &mut self.feeds.search {
@@ -1943,7 +2002,7 @@ impl State {
     pub fn back(&mut self) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
-        if self.moving.take().is_some() {
+        if self.moving.take().is_some() || self.feeds.list_moving.take().is_some() {
             return vec![];
         }
         if let Some(overlay) = self.overlay.take() {

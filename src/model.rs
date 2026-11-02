@@ -139,6 +139,16 @@ pub struct Preferences {
     pub feed_hide_spoilers: bool,
     /// OK on a poster opens its title page (true) or plays it at once (false).
     pub feed_select_details: bool,
+    /// The MDBList rows on Home, in order, as Settings > Lists keeps them. None follows
+    /// feeds.json's `mdblist:` rows.
+    pub feed_lists: Option<Vec<FeedList>>,
+}
+
+/// One MDBList row: its title and its `mdblist:` source.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeedList {
+    pub title: String,
+    pub source: String,
 }
 
 impl Default for Preferences {
@@ -171,6 +181,7 @@ impl Default for Preferences {
             feed_use_player: None,
             feed_hide_spoilers: true,
             feed_select_details: true,
+            feed_lists: None,
         }
     }
 }

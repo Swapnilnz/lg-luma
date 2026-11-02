@@ -1802,5 +1802,15 @@
     "ru": "Тестовая карточка для прокрутки; приложение не запускается.",
     "pl": "Karta testowa do przewijania; brak aplikacji do uruchomienia.",
     "fr": "Carte de test pour le défilement ; aucune application à lancer."
+  },
+  "homeLists": {
+    "en": "Lists",
+    "de": "Listen",
+    "es": "Listas",
+    "pt": "Listas",
+    "it": "Liste",
+    "ru": "Списки",
+    "pl": "Listy",
+    "fr": "Listes"
   }
 }

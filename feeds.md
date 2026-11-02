@@ -47,6 +47,13 @@ Sources:
   your most recently watched shows each refresh.
 - `mdblist:USER/LIST-SLUG` or `mdblist:LIST_ID`: an MDBList list.
 
+**Settings > Lists** (shown when `mdblist.api_key` is set) keeps the MDBList rows on the TV:
+Add a list offers your own MDBList lists and the most liked ones, or searches MDBList; OK on
+a list picks it up so Up and Down move it (OK again puts it down); the button beside it
+removes it. Its lists then take the place of the `mdblist:` rows in `feeds.json` (where the
+first of those was), and the rows reload at once. Until Settings changes them it shows
+`feeds.json`'s own.
+
 `trakt:` rows reload every `trakt_refresh_minutes` and on returning to Home; `smart:` rows
 need the Trakt sign-in too but reload with `refresh_minutes`, as lists do.
 

@@ -3636,6 +3636,139 @@ fn weather_settings(out: &mut Scene, state: &State, assets: &Assets) {
     );
 }
 
+/// Settings > Lists: Add a list, then each MDBList row on Home with its remove button. OK on
+/// a list picks it up to move with Up and Down.
+fn lists_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let s = state.scroll;
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ListAdd,
+            rect: Rect::new(640., 164.8 - s, 1120., 72.),
+            title: "Add a list",
+            icon: Some("bookmark"),
+            value: None,
+            description: None,
+            selected: false,
+            chevron: true,
+        },
+    );
+    let lists = state.lists();
+    if lists.is_empty() {
+        out.text(
+            "No MDBList rows on Home yet.",
+            Rect::new(664., 264. - s, 1000., 24.),
+            text(18.4, 450, 0.),
+            c(0xffffff, 0.55),
+            false,
+        );
+    }
+    for (index, list) in lists.iter().enumerate() {
+        let y = 164.8 + (index + 1) as f32 * 102.7 - s;
+        let moving = state.feeds.list_moving == Some(index);
+        let detail = if moving {
+            "Moving: Up and Down to move, OK to finish".to_owned()
+        } else {
+            format!(
+                "{} · OK to move",
+                list.source.trim_start_matches("mdblist:")
+            )
+        };
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: Target::ListItem(index),
+                rect: Rect::new(640., y, 1030., 90.7),
+                title: &list.title,
+                icon: Some(if moving { "grid" } else { "tv" }),
+                value: None,
+                description: Some(detail.as_str()),
+                selected: moving,
+                chevron: false,
+            },
+        );
+        let remove = Rect::new(1688., y + 9.35, 72., 72.);
+        let focused = state.focus == Target::ListRemove(index);
+        out.pill(remove, focused, false);
+        out.icon(
+            assets,
+            "close",
+            remove.inset(25.),
+            if focused { c(0x2c2c2c, 1.) } else { WHITE },
+        );
+        if focused {
+            out.ring(remove, remove.h / 2.);
+        }
+        out.control(Target::ListRemove(index), remove, true);
+    }
+}
+
+/// Settings > Lists > Add a list: a search field over your MDBList lists and the most liked
+/// ones (or what the search found).
+fn add_list_settings(out: &mut Scene, state: &State, assets: &Assets) {
+    let s = state.scroll;
+    let query = if state.feeds.list_query.is_empty() {
+        "Search MDBList".to_owned()
+    } else {
+        state.feeds.list_query.clone()
+    };
+    row(
+        out,
+        state,
+        assets,
+        Row {
+            target: Target::ListSearch,
+            rect: Rect::new(640., 164.8 - s, 1120., 72.),
+            title: &query,
+            icon: Some("search"),
+            value: None,
+            description: None,
+            selected: false,
+            chevron: false,
+        },
+    );
+    let message = match &state.feeds.list_results {
+        None => Some("Finding lists...".to_owned()),
+        Some(Err(error)) => Some(format!("MDBList: {error}")),
+        Some(Ok(lists)) if lists.is_empty() => Some("No lists found".to_owned()),
+        Some(Ok(_)) => None,
+    };
+    if let Some(message) = message {
+        out.text(
+            message,
+            Rect::new(664., 264. - s, 1000., 24.),
+            text(18.4, 450, 0.),
+            c(0xffffff, 0.55),
+            false,
+        );
+        return;
+    }
+    let Some(Ok(lists)) = &state.feeds.list_results else {
+        return;
+    };
+    for (index, list) in lists.iter().enumerate() {
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: Target::ListResult(index),
+                rect: Rect::new(640., 164.8 + (index + 1) as f32 * 102.7 - s, 1120., 90.7),
+                title: &list.title,
+                icon: Some("bookmark"),
+                value: Some("Add"),
+                description: Some(list.detail.as_str()),
+                selected: false,
+                chevron: false,
+            },
+        );
+    }
+}
+
 fn location_settings(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let mut y = 164.8 - state.scroll;
@@ -3789,9 +3922,17 @@ fn location_settings(out: &mut Scene, state: &State, assets: &Assets) {
 fn settings(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let s = state.scroll;
-    for (index, key) in ["interface", "background", "weather", "inputs", "system"]
-        .into_iter()
-        .enumerate()
+    for (index, key) in [
+        "interface",
+        "background",
+        "weather",
+        "inputs",
+        "system",
+        "homeLists",
+    ]
+    .into_iter()
+    .take(state.section_count())
+    .enumerate()
     {
         let label = language.t(key);
         let rect = Rect::new(160., 164.8 + index as f32 * 84. - s, 403.2, 72.);
@@ -3835,6 +3976,7 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                 Some(Subpage::Temperature) => language.t("temperature"),
                 Some(Subpage::Language) => language.t("language"),
                 Some(Subpage::TextRendering) => language.t("textRendering"),
+                Some(Subpage::AddList) => "Add a list",
                 None => "",
             };
             let parent_width = assets.width(label, text(20.8, 550, -0.02)) + 2.;
@@ -3895,9 +4037,14 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
         let start = out.draw.len();
         if matches!(
             subpage,
-            Subpage::WeatherLocation | Subpage::Greeting | Subpage::AppNames | Subpage::Clock
+            Subpage::WeatherLocation
+                | Subpage::Greeting
+                | Subpage::AppNames
+                | Subpage::Clock
+                | Subpage::AddList
         ) {
             match subpage {
+                Subpage::AddList => add_list_settings(out, state, assets),
                 Subpage::WeatherLocation => location_settings(out, state, assets),
                 Subpage::Greeting => greeting_settings(out, state, assets),
                 Subpage::AppNames => app_name_settings(out, state, assets),
@@ -3955,7 +4102,11 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                     state.preferences.temperature_unit == Unit::Fahrenheit,
                 ),
             ],
-            Subpage::WeatherLocation | Subpage::Greeting | Subpage::AppNames | Subpage::Clock => {
+            Subpage::WeatherLocation
+            | Subpage::Greeting
+            | Subpage::AppNames
+            | Subpage::Clock
+            | Subpage::AddList => {
                 unreachable!()
             }
             Subpage::Language => Language::ALL
@@ -4000,6 +4151,7 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
         return;
     }
     match state.section {
+        crate::state::LISTS_SECTION => lists_settings(out, state, assets),
         0 => {
             for (position, (index, key, icon, value, chevron)) in [
                 (0, "appNames", "type", None, true),
@@ -4879,6 +5031,7 @@ fn keyboard(out: &mut Scene, state: &State, assets: &Assets) {
             TextField::Location => language.t("cityPostcode"),
             TextField::Name => language.t("greetingName"),
             TextField::InputName => language.t("inputName"),
+            TextField::ListSearch => "Search MDBList lists",
             TextField::Apps => language.t("findApp"),
             TextField::Search => "Search movies and shows",
         },

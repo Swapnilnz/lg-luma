@@ -23,5 +23,177 @@
   "feed_ambient": 2,
   "feed_wide": true,
   "keep_awake": true,
-  "feed_use_player": true
+  "feed_use_player": true,
+  "feed_hide_spoilers": true,
+  "feed_select_details": true,
+  "feed_lists": [
+    {
+      "title": "Latest Digital Release",
+      "source": "mdblist:snoak/latest-movies-digital-release"
+    },
+    {
+      "title": "Seasonal Anime 7+",
+      "source": "mdblist:6890"
+    },
+    {
+      "title": "Trending Movies",
+      "source": "mdblist:snoak/trending-movies"
+    },
+    {
+      "title": "Trending Shows",
+      "source": "mdblist:snoak/trakt-s-trending-shows"
+    },
+    {
+      "title": "Latest Airing",
+      "source": "mdblist:snoak/latest-tv-shows"
+    },
+    {
+      "title": "Netflix Latest Movies",
+      "source": "mdblist:tvgeniekodi/netflix-movies"
+    },
+    {
+      "title": "Netflix Latest Shows",
+      "source": "mdblist:snoak/latest-netflix-tv-shows"
+    },
+    {
+      "title": "HBO Max Latest Movies",
+      "source": "mdblist:snoak/latest-max-movies"
+    },
+    {
+      "title": "HBO Max Latest Shows",
+      "source": "mdblist:snoak/latest-max-tv-shows"
+    },
+    {
+      "title": "Disney+ Latest Movies",
+      "source": "mdblist:snoak/latest-disney-plus-movies"
+    },
+    {
+      "title": "Disney+ Latest Shows",
+      "source": "mdblist:snoak/latest-disney-plus-tv-shows"
+    },
+    {
+      "title": "Apple+ Latest Movies",
+      "source": "mdblist:tvgeniekodi/apple-movies"
+    },
+    {
+      "title": "Apple+ Latest Shows",
+      "source": "mdblist:tvgeniekodi/apple-tv-shows"
+    },
+    {
+      "title": "Amazon Prime Latest Movies",
+      "source": "mdblist:snoak/latest-amazon-prime-movies"
+    },
+    {
+      "title": "Amazon Prime Latest Shows",
+      "source": "mdblist:snoak/latest-amazon-prime-tv-shows"
+    },
+    {
+      "title": "Paramount+ Latest Movies",
+      "source": "mdblist:snoak/latest-paramount-plus-movies"
+    },
+    {
+      "title": "Paramount+ Latest Shows",
+      "source": "mdblist:snoak/latest-paramount-plus-tv-shows"
+    },
+    {
+      "title": "Hulu Latest Movies",
+      "source": "mdblist:tvgeniekodi/hulu-movies"
+    },
+    {
+      "title": "Hulu Latest Shows",
+      "source": "mdblist:tvgeniekodi/hulu-tv-shows"
+    },
+    {
+      "title": "Animated Movies",
+      "source": "mdblist:snoak/popular-animated-movies"
+    },
+    {
+      "title": "Animated Shows",
+      "source": "mdblist:snoak/popular-animated-shows"
+    },
+    {
+      "title": "Action Movies",
+      "source": "mdblist:snoak/action-movies"
+    },
+    {
+      "title": "Action Shows",
+      "source": "mdblist:snoak/action-shows"
+    },
+    {
+      "title": "Comedy Movies",
+      "source": "mdblist:snoak/comedy-movies"
+    },
+    {
+      "title": "Comedy Shows",
+      "source": "mdblist:snoak/comedy-shows"
+    },
+    {
+      "title": "Crime Movies",
+      "source": "mdblist:garycrawfordgc/crime"
+    },
+    {
+      "title": "Crime Shows",
+      "source": "mdblist:garycrawfordgc/crime-shows"
+    },
+    {
+      "title": "Drama Movies",
+      "source": "mdblist:snoak/drama-movies"
+    },
+    {
+      "title": "Drama Shows",
+      "source": "mdblist:snoak/drama-shows"
+    },
+    {
+      "title": "History & War",
+      "source": "mdblist:adamosborne01/history-war"
+    },
+    {
+      "title": "Horror Movies",
+      "source": "mdblist:snoak/horror-movies"
+    },
+    {
+      "title": "Horror Shows",
+      "source": "mdblist:snoak/horror-shows"
+    },
+    {
+      "title": "Must-See Modern Horror",
+      "source": "mdblist:snoak/must-see-modern-horror"
+    },
+    {
+      "title": "Must-See Mindbending",
+      "source": "mdblist:hdlists/mindfuck-movies"
+    },
+    {
+      "title": "Sci-Fi Movies",
+      "source": "mdblist:snoak/science-fiction-movies"
+    },
+    {
+      "title": "Sci-Fi Shows",
+      "source": "mdblist:snoak/science-fiction-shows"
+    },
+    {
+      "title": "Thriller Movies",
+      "source": "mdblist:snoak/thriller-movies"
+    },
+    {
+      "title": "Thriller Shows",
+      "source": "mdblist:snoak/thriller-shows"
+    },
+    {
+      "title": "Top Documentaries Movies",
+      "source": "mdblist:tvgeniekodi/top-documentary-movies"
+    },
+    {
+      "title": "Top Documentaries Shows",
+      "source": "mdblist:tvgeniekodi/top-documentaries"
+    },
+    {
+      "title": "Top Nature",
+      "source": "mdblist:tvgeniekodi/popular-nature-shows"
+    },
+    {
+      "title": "Top 2020s",
+      "source": "mdblist:snoak/top-2020s-movies"
+    }
+  ]
 }

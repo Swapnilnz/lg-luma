@@ -438,6 +438,8 @@ pub enum Response {
         link: String,
         result: Result<String, String>,
     },
+    /// MDBList lists for Settings > Lists > Add.
+    Lists(Result<Vec<crate::feeds::ListInfo>, String>),
 }
 
 pub struct Service {
@@ -453,6 +455,9 @@ pub struct Service {
     /// with whether its full-screen backdrop is wanted too; None without a TMDB key.
     slides: Option<mpsc::Sender<Vec<(String, bool)>>>,
     trakt: bool,
+    /// For lookups that answer on their own thread (Settings > Lists).
+    responses: mpsc::Sender<Response>,
+    mdblist: Option<String>,
 }
 
 impl Service {
@@ -495,6 +500,8 @@ impl Service {
         let trakt = config
             .as_ref()
             .is_some_and(|config| config.trakt_configured() && !config.rows.is_empty());
+        let mdblist = config.as_ref().and_then(mdblist_key);
+        let lookups = responses.clone();
         if let Some(config) = config.filter(|config| !config.rows.is_empty()) {
             thread::spawn(move || {
                 Worker::new(config, saved, path, responses, commands, offset).run()
@@ -508,7 +515,29 @@ impl Service {
             titles,
             slides,
             trakt,
+            responses: lookups,
+            mdblist,
         }
+    }
+
+    /// MDBList lists to add, answered as `Response::Lists`: yours and the most liked, or
+    /// those matching `query`.
+    pub fn lists(&self, query: Option<String>) {
+        let responses = self.responses.clone();
+        let Some(key) = self.mdblist.clone() else {
+            let _ = responses.send(Response::Lists(Err(
+                "add an mdblist api_key to feeds.json".into()
+            )));
+            return;
+        };
+        thread::spawn(move || {
+            let http = Http::new();
+            let _ = responses.send(Response::Lists(mdblist_lists(
+                &http,
+                &key,
+                query.as_deref(),
+            )));
+        });
     }
 
     /// Whether Trakt is configured: cards then offer Watchlist, Mark watched and Rate.
@@ -1178,6 +1207,122 @@ fn details_worker(key: &str, links: mpsc::Receiver<String>, responses: mpsc::Sen
                     return;
                 }
             }
+        }
+    }
+}
+
+/// Settings > Lists' lists in place of feeds.json's `mdblist:` rows: where the first of those
+/// was (else at the end), in Settings' order.
+pub fn apply_lists(config: &mut Config, lists: Option<&[crate::model::FeedList]>) {
+    let Some(lists) = lists else {
+        return;
+    };
+    let is_list = |row: &RowConfig| row.source.trim().starts_with("mdblist:");
+    let at = config
+        .rows
+        .iter()
+        .position(is_list)
+        .unwrap_or(config.rows.len());
+    config.rows.retain(|row| !is_list(row));
+    let at = at.min(config.rows.len());
+    for (offset, list) in lists.iter().enumerate() {
+        config.rows.insert(
+            at + offset,
+            RowConfig {
+                title: list.title.clone(),
+                source: list.source.clone(),
+            },
+        );
+    }
+    config.rows.truncate(60);
+}
+
+/// feeds.json's own MDBList rows, for Settings > Lists until it changes them.
+pub fn config_lists(config: &Config) -> Vec<crate::model::FeedList> {
+    config
+        .rows
+        .iter()
+        .filter(|row| row.source.trim().starts_with("mdblist:"))
+        .map(|row| crate::model::FeedList {
+            title: row.title.clone(),
+            source: row.source.trim().to_owned(),
+        })
+        .collect()
+}
+
+/// Whether feeds.json has an MDBList key.
+pub fn has_mdblist(config: &Config) -> bool {
+    mdblist_key(config).is_some()
+}
+
+/// Lists from MDBList: with a query, those it finds; else your own, then the most liked.
+fn mdblist_lists(
+    http: &Http,
+    key: &str,
+    query: Option<&str>,
+) -> Result<Vec<crate::feeds::ListInfo>, String> {
+    let fetch = |path: &str, extra: &[(&str, &str)], yours: bool| {
+        let mut params = vec![("apikey", key)];
+        params.extend_from_slice(extra);
+        let reply = http.get(
+            &format!("{MDBLIST}{path}"),
+            &params,
+            &[("Accept", "application/json")],
+            JSON_LIMIT,
+        )?;
+        if !reply.ok() {
+            return Err(format!("answered HTTP {}", reply.status));
+        }
+        let value = reply.json()?;
+        let list = value
+            .as_array()
+            .cloned()
+            .or_else(|| value.get("lists").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        Ok::<_, String>(
+            list.iter()
+                .filter_map(|list| {
+                    let id = list.get("id").and_then(Value::as_u64)?;
+                    let title = text(list, "name");
+                    if title.is_empty() {
+                        return None;
+                    }
+                    let user = [text(list, "user_name"), text(list, "username")]
+                        .into_iter()
+                        .find(|user| !user.is_empty());
+                    let items = list.get("items").and_then(Value::as_u64);
+                    let mut detail = Vec::new();
+                    if yours {
+                        detail.push("Your list".to_owned());
+                    } else if let Some(user) = user {
+                        detail.push(format!("by {user}"));
+                    }
+                    if let Some(items) = items {
+                        detail.push(format!("{items} titles"));
+                    }
+                    Some(crate::feeds::ListInfo {
+                        title,
+                        source: format!("mdblist:{id}"),
+                        detail: detail.join(" · "),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    match query {
+        Some(query) => fetch("/lists/search", &[("query", query)], false),
+        None => {
+            // Your lists may be none (or the key may not allow them): the most liked still show.
+            let mut found = fetch("/lists/user", &[], true).unwrap_or_default();
+            let top = fetch("/lists/top", &[], false);
+            match top {
+                Ok(top) => found.extend(top),
+                Err(error) if found.is_empty() => return Err(error),
+                Err(_) => {}
+            }
+            let mut seen = HashSet::new();
+            found.retain(|list| seen.insert(list.source.clone()));
+            Ok(found)
         }
     }
 }
@@ -3237,6 +3382,38 @@ fn deduplicate(entries: Vec<Entry>) -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_lists_replace_the_mdblist_rows_in_place() {
+        let mut config: Config = serde_json::from_str(
+            r#"{"rows":[{"title":"Continue","source":"trakt:continue"},
+                {"title":"A","source":"mdblist:a/b"},
+                {"title":"Week","source":"trakt:calendar"},
+                {"title":"B","source":"mdblist:7"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(config_lists(&config).len(), 2);
+        let lists = [
+            crate::model::FeedList {
+                title: "Nine".into(),
+                source: "mdblist:9".into(),
+            },
+            crate::model::FeedList {
+                title: "Seven".into(),
+                source: "mdblist:7".into(),
+            },
+        ];
+        apply_lists(&mut config, Some(&lists));
+        let sources: Vec<&str> = config.rows.iter().map(|row| row.source.as_str()).collect();
+        assert_eq!(
+            sources,
+            ["trakt:continue", "mdblist:9", "mdblist:7", "trakt:calendar"]
+        );
+        // None leaves feeds.json as it is.
+        let before = config.rows.len();
+        apply_lists(&mut config, None);
+        assert_eq!(config.rows.len(), before);
+    }
 
     #[test]
     fn links_prefer_imdb_and_fall_back_to_tmdb() {
