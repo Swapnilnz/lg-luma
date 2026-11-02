@@ -125,6 +125,11 @@ pub const MORE_WIDTH: f32 = 168.;
 /// Created by the remote's mic button through LG Input Hook (see feeds.md): Luma then listens.
 pub const VOICE_TRIGGER: &str = "/tmp/luma-voice-search";
 
+/// Created by the remote's Home button through LG Input Hook (luma-home-key.sh): Luma then
+/// closes what is open and goes back to the top of Home. Needed because a Home that stays
+/// unregistered with the app manager never hears the Home button's relaunch.
+pub const HOME_TRIGGER: &str = "/tmp/luma-go-home";
+
 /// One card: what it shows and the deep link it opens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Item {

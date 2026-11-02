@@ -1274,6 +1274,9 @@ fn run() -> Result<(), String> {
     // A mic press left from before this start must not set Luma listening.
     let _ = std::fs::remove_file(feeds::VOICE_TRIGGER);
     let mut voice_trigger = true;
+    // Likewise a Home press from before this start: Luma starts at the top anyway.
+    let _ = std::fs::remove_file(feeds::HOME_TRIGGER);
+    let mut home_trigger = true;
     // When the mic button last asked Luma to listen: its script also "launches" Home, which
     // must not be taken for the Home button.
     let mut voice_at: Option<Instant> = None;
@@ -1478,6 +1481,29 @@ fn run() -> Result<(), String> {
                     &preferences_path,
                     &weather_service,
                 );
+            }
+        }
+        // The remote's Home button, through LG Input Hook (luma-home-key.sh). With no
+        // lifecycle registration the relaunch handler below never runs, so the script asks
+        // for the top of Home here. Hidden is fine: Home is then at the top when it shows.
+        if webos && home_trigger && std::path::Path::new(feeds::HOME_TRIGGER).exists() {
+            if let Err(error) = std::fs::remove_file(feeds::HOME_TRIGGER) {
+                eprintln!("Luma home trigger: {error}; Home button disabled");
+                home_trigger = false;
+            } else {
+                eprintln!("Luma home trigger: back to the top (visible {visible})");
+                if matches!(state.overlay, Some(Overlay::SystemKeyboard)) {
+                    let pending = state.finish_text_input();
+                    running &= effects(
+                        pending,
+                        &mut state,
+                        &platform,
+                        &preferences_path,
+                        &weather_service,
+                    );
+                }
+                state.home_to_top();
+                last_input = Instant::now();
             }
         }
         // Rebuild hit regions before input whenever inventory/layout changed.
