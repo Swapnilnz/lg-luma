@@ -144,6 +144,13 @@ pub struct Preferences {
     pub feed_lists: Option<Vec<FeedList>>,
     /// Soft sounds as focus moves, on OK and on Back.
     pub ui_sounds: bool,
+    /// How loud those sounds are, in percent: 10 to 100 in steps of 10.
+    pub ui_volume: u8,
+    /// Home's look, by key (see `themes::THEMES`); "classic" is Luma as it always looked.
+    pub theme: String,
+    /// Leaves out a theme's heavier or moving effects (blur, grain, scanlines, tilts, glows);
+    /// Reduce motion does as well.
+    pub reduced_effects: bool,
 }
 
 /// One MDBList row: its title and its `mdblist:` source.
@@ -185,6 +192,9 @@ impl Default for Preferences {
             feed_select_details: true,
             feed_lists: None,
             ui_sounds: true,
+            ui_volume: 70,
+            theme: "classic".into(),
+            reduced_effects: false,
         }
     }
 }

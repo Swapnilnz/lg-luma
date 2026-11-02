@@ -213,6 +213,8 @@ pub struct Player {
 
 #[derive(Default)]
 pub struct Feeds {
+    /// How the Home theme lays out a row's cards (`State::tick` keeps it in step).
+    pub layout: crate::themes::Layout,
     /// The app every card launches.
     pub app_id: String,
     /// Luma Player, when configured: cards play there instead of in `app_id`.
@@ -606,17 +608,26 @@ impl Feeds {
         }
     }
 
+    /// Keeps every row's scroll within its length (after a theme changes card widths).
+    pub fn clamp_scroll(&mut self) {
+        for row in 0..self.scroll.len() {
+            let max = self.max_scroll(row);
+            self.scroll[row] = self.scroll[row].clamp(0., max);
+        }
+    }
+
     fn max_scroll(&self, row: usize) -> f32 {
         let count = self.rows.get(row).map_or(0, |row| row.items.len());
         if count == 0 {
             return 0.;
         }
-        // Room for a focused card widened to landscape, and the "See all" tile after them.
-        let content = (count - 1) as f32 * CARD_PITCH
-            + CARD_WIDTH
-            + (WIDE_WIDTH - CARD_WIDTH)
-            + (CARD_PITCH - CARD_WIDTH)
-            + MORE_WIDTH;
+        // Every card and gap, room for a focused card widened (to landscape, or pulled off the
+        // shelf), and the "See all" tile after them.
+        let cards: f32 = (0..count)
+            .map(|index| self.base_width(index) + self.card_gap())
+            .sum();
+        let grow = (WIDE_WIDTH - CARD_WIDTH).max(CARD_WIDTH - SPINE_WIDTH);
+        let content = cards + grow + MORE_WIDTH;
         (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.)
     }
 }
@@ -2938,6 +2949,13 @@ fn slides_index(feeds: &Feeds) -> usize {
 
 /// A focused feed card widens to a 16:9 backdrop this wide, over WIDE_GROW.
 pub const WIDE_WIDTH: f32 = 576.;
+/// Video shelf: a title's spine, and the gap between spines.
+pub const SPINE_WIDTH: f32 = 72.;
+pub const SPINE_GAP: f32 = 6.;
+/// Letterbox: a wide still between scope bars.
+pub const SCOPE_WIDTH: f32 = 432.;
+/// Bento: a double-width tile.
+pub const BENTO_WIDE: f32 = CARD_WIDTH * 2. + (CARD_PITCH - CARD_WIDTH);
 const WIDE_GROW: Duration = Duration::from_millis(260);
 /// How many small posters the Top Shelf shows before its expand button.
 pub const SHELF_MINIS: usize = 2;
@@ -2998,8 +3016,34 @@ impl Feeds {
             .map_or_else(|| "Coming up".to_owned(), |row| row.title.clone())
     }
 
-    /// How far a card has widened to landscape, 0 to 1.
+    /// A row card's width before focus changes it, by the theme's layout.
+    pub fn base_width(&self, index: usize) -> f32 {
+        use crate::themes::Layout;
+        match self.layout {
+            Layout::Rows => CARD_WIDTH,
+            Layout::Bento if index.is_multiple_of(5) => BENTO_WIDE,
+            Layout::Bento => CARD_WIDTH,
+            Layout::Shelf => SPINE_WIDTH,
+            Layout::Scope => SCOPE_WIDTH,
+        }
+    }
+
+    /// The space between a row's cards.
+    pub fn card_gap(&self) -> f32 {
+        match self.layout {
+            crate::themes::Layout::Shelf => SPINE_GAP,
+            _ => CARD_PITCH - CARD_WIDTH,
+        }
+    }
+
+    /// How far a card has widened to landscape, 0 to 1. Spines and scope stills never do.
     pub fn wide_fraction(&self, target: &Target, reduced_motion: bool) -> f32 {
+        if matches!(
+            self.layout,
+            crate::themes::Layout::Shelf | crate::themes::Layout::Scope
+        ) {
+            return 0.;
+        }
         let grow = |wide: &Wide| {
             if reduced_motion {
                 1.
@@ -3020,9 +3064,19 @@ impl Feeds {
         0.
     }
 
-    /// A feed card's drawn width: portrait, or widening to landscape when focused.
+    /// A feed card's drawn width: its layout's, widening to landscape when focused (or, on the
+    /// shelf, pulled out face-first).
     pub fn card_width(&self, target: &Target, reduced_motion: bool) -> f32 {
-        CARD_WIDTH + (WIDE_WIDTH - CARD_WIDTH) * self.wide_fraction(target, reduced_motion)
+        let index = match target {
+            Target::Feed(_, index) => *index,
+            _ => 1,
+        };
+        if self.layout == crate::themes::Layout::Shelf {
+            let pull = (self.scale(target, reduced_motion) - 1.) / EXPAND_SCALE;
+            return SPINE_WIDTH + (CARD_WIDTH - SPINE_WIDTH) * pull.clamp(0., 1.);
+        }
+        self.base_width(index)
+            + (WIDE_WIDTH - CARD_WIDTH) * self.wide_fraction(target, reduced_motion)
     }
 
     /// Whether a title's landscape artwork is in memory.

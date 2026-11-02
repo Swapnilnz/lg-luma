@@ -29,6 +29,7 @@ mod sounds;
 mod state;
 mod storage;
 mod text_rendering;
+mod themes;
 mod vector;
 mod view;
 mod weather;
@@ -1425,6 +1426,7 @@ fn run() -> Result<(), String> {
         sounds.tick(
             state.sound.take(),
             state.preferences.ui_sounds,
+            state.preferences.ui_volume,
             audio.as_ref(),
             visible,
         );

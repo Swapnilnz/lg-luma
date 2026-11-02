@@ -2,10 +2,17 @@
 //! falling note on Back. They are made here (no sound files), quiet, and a few milliseconds
 //! long. One SDL audio queue plays them, opened at the first sound and closed after a few
 //! seconds of quiet or as soon as Luma leaves the screen, so Luma never holds the TV's sound
-//! output for long. Settings > Interface > Navigation sounds turns them off.
+//! output for long. Settings > Interface > Navigation sounds turns them off, and Sound volume
+//! sets how loud they are.
 use crate::state::Sound;
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
+
+/// The quietest step of Settings > Sound volume, in percent; the steps are 10 apart.
+pub const VOLUME_MIN: u8 = 10;
+/// The gain at 100%: about one and a half times the sounds' designed level, so the default
+/// 70% plays them at that level.
+const FULL_GAIN: f32 = 1.4;
 
 /// The queue closes after this long without a sound.
 const IDLE: Duration = Duration::from_secs(6);
@@ -14,8 +21,8 @@ const RETRY: Duration = Duration::from_secs(30);
 
 pub struct Sounds {
     queue: Option<(sdl2::audio::AudioQueue<i16>, Instant)>,
-    /// Each sound's samples, made once for the output's rate and channels.
-    made: Vec<(Sound, i32, u8, Vec<i16>)>,
+    /// Each sound's samples, made once for the output's rate, channels and volume.
+    made: Vec<(Sound, i32, u8, u8, Vec<i16>)>,
     failed: Option<Instant>,
 }
 
@@ -33,6 +40,7 @@ impl Sounds {
         &mut self,
         sound: Option<Sound>,
         enabled: bool,
+        volume: u8,
         audio: Option<&sdl2::AudioSubsystem>,
         visible: bool,
     ) {
@@ -74,21 +82,27 @@ impl Sounds {
             return;
         };
         let (rate, channels) = (queue.spec().freq, queue.spec().channels);
-        let index = match self
-            .made
-            .iter()
-            .position(|(made, r, c, _)| *made == sound && *r == rate && *c == channels)
-        {
+        let volume = volume.clamp(VOLUME_MIN, 100);
+        let index = match self.made.iter().position(|(made, r, c, v, _)| {
+            *made == sound && *r == rate && *c == channels && *v == volume
+        }) {
             Some(index) => index,
             None => {
-                self.made
-                    .push((sound, rate, channels, make(sound, rate, channels)));
+                // Only the sounds at the current volume are kept.
+                self.made.retain(|(_, _, _, v, _)| *v == volume);
+                self.made.push((
+                    sound,
+                    rate,
+                    channels,
+                    volume,
+                    make(sound, rate, channels, volume),
+                ));
                 self.made.len() - 1
             }
         };
         // A new sound cuts the last one short, so holding a key never queues a backlog.
         queue.clear();
-        if let Err(error) = queue.queue_audio(&self.made[index].3) {
+        if let Err(error) = queue.queue_audio(&self.made[index].4) {
             eprintln!("Luma sounds: {error}");
             return;
         }
@@ -109,46 +123,48 @@ struct Note {
     level: f32,
 }
 
-fn make(sound: Sound, rate: i32, channels: u8) -> Vec<i16> {
+fn make(sound: Sound, rate: i32, channels: u8, volume: u8) -> Vec<i16> {
+    // Pitched low and kept soft: a TV's speakers or a soundbar make high, bright tones shrill.
     let notes: &[Note] = match sound {
-        // A soft, high tick.
+        // A soft, low tick.
         Sound::Move => &[Note {
             at: 0.,
-            from: 1900.,
-            to: 1700.,
+            from: 880.,
+            to: 820.,
             glide: 0.012,
-            decay: 0.007,
-            level: 0.13,
+            decay: 0.009,
+            level: 0.15,
         }],
-        // Two rising notes, a fifth apart.
+        // Two rising notes, a fifth apart (G4 to D5).
         Sound::Select => &[
             Note {
                 at: 0.,
-                from: 660.,
-                to: 660.,
+                from: 392.,
+                to: 392.,
                 glide: 0.,
-                decay: 0.045,
-                level: 0.15,
+                decay: 0.05,
+                level: 0.16,
             },
             Note {
                 at: 0.045,
-                from: 990.,
-                to: 990.,
+                from: 587.,
+                to: 587.,
                 glide: 0.,
-                decay: 0.07,
-                level: 0.13,
+                decay: 0.075,
+                level: 0.14,
             },
         ],
         // A short falling note.
         Sound::Back => &[Note {
             at: 0.,
-            from: 640.,
-            to: 430.,
+            from: 440.,
+            to: 300.,
             glide: 0.06,
-            decay: 0.035,
-            level: 0.14,
+            decay: 0.04,
+            level: 0.15,
         }],
     };
+    let gain = f32::from(volume.min(100)) / 100. * FULL_GAIN;
     let rate = rate.max(8000) as f32;
     let length = notes
         .iter()
@@ -171,8 +187,10 @@ fn make(sound: Sound, rate: i32, channels: u8) -> Vec<i16> {
             phase = (phase + hz / rate) % 1.;
             let attack = (t / 0.002).min(1.);
             let envelope = attack * (-t / note.decay).exp();
-            *sample +=
-                ((phase * TAU).sin() + 0.25 * (phase * 2. * TAU).sin()) * envelope * note.level;
+            *sample += ((phase * TAU).sin() + 0.12 * (phase * 2. * TAU).sin())
+                * envelope
+                * note.level
+                * gain;
         }
     }
     // The last few milliseconds fade out, so it never ends on a click.

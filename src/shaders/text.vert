@@ -7,6 +7,8 @@ uniform vec2 u_pixel_scale;
 uniform vec4 u_tint;
 uniform float u_fringe;
 uniform float u_embolden;
+// cos, sin of the run's angle, then the pivot it turns about (its origin).
+uniform vec4 u_rotate;
 varying PAINT_PRECISION vec4 v_color;
 varying PAINT_PRECISION float v_coverage;
 varying PAINT_PRECISION float v_logical_y;
@@ -22,6 +24,9 @@ void main() {
     // sides outward by u_embolden physical pixels thickens small text's stems.
     vec2 normal = a_offset * (a_coverage > 0.5 ? -2.0 : 2.0);
     vec2 position = origin + a_position + (a_offset * u_fringe + normal * u_embolden) / u_pixel_scale;
+    vec2 turned = position - u_rotate.zw;
+    position = u_rotate.zw + vec2(turned.x * u_rotate.x - turned.y * u_rotate.y,
+                                  turned.x * u_rotate.y + turned.y * u_rotate.x);
     gl_Position = vec4(position.x / 960.0 - 1.0, 1.0 - position.y / 540.0, 0.0, 1.0);
     v_color = u_tint;
     v_coverage = mix(1.0, a_coverage, step(0.001, u_fringe));

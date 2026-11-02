@@ -8,6 +8,7 @@ use crate::{
         HOME_TILE_PITCH, HOME_TILE_WIDTH, KEYS, NAV_ORDER, Overlay, Page, Rect, SYSTEM_SECTION,
         State, Subpage, Target, TextField, WEATHER_SECTION,
     },
+    themes::Style,
     weather::{self, Unit},
 };
 use std::{
@@ -132,6 +133,10 @@ pub struct Scene {
     pub draw: Vec<Draw>,
     pub controls: Vec<Control>,
     pub modal: Option<Rect>,
+    /// The Home theme while Home and its overlays are drawn; None for Classic and elsewhere.
+    theme: Option<Style>,
+    /// Draws already in the theme's colours, which `restyle_from` leaves as they are.
+    keep: Vec<std::ops::Range<usize>>,
 }
 impl Scene {
     fn new() -> Self {
@@ -139,7 +144,33 @@ impl Scene {
             draw: Vec::new(),
             controls: Vec::new(),
             modal: None,
+            theme: None,
+            keep: Vec::new(),
         }
+    }
+    /// Restyles everything drawn from `start` in the theme (see `themes::Style::restyle`),
+    /// apart from the ranges in `keep`.
+    fn restyle_from(&mut self, start: usize, style: Option<Style>) {
+        let Some(style) = style else {
+            return;
+        };
+        let start = start.min(self.draw.len());
+        let tail = self.draw.split_off(start);
+        let keep = std::mem::take(&mut self.keep);
+        let mut run = Vec::new();
+        for (offset, draw) in tail.into_iter().enumerate() {
+            if keep.iter().any(|range| range.contains(&(start + offset))) {
+                if !run.is_empty() {
+                    let restyled = style.restyle(std::mem::take(&mut run));
+                    self.draw.extend(restyled);
+                }
+                self.draw.push(draw);
+            } else {
+                run.push(draw);
+            }
+        }
+        let restyled = style.restyle(run);
+        self.draw.extend(restyled);
     }
     fn shape(&mut self, rect: Rect, radius: f32, fill: Color) {
         self.draw.push(Draw::Shape(rect, radius, 0., fill));
@@ -178,6 +209,10 @@ impl Scene {
         });
     }
     fn ring(&mut self, rect: Rect, radius: f32) {
+        if let Some(style) = self.theme {
+            style.control_ring(&mut self.draw, rect, radius);
+            return;
+        }
         self.border(rect.inset(-6.9), radius + 6.9, 3.7, c(0xffffff, 0.10));
         self.border(rect.inset(-3.2), radius + 3.2, 3.2, c(0xf0f0f0, 1.));
     }
@@ -246,6 +281,11 @@ impl Scene {
                         [brightness, brightness, brightness, alpha],
                     );
                 }
+                Draw::Quad(quad) => {
+                    for color in &mut quad.colors {
+                        apply(color);
+                    }
+                }
                 Draw::Clip(_) | Draw::EdgeFade(_) | Draw::EdgeFadeX(_) => {}
             }
         }
@@ -298,7 +338,15 @@ pub fn scene_with_pill(
     now: OffsetDateTime,
 ) -> Scene {
     let mut out = Scene::new();
-    if let Some((previous, start)) = &state.previous_background {
+    let style = home_style(state);
+    let themed_home = state.page == Page::Home && !recents_replaces_page(state);
+    let background = style
+        .filter(|_| themed_home)
+        .map(|style| style.background())
+        .unwrap_or_default();
+    if !background.is_empty() {
+        out.draw.extend(background);
+    } else if let Some((previous, start)) = &state.previous_background {
         out.image(
             assets.path(format!("wallpapers/{previous}.jpg")),
             Rect::new(0., 0., 1920., 1080.),
@@ -321,6 +369,7 @@ pub fn scene_with_pill(
             false,
         );
     }
+    let home_start = out.draw.len();
     if state.page == Page::Home && !recents_replaces_page(state) {
         preview_backdrop(&mut out, state);
     }
@@ -352,7 +401,12 @@ pub fn scene_with_pill(
         ])));
     }
     match state.page {
-        Page::Home => home(&mut out, state, assets, now),
+        Page::Home => {
+            out.theme = style;
+            home(&mut out, state, assets, now);
+            out.theme = None;
+            out.restyle_from(home_start, style);
+        }
         Page::Apps => library(&mut out, state, assets),
         Page::Settings => settings(&mut out, state, assets),
         Page::Explore => explore_view::render(&mut out, state, assets),
@@ -421,6 +475,9 @@ pub fn scene_with_pill(
         }
     }
     footer(&mut out, state, assets);
+    // Search, the shelf's sheet, title pages and the card menu wear the theme too.
+    out.theme = style;
+    let overlays_start = out.draw.len();
     if state.feeds.search.is_some() {
         out.controls.clear();
         search_overlay(&mut out, state, assets);
@@ -436,6 +493,14 @@ pub fn scene_with_pill(
     if state.feeds.menu.is_some() {
         out.controls.clear();
         feed_menu(&mut out, state, assets);
+    }
+    out.theme = None;
+    out.restyle_from(overlays_start, style);
+    // Grain, scanlines and the like lie over all of Home.
+    if let Some(style) = style
+        && themed_home
+    {
+        out.draw.extend(style.overlay());
     }
     if let Some(overlay @ (Overlay::Options { .. } | Overlay::Keyboard)) = &state.overlay {
         out.controls.clear();
@@ -484,13 +549,28 @@ pub fn scene_with_pill(
     if state.feeds.ambient.is_some() {
         out.controls.clear();
         out.modal = None;
+        let start = out.draw.len();
+        out.theme = style;
         ambient(&mut out, state, now);
+        out.theme = None;
+        out.restyle_from(start, style);
         return out;
     }
     if let Some((notice, _)) = &state.notice {
         toast(&mut out, state, assets, notice);
     }
     out
+}
+
+/// The Home theme in use, with its heavier effects left out when asked (or with Reduce
+/// motion); None for Classic.
+fn home_style(state: &State) -> Option<Style> {
+    crate::themes::active(&state.preferences.theme).map(|theme| {
+        Style::new(
+            theme,
+            state.preferences.reduced_effects || state.preferences.reduced_motion,
+        )
+    })
 }
 
 fn header(
@@ -1369,6 +1449,22 @@ fn feed_rows(
         {
             peek_end = Some(row_start);
         }
+        // Bento: each row is a tile of its own, on a panel.
+        if out.theme.is_some()
+            && state.feeds.layout == crate::themes::Layout::Bento
+            && !row.items.is_empty()
+        {
+            let caption = if row.items.iter().any(|item| !item.subtitle.is_empty()) {
+                36.
+            } else {
+                0.
+            };
+            out.shape(
+                Rect::new(60., y - 21., 1800., 58.4 + CARD_HEIGHT + caption + 45.),
+                33.,
+                c(0x171c20, 0.72),
+            );
+        }
         out.text(
             &row.title,
             Rect::new(84., y + 3.3, 1200., 31.),
@@ -1483,7 +1579,7 @@ fn feed_rows(
                 .feeds
                 .card_width(&target, state.preferences.reduced_motion);
             let rect = Rect::new(x, cards_y, width, CARD_HEIGHT);
-            x += width + (CARD_PITCH - CARD_WIDTH);
+            x += width + state.feeds.card_gap();
             out.control(
                 target.clone(),
                 Rect::new(rect.x, rect.y, rect.w, rect.h + caption),
@@ -1631,7 +1727,9 @@ fn feed_card(
     if state.pressed.as_ref() == Some(target) {
         out.fade(start, 1., 0.85);
     }
-    if !item.subtitle.is_empty() {
+    // Spines on a shelf are too narrow for a caption; the pulled-out title has one.
+    let spine = state.feeds.layout == crate::themes::Layout::Shelf && drawn.w < 150.;
+    if !item.subtitle.is_empty() && !spine {
         out.text(
             &item.subtitle,
             Rect::new(rect.x + 2., drawn.y + drawn.h + 12., rect.w - 4., 20.),
@@ -1737,6 +1835,16 @@ fn poster(
         rect.w * scale,
         rect.h * scale,
     );
+    let artwork = item.image.as_ref().and_then(|url| {
+        Some((
+            state.feeds.images.get(url)?,
+            state.feeds.reveal(url, state.preferences.reduced_motion),
+        ))
+    });
+    // A theme draws the whole card, its own shadow included.
+    if let Some(style) = out.theme {
+        return themed_poster(out, style, state, assets, item, rect, focused, artwork);
+    }
     out.shadow(
         rect,
         CARD_RADIUS,
@@ -1744,12 +1852,6 @@ fn poster(
         if focused { 14. } else { 9. },
         if focused { 0.45 } else { 0.2 },
     );
-    let artwork = item.image.as_ref().and_then(|url| {
-        Some((
-            state.feeds.images.get(url)?,
-            state.feeds.reveal(url, state.preferences.reduced_motion),
-        ))
-    });
     // The title card stays beneath a poster that is still fading in.
     if artwork.is_none_or(|(_, reveal)| reveal < 1.) {
         out.draw.push(Draw::RoundedGradient(
@@ -1814,6 +1916,112 @@ fn poster(
     }
     if focused {
         out.ring(rect, CARD_RADIUS);
+    }
+    rect
+}
+
+/// A poster in the Home theme: the theme draws the card (shadow, filtered image, frame, focus);
+/// the title shows until the poster arrives, and on a shelf runs up the spine. Badges, marks
+/// and progress are Luma's, in the theme's colours.
+#[allow(clippy::too_many_arguments)]
+fn themed_poster(
+    out: &mut Scene,
+    style: Style,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+    focused: bool,
+    artwork: Option<(&std::sync::Arc<crate::app_artwork::Artwork>, f32)>,
+) -> Rect {
+    let layout = state.feeds.layout;
+    // Row cards only (tall and spine-narrow); the Top Shelf's thumbnails stay posters.
+    let spine = layout == crate::themes::Layout::Shelf
+        && rect.w <= crate::feeds::SPINE_WIDTH * 1.1
+        && rect.h >= 300.;
+    style.card(
+        &mut out.draw,
+        rect,
+        artwork.map(|(image, reveal)| (image.clone(), reveal)),
+        focused,
+        crate::themes::seed(&item.title),
+        layout,
+    );
+    if spine {
+        // The spine: shaded edges and the title up it, bottom to top.
+        out.shape(Rect::new(rect.x, rect.y, 5., rect.h), 0., c(0xffffff, 0.08));
+        out.shape(
+            Rect::new(rect.x + rect.w - 5., rect.y, 5., rect.h),
+            0.,
+            c(0x000000, 0.25),
+        );
+        out.draw.push(Draw::RoundedGradient(
+            Rect::new(rect.x, rect.y + rect.h * 0.35, rect.w, rect.h * 0.65),
+            0.,
+            c(0x080b12, 0.),
+            c(0x080b12, 0.75),
+        ));
+        out.text(
+            clip_words(&item.title, 26),
+            Rect::new(
+                rect.x + rect.w / 2. - 13.,
+                rect.y + rect.h - 18.,
+                rect.h - 36.,
+                26.,
+            ),
+            text(17.6, 600, 0.08).angle(-90.),
+            WHITE,
+            false,
+        );
+        return rect;
+    }
+    // The title on the theme's blank card until the poster arrives (the poster then fades in
+    // over the blank alone, not over words).
+    if artwork.is_none() {
+        let words = text(20.8, 550, -0.02).leading(1.25);
+        let lines = assets.lines(&item.title, words, rect.w - 36.).min(4) as f32;
+        let height = lines * words.size * words.line_height;
+        out.text(
+            &item.title,
+            Rect::new(
+                rect.x + 18.,
+                rect.y + (rect.h - height) / 2.,
+                rect.w - 36.,
+                height,
+            ),
+            words,
+            c(0xffffff, 0.92),
+            true,
+        );
+    }
+    if let Some(badge) = &item.badge {
+        let words = text(14.4, 650, 0.02);
+        let width = assets.width(badge, words) + 22.;
+        let chip = Rect::new(rect.x + 12., rect.y + 12., width, 26.);
+        out.shape(chip, 13., c(0xf3f3f3, 0.94));
+        out.text(
+            badge,
+            Rect::new(chip.x, chip.y + 5., chip.w, 18.),
+            words,
+            c(0x1c1c1c, 1.),
+            true,
+        );
+    }
+    poster_marks(out, state, assets, item, rect);
+    if let Some(progress) = item.progress {
+        let track = Rect::new(rect.x + 16., rect.y + rect.h - 20., rect.w - 32., 5.);
+        out.shape(track, 2.5, c(0x000000, 0.5));
+        // The theme's progress colour is an accent: the restyle leaves it as it is.
+        out.draw
+            .push(Draw::Quad(Box::new(crate::renderer::Quad::new(
+                Rect::new(
+                    track.x,
+                    track.y,
+                    (track.w * progress.clamp(0., 1.)).max(5.),
+                    track.h,
+                ),
+                crate::themes::color(style.theme.progress, 0.95),
+            ))));
     }
     rect
 }
@@ -2501,6 +2709,12 @@ fn hero_slide(
         c(0x080b12, 0.),
         c(0x080b12, 0.92),
     ));
+    // A theme's panel behind the words (a card, a window, a frame).
+    let panel = out.theme.filter(|style| style.theme.hero_panel.is_some());
+    if let Some(style) = panel {
+        style.hero_panel(&mut out.draw, Rect::new(78., band.y + 430., 1100., 340.));
+    }
+    let words_start = out.draw.len();
     let x = 112.;
     // Placeholders while the details or logo are on their way, for a moment only: a logo that
     // never arrives gives way to the title in words.
@@ -2550,6 +2764,26 @@ fn hero_slide(
             (620., 180.),
             72.,
         );
+    }
+    // Words on a light panel are set in its dark ink now, and kept from the later restyle.
+    if let Some(style) = panel
+        && let Some(ink) = style.hero_ink()
+    {
+        let words = out.draw.split_off(words_start);
+        let mut words = style.restyle(words);
+        // Only the words themselves (in the theme's ink): a title effect's coloured copies
+        // keep their colours.
+        let theme_inks =
+            [style.theme.fg, style.theme.muted].map(|rgb| crate::themes::color(rgb, 1.));
+        for draw in &mut words {
+            if let Draw::Text(_, _, _, color, _) = draw
+                && theme_inks.iter().any(|ink| ink[..3] == color[..3])
+            {
+                *color = crate::themes::color(ink, color[3]);
+            }
+        }
+        out.draw.extend(words);
+        out.keep.push(words_start..out.draw.len());
     }
     out.fade_range(start, out.draw.len(), alpha, 1.);
 }
@@ -3692,7 +3926,9 @@ fn row(out: &mut Scene, state: &State, assets: &Assets, row: Row<'_>) {
             false,
         );
     }
-    if let Some(value) = row.value {
+    if row.target == Target::Setting(crate::state::VOLUME_SETTING) {
+        volume_dial(out, state, assets, row.rect, bright);
+    } else if let Some(value) = row.value {
         out.text(
             value,
             Rect::new(
@@ -3728,6 +3964,113 @@ fn row(out: &mut Scene, state: &State, assets: &Assets, row: Row<'_>) {
         );
     }
     out.control(row.target, row.rect, true);
+}
+
+/// A Theme picker row's sample: its name in the theme's display face, and its paper, ink and
+/// accent as three swatches at the right.
+fn theme_sample(
+    out: &mut Scene,
+    theme: &crate::themes::Theme,
+    rect: Rect,
+    row_start: usize,
+    title: &str,
+) {
+    for draw in &mut out.draw[row_start..] {
+        if let Draw::Text(value, _, style, _, _) = draw
+            && value == title
+            && theme.display.family > 0
+        {
+            style.family = theme.display.family;
+        }
+    }
+    let paper = theme.background.map_or(theme.panel.0, |(top, _)| top);
+    let right = rect.x + rect.w - 64.;
+    // The plan's build phase, left of the swatches (Classic has none).
+    if theme.phase > 0 {
+        out.text(
+            format!("Phase {}", theme.phase),
+            Rect::new(right - 80. - 150., rect.y + rect.h / 2. - 10., 150., 20.),
+            text(14.4, 500, 0.).right(),
+            c(0x8a8a8a, 0.95),
+            false,
+        );
+    }
+    for (index, rgb) in [theme.accent, theme.fg, paper].into_iter().enumerate() {
+        let swatch = Rect::new(
+            right - index as f32 * 40.,
+            rect.y + rect.h / 2. - 14.,
+            28.,
+            28.,
+        );
+        out.shape(swatch, 14., crate::themes::color(rgb, 1.));
+        out.border(swatch, 14., 1.5, c(0x808080, 0.6));
+    }
+}
+
+fn volume_label(volume: u8) -> &'static str {
+    match volume.clamp(crate::sounds::VOLUME_MIN, 100) / 10 {
+        1 => "10%",
+        2 => "20%",
+        3 => "30%",
+        4 => "40%",
+        5 => "50%",
+        6 => "60%",
+        7 => "70%",
+        8 => "80%",
+        9 => "90%",
+        _ => "100%",
+    }
+}
+
+/// Settings > Sound volume's value: ten bars rising left to right, lit up to the level, and
+/// the level in words; with Left and Right arrows either side while the row has focus.
+fn volume_dial(out: &mut Scene, state: &State, assets: &Assets, rect: Rect, bright: bool) {
+    let volume = state
+        .preferences
+        .ui_volume
+        .clamp(crate::sounds::VOLUME_MIN, 100);
+    let steps = usize::from(volume / 10);
+    let ink = if bright {
+        c(0x2c2c2c, 1.)
+    } else {
+        c(0xeeeeee, 0.73)
+    };
+    let dim = if bright {
+        c(0x2c2c2c, 0.16)
+    } else {
+        c(0xffffff, 0.14)
+    };
+    let right = rect.x + rect.w - 30.;
+    let label = Rect::new(right - 30. - 64., rect.y + (rect.h - 23.) / 2., 64., 24.);
+    out.text(
+        volume_label(volume),
+        label,
+        text(18.4, 450, 0.).right(),
+        ink,
+        false,
+    );
+    let (bar_w, gap, tallest) = (8., 6., 30.);
+    let bars_right = label.x - 18.;
+    let bars_left = bars_right - 10. * bar_w - 9. * gap;
+    let base = rect.y + rect.h / 2. + tallest / 2.;
+    for index in 0..10 {
+        let height = 8. + (tallest - 8.) * index as f32 / 9.;
+        out.shape(
+            Rect::new(
+                bars_left + index as f32 * (bar_w + gap),
+                base - height,
+                bar_w,
+                height,
+            ),
+            2.,
+            if index < steps { ink } else { dim },
+        );
+    }
+    if bright {
+        let arrow = |x: f32| Rect::new(x, rect.y + (rect.h - 18.4) / 2., 18.4, 18.4);
+        out.icon(assets, "left", arrow(bars_left - 30.), c(0x444444, 0.8));
+        out.icon(assets, "right", arrow(right - 8.), c(0x444444, 0.8));
+    }
 }
 
 fn weather_settings(out: &mut Scene, state: &State, assets: &Assets) {
@@ -4153,6 +4496,7 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                 Some(Subpage::Language) => language.t("language"),
                 Some(Subpage::TextRendering) => language.t("textRendering"),
                 Some(Subpage::AddList) => "Add a list",
+                Some(Subpage::Theme) => "Theme",
                 None => "",
             };
             let parent_width = assets.width(label, text(20.8, 550, -0.02)) + 2.;
@@ -4289,6 +4633,16 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                 .into_iter()
                 .map(|option| (option.name(), None, option == language))
                 .collect(),
+            Subpage::Theme => crate::themes::THEMES
+                .iter()
+                .map(|theme| {
+                    (
+                        theme.name,
+                        Some(theme.group),
+                        crate::themes::get(&state.preferences.theme).key == theme.key,
+                    )
+                })
+                .collect(),
             Subpage::TextRendering => crate::text_rendering::TextRendering::ALL
                 .into_iter()
                 .map(|mode| {
@@ -4302,13 +4656,15 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
         };
         for (index, (title, description, selected)) in options.into_iter().enumerate() {
             let h = if description.is_some() { 90.7 } else { 72. };
+            let rect = Rect::new(640., 164.8 + index as f32 * (h + 12.) - s, 1120., h);
+            let row_start = out.draw.len();
             row(
                 out,
                 state,
                 assets,
                 Row {
                     target: Target::Choice(index),
-                    rect: Rect::new(640., 164.8 + index as f32 * (h + 12.) - s, 1120., h),
+                    rect,
                     title,
                     icon: None,
                     value: None,
@@ -4317,6 +4673,9 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
                     chevron: false,
                 },
             );
+            if *subpage == Subpage::Theme {
+                theme_sample(out, crate::themes::THEMES[index], rect, row_start, title);
+            }
         }
         if let Subpage::Input(id) = subpage {
             input_name_rows(out, state, assets, id, 164.8 + 3. * 102.7 + 16. - s);
@@ -4360,6 +4719,7 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
             .map(|(index, key, icon, value, chevron)| {
                 (index, language.t(key), icon, value, chevron)
             })
+            .chain(theme_settings(state))
             .chain(feed_settings(state))
             .enumerate()
             {
@@ -4532,6 +4892,33 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
     }
 }
 
+/// Settings rows for Home's theme: the picker, and Reduced effects once a theme is chosen.
+fn theme_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> {
+    let language = state.preferences.language;
+    let theme = crate::themes::get(&state.preferences.theme);
+    let mut rows = vec![(
+        crate::state::THEME_SETTING,
+        "Theme",
+        "sparkles",
+        Some(theme.name),
+        true,
+    )];
+    if crate::themes::active(&state.preferences.theme).is_some() {
+        rows.push((
+            crate::state::REDUCED_EFFECTS_SETTING,
+            "Reduced effects",
+            "motion",
+            Some(if state.preferences.reduced_effects {
+                language.t("stateOn")
+            } else {
+                language.t("stateOff")
+            }),
+            false,
+        ));
+    }
+    rows
+}
+
 /// Settings rows for the Home feed posters, shown when feeds are configured.
 fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> {
     let language = state.preferences.language;
@@ -4557,9 +4944,20 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         }),
         false,
     );
+    // Its value is drawn as a dial (see `volume_dial`); the text is for its width only.
+    let volume = (
+        crate::state::VOLUME_SETTING,
+        "Sound volume",
+        "sound",
+        Some(volume_label(state.preferences.ui_volume)),
+        false,
+    );
     // The soundbar keep-awake and the sounds work without feeds, so their rows always show.
     if state.feeds.rows.is_empty() {
-        return vec![keep_awake, sounds];
+        return std::iter::once(keep_awake)
+            .chain(std::iter::once(sounds))
+            .chain(state.preferences.ui_sounds.then_some(volume))
+            .collect();
     }
     vec![
         (
@@ -4670,6 +5068,7 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
     }))
     .chain(std::iter::once(keep_awake))
     .chain(std::iter::once(sounds))
+    .chain(state.preferences.ui_sounds.then_some(volume))
     .chain(std::iter::once((
         13,
         "Screensaver",

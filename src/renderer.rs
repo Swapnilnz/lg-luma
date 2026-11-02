@@ -21,6 +21,13 @@ pub const WHITE: Color = [0.96, 0.96, 0.96, 1.];
 const GLYPH_GEOMETRY_BUDGET: usize = 8 * 1024 * 1024;
 const TEXT_GEOMETRY_BUDGET: usize = 32 * 1024 * 1024;
 const TEXTURE_BUDGET: usize = 48 * 1024 * 1024;
+/// The paint program's vertex: position, uv, colour, shape (local x, y, half size), params
+/// (radius, border), corners (per-corner radii; x < 0 uses the radius) and filter (mode and
+/// three of its values). Sizes in floats.
+const PAINT_ATTRIBUTES: [i32; 7] = [2, 2, 4, 4, 2, 4, 4];
+const PAINT_FLOATS: usize = 22;
+/// Corners that defer to the single radius.
+const NO_CORNERS: [f32; 4] = [-1., 0., 0., 0.];
 
 #[derive(Clone, Copy, Debug)]
 pub struct TextStyle {
@@ -30,6 +37,10 @@ pub struct TextStyle {
     pub tracking: f32,
     pub line_height: f32,
     pub align_right: bool,
+    /// The face: 0 is Inter; 1 and up a theme font, `crate::themes::FONT_FAMILIES[family - 1]`.
+    pub family: u8,
+    /// Degrees clockwise about the layout box's top-left corner; 0 is level.
+    pub angle: f32,
 }
 impl TextStyle {
     pub const fn new(size: f32) -> Self {
@@ -39,7 +50,17 @@ impl TextStyle {
             tracking: 0.,
             line_height: 1.2,
             align_right: false,
+            family: 0,
+            angle: 0.,
         }
+    }
+    pub const fn family(mut self, family: u8) -> Self {
+        self.family = family;
+        self
+    }
+    pub const fn angle(mut self, degrees: f32) -> Self {
+        self.angle = degrees;
+        self
     }
     pub const fn weight(mut self, weight: u16) -> Self {
         self.weight = weight;
@@ -72,6 +93,186 @@ pub enum Draw {
     EdgeFade(Option<[f32; 4]>),
     /// Horizontal counterpart: [left fade-in start, end, right fade-out start, end].
     EdgeFadeX(Option<[f32; 4]>),
+    /// Everything the plain shapes cannot: per-corner radii, rotation, perspective corners,
+    /// image filters, procedural patterns and multiply/screen blending (the Home themes).
+    Quad(Box<Quad>),
+}
+
+/// A rounded rectangle, image or pattern with the extras of `Draw::Quad`.
+#[derive(Clone)]
+pub struct Quad {
+    pub rect: Rect,
+    /// Top-left, top-right, bottom-right, bottom-left radii.
+    pub corners: [f32; 4],
+    /// A border this wide when positive; a soft shadow this blurred when negative.
+    pub border: f32,
+    /// Top and bottom colours: a vertical gradient, or the tint over an image.
+    pub colors: [Color; 2],
+    pub image: Option<QuadImage>,
+    pub filter: Filter,
+    pub blend: Blend,
+    /// Degrees clockwise about the centre.
+    pub angle: f32,
+    /// Where the corners land on screen (top-left, top-right, bottom-right, bottom-left), for a
+    /// card turned in perspective; the shape and image are laid out on `rect` and stretched.
+    pub points: Option<[[f32; 2]; 4]>,
+}
+
+/// A `Quad`'s image, always filling it cropped to its shape (CSS `object-fit: cover`).
+#[derive(Clone)]
+pub enum QuadImage {
+    App(Arc<crate::app_artwork::Artwork>),
+}
+
+/// What the paint shader does to a `Quad`'s pixels. Image filters change the image's colour;
+/// patterns are drawn in the quad's colour where the pattern is "ink".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Filter {
+    None,
+    Grey,
+    Sepia,
+    /// Dark and light ink (0xRRGGBB) the image's light maps between.
+    Duotone(u32, u32),
+    /// Blocks this many logical pixels wide.
+    Pixel(f32),
+    /// A soft blur this many logical pixels wide; for still, full-screen backdrops.
+    Blur(f32),
+    /// A procedural pattern with its period and ink width, in logical pixels.
+    Pattern(Pattern, f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pattern {
+    /// Horizontal lines.
+    Lines,
+    /// Vertical lines.
+    Columns,
+    /// Lines rising at 45°.
+    Diagonal,
+    /// A square grid of lines.
+    Grid,
+    /// A grid of round dots (halftone), ink width as the dot's diameter.
+    Dots,
+    /// Static noise; ink width 0 to 1 as its strength.
+    Grain,
+    /// Rings about the quad's centre.
+    Rings,
+    /// Rays about the quad's centre; the period is how many.
+    Rays,
+    /// A floor grid running to a horizon at the quad's top edge.
+    Floor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Blend {
+    Normal,
+    /// Darkens what is beneath (overprinted ink).
+    Multiply,
+    /// Lightens what is beneath (light).
+    Screen,
+}
+
+impl Blend {
+    /// Sets the blend function, and tells the paint shader whether to premultiply (which the
+    /// multiply and screen functions need). `program` is the paint program.
+    fn apply(self, program: GLuint) {
+        unsafe {
+            gl::UseProgram(program);
+            match self {
+                Self::Normal => gl::BlendFuncSeparate(
+                    gl::SRC_ALPHA,
+                    gl::ONE_MINUS_SRC_ALPHA,
+                    gl::ONE,
+                    gl::ONE_MINUS_SRC_ALPHA,
+                ),
+                // dst * (src * a + 1 - a), with the shader's colour premultiplied.
+                Self::Multiply => {
+                    gl::BlendFuncSeparate(gl::DST_COLOR, gl::ONE_MINUS_SRC_ALPHA, gl::ZERO, gl::ONE)
+                }
+                // src * a + dst * (1 - src * a).
+                Self::Screen => {
+                    gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_COLOR, gl::ZERO, gl::ONE)
+                }
+            }
+            gl::Uniform1f(
+                gl::GetUniformLocation(program, c"u_premultiply".as_ptr()),
+                if self == Self::Normal { 0. } else { 1. },
+            );
+        }
+    }
+}
+
+impl Quad {
+    /// A flat, square-cornered quad: the start for every other.
+    pub fn new(rect: Rect, color: Color) -> Self {
+        Self {
+            rect,
+            corners: [0.; 4],
+            border: 0.,
+            colors: [color, color],
+            image: None,
+            filter: Filter::None,
+            blend: Blend::Normal,
+            angle: 0.,
+            points: None,
+        }
+    }
+
+    /// Everything a quad can paint, for partial redraws.
+    pub fn bounds(&self) -> Rect {
+        let points = self.corner_points();
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for [x, y] in points {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        let blur = (-self.border).max(0.);
+        Rect::new(x0, y0, x1 - x0, y1 - y0).inset(-blur - 1.)
+    }
+
+    /// The four corners on screen: given, or the rect's turned about its centre.
+    fn corner_points(&self) -> [[f32; 2]; 4] {
+        if let Some(points) = self.points {
+            return points;
+        }
+        let r = self.rect.inset(-(-self.border).max(0.));
+        let corners = [
+            [r.x, r.y],
+            [r.x + r.w, r.y],
+            [r.x + r.w, r.y + r.h],
+            [r.x, r.y + r.h],
+        ];
+        if self.angle == 0. {
+            return corners;
+        }
+        let (sin, cos) = self.angle.to_radians().sin_cos();
+        let (cx, cy) = (r.x + r.w / 2., r.y + r.h / 2.);
+        corners.map(|[x, y]| {
+            let (dx, dy) = (x - cx, y - cy);
+            [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
+        })
+    }
+
+    /// Whether two quads draw the same, for partial redraws.
+    pub fn same(&self, other: &Self) -> bool {
+        let rect = |a: &Rect, b: &Rect| a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+        let image = match (&self.image, &other.image) {
+            (None, None) => true,
+            (Some(QuadImage::App(a)), Some(QuadImage::App(b))) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        image
+            && rect(&self.rect, &other.rect)
+            && self.corners == other.corners
+            && self.border == other.border
+            && self.colors == other.colors
+            && self.filter == other.filter
+            && self.blend == other.blend
+            && self.angle == other.angle
+            && self.points == other.points
+    }
 }
 
 struct Texture {
@@ -97,6 +298,7 @@ struct Glyph {
 struct TextKey {
     text: String,
     weight: u16,
+    family: u8,
     // Logical size, tracking, line height, available width and height.
     layout: [u32; 5],
     flags: u8,
@@ -188,6 +390,7 @@ enum BatchKind {
         texture: GLuint,
         start: usize,
         count: usize,
+        blend: Blend,
     },
     Vector {
         path: String,
@@ -198,6 +401,8 @@ enum BatchKind {
         key: TextKey,
         origin: [f32; 2],
         tint: Color,
+        /// Degrees clockwise about `origin`.
+        angle: f32,
     },
 }
 
@@ -257,6 +462,15 @@ impl Scrim {
     }
 }
 
+/// 0xRRGGBB as 0 to 1 channels.
+fn unpack_rgb(rgb: u32) -> [f32; 3] {
+    [
+        ((rgb >> 16) & 255) as f32 / 255.,
+        ((rgb >> 8) & 255) as f32 / 255.,
+        (rgb & 255) as f32 / 255.,
+    ]
+}
+
 fn intersect(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     let x = a[0].max(b[0]);
     let y = a[1].max(b[1]);
@@ -295,6 +509,8 @@ fn profile_skip(command: &Draw) -> bool {
         Draw::Shape(..) => "shape",
         Draw::RoundedGradient(..) => "gradient",
         Draw::Shadow(..) => "shadow",
+        Draw::Quad(quad) if quad.image.is_some() => "image",
+        Draw::Quad(..) => "shape",
         Draw::Text(..) => "text",
         Draw::Clip(_) | Draw::EdgeFade(_) | Draw::EdgeFadeX(_) => return false,
     };
@@ -395,7 +611,15 @@ impl Renderer {
         let program = link(
             &(vertex_prefix.clone() + include_str!("shaders/paint.vert")),
             &(fragment_prefix.clone() + include_str!("shaders/paint.frag")),
-            &[c"a_position", c"a_uv", c"a_color", c"a_shape", c"a_params"],
+            &[
+                c"a_position",
+                c"a_uv",
+                c"a_color",
+                c"a_shape",
+                c"a_params",
+                c"a_corners",
+                c"a_filter",
+            ],
         )?;
         let vector_program = match link(
             &(vertex_prefix.clone() + include_str!("shaders/vector.vert")),
@@ -587,7 +811,7 @@ impl Renderer {
             return;
         }
         let rect = self.snap(rect);
-        let start = self.vertices.len() / 14;
+        let start = self.vertices.len() / PAINT_FLOATS;
         for (x, y) in [(0., 0.), (1., 0.), (0., 1.), (0., 1.), (1., 0.), (1., 1.)] {
             let color = colors[y as usize];
             self.vertices.extend_from_slice(&[
@@ -606,13 +830,15 @@ impl Renderer {
                 radius,
                 border,
             ]);
+            self.vertices.extend_from_slice(&NO_CORNERS);
+            self.vertices.extend_from_slice(&[0.; 4]);
         }
-        self.paint_batch(start, 6, texture);
+        self.paint_batch(start, 6, texture, Blend::Normal);
     }
 
     /// Appends `count` paint vertices from `start`, merged into the previous batch when it uses
     /// the same texture, clip and fade.
-    fn paint_batch(&mut self, start: usize, count: usize, texture: GLuint) {
+    fn paint_batch(&mut self, start: usize, count: usize, texture: GLuint, blend: Blend) {
         if let Some(batch) = self.batches.last_mut() {
             let same_clip = match (batch.clip, self.clip) {
                 (None, None) => true,
@@ -624,9 +850,11 @@ impl Renderer {
                 && let BatchKind::Paint {
                     texture: previous,
                     count: batch_count,
+                    blend: previous_blend,
                     ..
                 } = &mut batch.kind
                 && *previous == texture
+                && *previous_blend == blend
             {
                 *batch_count += count;
                 return;
@@ -637,6 +865,7 @@ impl Renderer {
                 texture,
                 start,
                 count,
+                blend,
             },
             clip: self.clip,
             fade: self.fade,
@@ -659,7 +888,7 @@ impl Renderer {
             }
             (m, k)
         };
-        let start = self.vertices.len() / 14;
+        let start = self.vertices.len() / PAINT_FLOATS;
         for strip in 0..STRIPS {
             let rows = [
                 strip as f32 / STRIPS as f32,
@@ -685,9 +914,11 @@ impl Renderer {
                     -2.,
                     0.,
                 ]);
+                self.vertices.extend_from_slice(&NO_CORNERS);
+                self.vertices.extend_from_slice(&[0.; 4]);
             }
         }
-        self.paint_batch(start, STRIPS * 6, texture);
+        self.paint_batch(start, STRIPS * 6, texture, Blend::Normal);
     }
 
     fn text(&mut self, text: &str, rect: Rect, style: TextStyle, color: Color, centered: bool) {
@@ -701,16 +932,18 @@ impl Renderer {
             .max_physical_font_px
             .max(size_f * viewport.text_scale());
         let padded = rect.inset(-size_f);
-        if padded.x + padded.w < 0.
-            || padded.y + padded.h < 0.
-            || padded.x > 1920.
-            || padded.y > 1080.
-            || self.clip.is_some_and(|clip| {
-                padded.x + padded.w < clip.x
-                    || padded.y + padded.h < clip.y
-                    || padded.x > clip.x + clip.w
-                    || padded.y > clip.y + clip.h
-            })
+        // Rotated text can reach outside its layout box; it is never culled.
+        if style.angle == 0.
+            && (padded.x + padded.w < 0.
+                || padded.y + padded.h < 0.
+                || padded.x > 1920.
+                || padded.y > 1080.
+                || self.clip.is_some_and(|clip| {
+                    padded.x + padded.w < clip.x
+                        || padded.y + padded.h < clip.y
+                        || padded.x > clip.x + clip.w
+                        || padded.y > clip.y + clip.h
+                }))
         {
             return;
         }
@@ -718,6 +951,7 @@ impl Renderer {
         let key = TextKey {
             text: text.into(),
             weight: style.weight,
+            family: style.family,
             layout: [
                 size_f.to_bits(),
                 style.tracking.to_bits(),
@@ -730,11 +964,26 @@ impl Renderer {
                 | (u8::from(self.stats.multisample_samples > 1) << 2),
         };
         if self.text_runs.contains_key(&key) {
-            self.submit_text(key, origin, color);
+            self.submit_text(key, origin, color, style.angle);
             return;
         }
         let rect = Rect::new(0., 0., rect.w, rect.h);
-        let font_id = style.weight + if style.size >= 32. { 1000 } else { 0 };
+        let inter_id = style.weight + if style.size >= 32. { 1000 } else { 0 };
+        // A theme face: its bold file for heavy weights where there is one, else its regular,
+        // else Inter (a missing theme font must never draw nothing).
+        let font_id = if style.family > 0 {
+            let bold = theme_font_id(style.family, 700);
+            let regular = theme_font_id(style.family, 400);
+            if style.weight >= 600 && self.ensure_font(bold) {
+                bold
+            } else if self.ensure_font(regular) {
+                regular
+            } else {
+                inter_id
+            }
+        } else {
+            inter_id
+        };
         let cjk_id = if style.weight >= 500 { 2500 } else { 2400 };
         let hangul_id = cjk_id + 1000;
         if !self.ensure_font(font_id) {
@@ -914,10 +1163,10 @@ impl Renderer {
                 frame: self.frame,
             },
         );
-        self.submit_text(key, origin, color);
+        self.submit_text(key, origin, color, style.angle);
     }
 
-    fn submit_text(&mut self, key: TextKey, origin: [f32; 2], tint: Color) {
+    fn submit_text(&mut self, key: TextKey, origin: [f32; 2], tint: Color, angle: f32) {
         let run = self.text_runs.get_mut(&key).unwrap();
         run.frame = self.frame;
         self.stats.missing_glyphs += run.missing_glyphs;
@@ -925,7 +1174,12 @@ impl Renderer {
         if let Some(mesh) = &run.mesh {
             self.stats.text_triangles += mesh.vertices as usize / 3;
             self.batches.push(Batch {
-                kind: BatchKind::Text { key, origin, tint },
+                kind: BatchKind::Text {
+                    key,
+                    origin,
+                    tint,
+                    angle,
+                },
                 clip: self.clip,
                 fade: self.fade,
             });
@@ -1084,6 +1338,144 @@ impl Renderer {
             clip: Some(clip),
             fade: self.fade,
         });
+    }
+
+    /// A `Draw::Quad`: its texture (white for shapes and patterns), its image cropped to cover
+    /// it, then one cell per vertex quad, or an 8 × 8 grid when its corners are moved (so a
+    /// perspective turn does not fold the image along a diagonal).
+    fn quad_draw(&mut self, quad: &Quad) {
+        let (texture, size) = match &quad.image {
+            None => (self.white.id, None),
+            Some(QuadImage::App(image)) => {
+                let entry = self.textures.entry(image.key.clone()).or_insert_with(|| {
+                    Some(texture(
+                        image.pixels.width(),
+                        image.pixels.height(),
+                        image.pixels.as_raw(),
+                    ))
+                });
+                let Some(texture) = entry else {
+                    return;
+                };
+                texture.frame = self.frame;
+                (
+                    texture.id,
+                    Some((texture.width as f32, texture.height as f32)),
+                )
+            }
+        };
+        let rect = quad.rect;
+        if rect.w <= 0. || rect.h <= 0. {
+            return;
+        }
+        let uv = match size {
+            Some((width, height)) => {
+                let scale = (rect.w / width).max(rect.h / height);
+                let u = rect.w / (width * scale);
+                let v = rect.h / (height * scale);
+                [(1. - u) / 2., (1. - v) / 2., (1. + u) / 2., (1. + v) / 2.]
+            }
+            None => [0., 0., 1., 1.],
+        };
+        let (du, dv) = (uv[2] - uv[0], uv[3] - uv[1]);
+        let filter: [f32; 4] = match quad.filter {
+            Filter::None => [0.; 4],
+            Filter::Grey => [1., 0., 0., 0.],
+            Filter::Sepia => [2., 0., 0., 0.],
+            Filter::Duotone(dark, _) => {
+                let [r, g, b] = unpack_rgb(dark);
+                [3., r, g, b]
+            }
+            Filter::Pixel(block) => [
+                4.,
+                (rect.w / block.max(1.)) / du,
+                (rect.h / block.max(1.)) / dv,
+                0.,
+            ],
+            Filter::Blur(radius) => [5., radius / rect.w * du, radius / rect.h * dv, 0.],
+            Filter::Pattern(kind, period, width) => [10. + kind as u8 as f32, period, width, 0.],
+        };
+        // A duotone's light ink is the colour; the image is not tinted again.
+        let colors = match quad.filter {
+            Filter::Duotone(_, light) => {
+                let [r, g, b] = unpack_rgb(light);
+                quad.colors.map(|c| [r, g, b, c[3]])
+            }
+            _ => quad.colors,
+        };
+        let blur = (-quad.border).max(0.);
+        let flat = quad.angle == 0. && quad.points.is_none();
+        let outer = if flat {
+            self.snap(rect.inset(-blur))
+        } else {
+            rect.inset(-blur)
+        };
+        let points = if flat {
+            [
+                [outer.x, outer.y],
+                [outer.x + outer.w, outer.y],
+                [outer.x + outer.w, outer.y + outer.h],
+                [outer.x, outer.y + outer.h],
+            ]
+        } else {
+            quad.corner_points()
+        };
+        let uniform = quad.corners.iter().all(|r| *r == quad.corners[0]);
+        let radius = quad.corners.iter().copied().fold(0., f32::max);
+        // Square, borderless, plain images take the shader's cheaper texture path.
+        let (radius, corners) = if radius <= 0. && quad.border == 0. {
+            (-1., NO_CORNERS)
+        } else if uniform {
+            (radius, NO_CORNERS)
+        } else {
+            (radius, quad.corners)
+        };
+        let cells = if quad.points.is_some() { 8 } else { 1 };
+        let at = |u: f32, v: f32| {
+            let top = [
+                points[0][0] + (points[1][0] - points[0][0]) * u,
+                points[0][1] + (points[1][1] - points[0][1]) * u,
+            ];
+            let bottom = [
+                points[3][0] + (points[2][0] - points[3][0]) * u,
+                points[3][1] + (points[2][1] - points[3][1]) * u,
+            ];
+            [
+                top[0] + (bottom[0] - top[0]) * v,
+                top[1] + (bottom[1] - top[1]) * v,
+            ]
+        };
+        let start = self.vertices.len() / PAINT_FLOATS;
+        for row in 0..cells {
+            for column in 0..cells {
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (0, 1), (1, 0), (1, 1)] {
+                    let u = (column + dx) as f32 / cells as f32;
+                    let v = (row + dy) as f32 / cells as f32;
+                    let [x, y] = at(u, v);
+                    let color: Color =
+                        std::array::from_fn(|i| colors[0][i] + (colors[1][i] - colors[0][i]) * v);
+                    self.vertices.extend_from_slice(&[
+                        x,
+                        y,
+                        uv[0] + u * du,
+                        uv[1] + v * dv,
+                        color[0],
+                        color[1],
+                        color[2],
+                        color[3],
+                        (u - 0.5) * outer.w,
+                        (v - 0.5) * outer.h,
+                        outer.w / 2.,
+                        outer.h / 2.,
+                        radius,
+                        quad.border,
+                    ]);
+                    self.vertices.extend_from_slice(&corners);
+                    self.vertices.extend_from_slice(&filter);
+                }
+            }
+        }
+        self.paint_batch(start, cells * cells * 6, texture, quad.blend);
     }
 
     fn app_image(&mut self, image: &crate::app_artwork::Artwork, rect: Rect, tint: Color) {
@@ -1265,6 +1657,7 @@ impl Renderer {
                     self.image(path, *rect, *radius, *contain, *tint)
                 }
                 Draw::AppImage(image, rect, tint) => self.app_image(image, *rect, *tint),
+                Draw::Quad(quad) => self.quad_draw(quad),
                 Draw::Clip(clip) => self.clip = *clip,
                 Draw::EdgeFade(fade) => self.set_fade(0, *fade),
                 Draw::EdgeFadeX(fade) => self.set_fade(4, *fade),
@@ -1327,6 +1720,8 @@ impl Renderer {
             gl::ActiveTexture(gl::TEXTURE0);
             let mut paint_bound = false;
             let mut current_fade = None;
+            let mut current_blend = Blend::Normal;
+            Blend::Normal.apply(self.program);
             for batch in &self.batches {
                 if current_fade != Some(batch.fade) {
                     // The same cheap alpha mask applies to shapes, textures,
@@ -1351,6 +1746,11 @@ impl Renderer {
                     }
                     current_fade = Some(batch.fade);
                     paint_bound = false;
+                    // The loop above left the text program in use: the blend's uniform is
+                    // the paint program's, so set it again when it next binds.
+                    if current_blend != Blend::Normal {
+                        current_blend.apply(self.program);
+                    }
                 }
                 let clip = batch.clip.map(|clip| {
                     [
@@ -1369,24 +1769,29 @@ impl Renderer {
                         texture,
                         start,
                         count,
+                        blend,
                     } => {
                         if !paint_bound {
                             gl::UseProgram(self.program);
                             gl::BindBuffer(gl::ARRAY_BUFFER, self.buffer);
                             let mut offset = 0;
-                            for (index, size) in [2, 2, 4, 4, 2].into_iter().enumerate() {
+                            for (index, size) in PAINT_ATTRIBUTES.into_iter().enumerate() {
                                 gl::EnableVertexAttribArray(index as u32);
                                 gl::VertexAttribPointer(
                                     index as u32,
                                     size,
                                     gl::FLOAT,
                                     gl::FALSE,
-                                    56,
+                                    (PAINT_FLOATS * size_of::<f32>()) as i32,
                                     (offset * size_of::<f32>()) as *const _,
                                 );
                                 offset += size as usize;
                             }
                             paint_bound = true;
+                        }
+                        if *blend != current_blend {
+                            blend.apply(self.program);
+                            current_blend = *blend;
                         }
                         gl::BindTexture(gl::TEXTURE_2D, *texture);
                         gl::DrawArrays(gl::TRIANGLES, *start as i32, *count as i32);
@@ -1395,20 +1800,34 @@ impl Renderer {
                         let Some(mesh) = self.vectors.get(path).and_then(Option::as_ref) else {
                             continue;
                         };
+                        if current_blend != Blend::Normal {
+                            Blend::Normal.apply(self.program);
+                            current_blend = Blend::Normal;
+                        }
                         self.draw_mesh(
                             self.vector_program,
                             mesh,
                             [rect.w / mesh.width, rect.h / mesh.height, rect.x, rect.y],
                             *tint,
                             0.,
+                            0.,
                         );
                         paint_bound = false;
                     }
-                    BatchKind::Text { key, origin, tint } => {
+                    BatchKind::Text {
+                        key,
+                        origin,
+                        tint,
+                        angle,
+                    } => {
                         let Some(mesh) = self.text_runs.get(key).and_then(|run| run.mesh.as_ref())
                         else {
                             continue;
                         };
+                        if current_blend != Blend::Normal {
+                            Blend::Normal.apply(self.program);
+                            current_blend = Blend::Normal;
+                        }
                         let size = f32::from_bits(key.layout[0]) * vh as f32 / 1080.;
                         self.draw_mesh(
                             self.text_program,
@@ -1416,12 +1835,16 @@ impl Renderer {
                             [1., 1., origin[0], origin[1]],
                             *tint,
                             embolden(size, self.text_embolden),
+                            *angle,
                         );
                         paint_bound = false;
                     }
                 }
             }
             gl::Disable(gl::SCISSOR_TEST);
+            if current_blend != Blend::Normal {
+                Blend::Normal.apply(self.program);
+            }
         }
         // Keep the current scene, evict old full-resolution wallpapers before memory grows.
         let mut bytes: usize = self
@@ -1465,6 +1888,7 @@ impl Renderer {
         transform: [f32; 4],
         tint: Color,
         embolden: f32,
+        angle: f32,
     ) {
         let viewport = self.stats.viewport;
         unsafe {
@@ -1482,9 +1906,21 @@ impl Renderer {
                     gl::GetUniformLocation(program, c"u_embolden".as_ptr()),
                     embolden,
                 );
+                // Rotation about the run's origin: cos, sin, then the pivot.
+                let radians = angle.to_radians();
+                gl::Uniform4f(
+                    gl::GetUniformLocation(program, c"u_rotate".as_ptr()),
+                    radians.cos(),
+                    radians.sin(),
+                    transform[2],
+                    transform[3],
+                );
             }
             gl::BindBuffer(gl::ARRAY_BUFFER, mesh.buffer);
-            gl::DisableVertexAttribArray(4);
+            // The paint program's extra attributes must not read past this smaller buffer.
+            for index in 4..PAINT_ATTRIBUTES.len() as u32 {
+                gl::DisableVertexAttribArray(index);
+            }
             let mut offset = 0;
             for (index, size) in [2, 2, 4, 1].into_iter().enumerate() {
                 gl::EnableVertexAttribArray(index as u32);
@@ -1691,8 +2127,19 @@ fn is_hangul(c: char) -> bool {
     )
 }
 
+/// A theme face's font id: 10000 + 1000 per family + its weight file (400 or 700).
+fn theme_font_id(family: u8, weight: u16) -> u16 {
+    10_000 + u16::from(family.min(50)) * 1000 + weight
+}
+
 fn load_font(directory: &Path, id: u16) -> Result<Font, String> {
-    let name = if id >= 3000 {
+    let name = if id >= 10_000 {
+        let family = usize::from((id - 10_000) / 1000);
+        let stem = crate::themes::FONT_FAMILIES
+            .get(family.wrapping_sub(1))
+            .ok_or_else(|| format!("No theme font family {family}"))?;
+        format!("theme-{stem}-{}.ttf", (id - 10_000) % 1000)
+    } else if id >= 3000 {
         format!("font-kr-{}.ttf", id - 3000)
     } else if id >= 2000 {
         format!("font-cjk-{}.ttf", id - 2000)

@@ -34,6 +34,18 @@ try {
 } catch {
   throw new Error('Prepare the bundled Chinese and Korean fonts with pnpm assets:fonts first.');
 }
+// The Home themes' fonts: Latin subsets frozen at 400 and 700, loaded only when in use.
+for (const file of await fs.readdir(out)) {
+  if (/^theme-.*\.ttf$/.test(file)) await fs.rm(path.join(out, file));
+}
+for (const file of await fs.readdir(path.join(source, 'fonts/themes'))) {
+  if (/^theme-.*\.ttf$/.test(file)) {
+    await fs.copyFile(path.join(source, 'fonts/themes', file), path.join(out, file));
+  }
+}
+await fs.cp(path.join(source, 'fonts/themes/licenses'), path.join(out, 'theme-font-licenses'), {
+  recursive: true,
+});
 const weights = spawnSync(
   'python3',
   [path.join(import.meta.dirname, 'font-weights.py'), out, cjk, hangul],

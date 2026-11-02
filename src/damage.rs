@@ -86,6 +86,9 @@ pub fn bounds(command: &Draw) -> Option<Rect> {
         | Draw::TintedImage(_, rect, ..)
         | Draw::AppImage(_, rect, _) => Some(rect.inset(-1.)),
         Draw::Shadow(rect, _, blur, _) => Some(rect.inset(-blur - 1.)),
+        Draw::Quad(quad) => Some(quad.bounds()),
+        // Rotated text can reach anywhere around its origin: redraw the screen.
+        Draw::Text(_, _, style, ..) if style.angle != 0. => None,
         // Glyphs may extend past their layout box: redraw the full width of the line.
         Draw::Text(_, rect, style, ..) => Some(Rect::new(
             0.,
@@ -117,6 +120,8 @@ fn same(a: &Draw, b: &Draw) -> bool {
                 && s1.tracking == s2.tracking
                 && s1.line_height == s2.line_height
                 && s1.align_right == s2.align_right
+                && s1.family == s2.family
+                && s1.angle == s2.angle
                 && c1 == c2
                 && x1 == x2
         }
@@ -129,6 +134,7 @@ fn same(a: &Draw, b: &Draw) -> bool {
         (Draw::AppImage(i1, r1, t1), Draw::AppImage(i2, r2, t2)) => {
             Arc::ptr_eq(i1, i2) && rect(r1, r2) && t1 == t2
         }
+        (Draw::Quad(q1), Draw::Quad(q2)) => q1.same(q2),
         (Draw::Clip(c1), Draw::Clip(c2)) => match (c1, c2) {
             (Some(r1), Some(r2)) => rect(r1, r2),
             (None, None) => true,

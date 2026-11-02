@@ -15,6 +15,12 @@ pub const SECTION_COUNT: usize = 5;
 /// Settings > Lists: the MDBList rows on Home, after System, shown with an MDBList key.
 pub const LISTS_SECTION: usize = 5;
 pub const APPS_COLUMNS: usize = 6;
+/// Settings > Interface rows added with themes and the sound volume; the numbers continue
+/// after the existing rows' (0 to 19).
+pub const VOLUME_SETTING: usize = 20;
+pub const THEME_SETTING: usize = 21;
+pub const REDUCED_EFFECTS_SETTING: usize = 22;
+use crate::sounds::VOLUME_MIN;
 /// Automatic inventory retries before the error shows: with the 6.5 s Luna timeout about 50 s.
 pub const INVENTORY_RETRIES: u32 = 5;
 pub const INVENTORY_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -180,6 +186,8 @@ pub enum Subpage {
     TextRendering,
     /// Settings > Lists > Add a list.
     AddList,
+    /// Settings > Interface > Theme: Home's looks.
+    Theme,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -320,6 +328,13 @@ impl State {
     }
 
     pub fn tick(&mut self) {
+        let layout = crate::themes::get(&self.preferences.theme).layout;
+        if self.feeds.layout != layout {
+            self.feeds.layout = layout;
+            // Rows are longer or shorter in the new layout.
+            self.feeds.clamp_scroll();
+            self.dirty = true;
+        }
         if self.feeds.fading() || self.feeds.finish_fades() {
             self.dirty = true;
         }
@@ -858,9 +873,18 @@ impl State {
             Some(Subpage::Language) => Target::Setting(4),
             Some(Subpage::TextRendering) => Target::Setting(7),
             Some(Subpage::AddList) => Target::ListAdd,
+            Some(Subpage::Theme) => Target::Setting(THEME_SETTING),
             None => Target::Sidebar(self.section),
         };
         self.scroll = 0.;
+        self.dirty = true;
+    }
+
+    /// Sets the navigation sounds' volume and plays the move tick at it, so the new level is
+    /// heard at once.
+    fn set_ui_volume(&mut self, volume: u8) {
+        self.preferences.ui_volume = volume.clamp(VOLUME_MIN, 100);
+        self.sound = Some(Sound::Move);
         self.dirty = true;
     }
 
@@ -1024,6 +1048,7 @@ impl State {
                         | Subpage::TextRendering,
                     ) => 2,
                     Some(Subpage::Language) => Language::ALL.len(),
+                    Some(Subpage::Theme) => crate::themes::THEMES.len(),
                     _ => 3,
                 };
                 match direction {
@@ -1092,13 +1117,32 @@ impl State {
             }
             if matches!(
                 self.focus,
-                Target::Setting(0 | 1 | 4 | 6 | 7)
+                Target::Setting(0 | 1 | 4 | 6 | 7 | THEME_SETTING)
                     | Target::InputMode(_)
                     | Target::WeatherLocation
                     | Target::WeatherTemperature
             ) && matches!(direction, Direction::Right)
             {
                 return self.activate();
+            }
+            // Sound volume is a dial: Right turns it up and Left down, a step at a time.
+            if self.focus == Target::Setting(VOLUME_SETTING)
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                let volume = self.preferences.ui_volume.clamp(VOLUME_MIN, 100);
+                let next = if matches!(direction, Direction::Right) {
+                    (volume + 10).min(100)
+                } else {
+                    volume.saturating_sub(10).max(VOLUME_MIN)
+                };
+                if next != volume {
+                    self.set_ui_volume(next);
+                    return vec![Effect::Save];
+                }
+                // At the quietest step Left goes on to the sidebar, as from any row.
+                if matches!(direction, Direction::Right) {
+                    return vec![];
+                }
             }
             if matches!(self.focus, Target::Setting(_) | Target::WeatherToggle)
                 && matches!(direction, Direction::Right)
@@ -1884,6 +1928,24 @@ impl State {
                         self.preferences.feed_hide_spoilers = !self.preferences.feed_hide_spoilers;
                     }
                     19 => self.preferences.ui_sounds = !self.preferences.ui_sounds,
+                    // OK steps the volume up, from the loudest back round to the quietest.
+                    VOLUME_SETTING => {
+                        let next = self.preferences.ui_volume.clamp(VOLUME_MIN, 100) + 10;
+                        self.set_ui_volume(if next > 100 { VOLUME_MIN } else { next });
+                    }
+                    THEME_SETTING => {
+                        self.subpage = Some(Subpage::Theme);
+                        self.focus =
+                            Target::Choice(crate::themes::index_of(&self.preferences.theme));
+                        self.scroll = 0.;
+                        if !self.preferences.reduced_motion {
+                            self.panel_started = Some(Instant::now());
+                        }
+                        return vec![];
+                    }
+                    REDUCED_EFFECTS_SETTING => {
+                        self.preferences.reduced_effects = !self.preferences.reduced_effects;
+                    }
                     18 => {
                         self.preferences.feed_select_details =
                             !self.preferences.feed_select_details;
@@ -1975,6 +2037,10 @@ impl State {
                         self.preferences.language =
                             Language::ALL[index.min(Language::ALL.len() - 1)];
                         self.weather.cancel_search();
+                    }
+                    Some(Subpage::Theme) => {
+                        let themes = &crate::themes::THEMES;
+                        self.preferences.theme = themes[index.min(themes.len() - 1)].key.into();
                     }
                     Some(Subpage::TextRendering) => {
                         let mode = TextRendering::ALL[index.min(TextRendering::ALL.len() - 1)];

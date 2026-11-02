@@ -28,6 +28,9 @@
   native artwork. Logos identify third-party apps; Luma is unaffiliated with their owners.
 - SDL-webOS 2.30.12 (`release-2.30.12-webos.5`, standard SDL ABI), zlib license.
   `tools/webos-runtime.mjs` records archive/library SHA-256. Notice at `assets/licenses/sdl2.txt`.
+- Home theme fonts: 35 Google Fonts families (34 SIL OFL 1.1, Special Elite Apache 2.0), Latin
+  subsets frozen at weights 400 and 700, in `assets/fonts/themes/` with each family's licence
+  and the pinned google/fonts revision in its README. Loaded only by the theme that uses them.
 
 The bundled icon/logo SVG sources are compiled into derived `.lvec` triangles with the same
 source licenses. Apple TV, Disney+, Prime Video and Das Erste retain the white display treatment.
