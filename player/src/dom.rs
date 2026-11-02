@@ -41,6 +41,18 @@ pub fn set_html_with(id: &str, html: &str, child: &str) {
     }
 }
 
+/// Like `set_html_with`, for a layer holding several updated elements.
+pub fn set_html_children(id: &str, html: &str, children: &[&str]) {
+    if set_html(id, html) {
+        WRITTEN.with(|w| {
+            let mut written = w.borrow_mut();
+            for child in children {
+                written.remove(*child);
+            }
+        });
+    }
+}
+
 /// Sets an element's HTML only when it changed, so the TV doesn't lay out for nothing.
 /// True when it was written.
 pub fn set_html(id: &str, html: &str) -> bool {

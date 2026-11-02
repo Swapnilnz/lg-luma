@@ -3,6 +3,7 @@
 
 use crate::app::{App, OsdButton, OsdFocus, Panel, Screen, SubChoice};
 use crate::dom::{self, escape, now_ms};
+use luma_core::badges::{BadgeKind, StreamInfo, genre_name};
 use luma_core::resume::Offer;
 use luma_core::selection::{language_name, same_language};
 use luma_core::time::{clock, short, wall_clock};
@@ -403,6 +404,21 @@ fn info_rows(app: &App) -> Vec<Row> {
             detail: stream.description.clone(),
             ..Row::default()
         });
+        // What the stream is, as the loading screen's badges said it.
+        if let Some((_, _, info)) = app.stream_details() {
+            let format: Vec<&str> = info.badges.iter().map(|b| b.label.as_str()).collect();
+            let source: Vec<String> = [info.service.clone(), info.size.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+            if !format.is_empty() || !source.is_empty() {
+                rows.push(Row {
+                    label: format.join(" · "),
+                    detail: source.join(" · "),
+                    ..Row::default()
+                });
+            }
+        }
         let (w, h) = app.video.size();
         if w > 0 {
             rows.push(Row {
@@ -425,11 +441,25 @@ pub fn render(app: &App) {
     // Kept while the stage fades out, so the picture appears under the full logo.
     let stage_html = stage(app);
     if !stage_html.is_empty() {
-        dom::set_html_with("stage", &stage_html, "lstatus");
+        dom::set_html_children("stage", &stage_html, &["lstatus", "lsteps", "lstream"]);
     }
     let loading = matches!(app.screen, Screen::Loading(_)) || app.starting();
     if loading {
         dom::set_html("lstatus", &escape(&app.loading_status()));
+        dom::set_html("lsteps", &steps(app));
+        // The stream's card rises in once one is picked, and stays as the stage fades.
+        let card = stream_card(app);
+        if !card.is_empty() {
+            dom::set_html("lstream", &card);
+        }
+        dom::set_class(
+            "lstream",
+            if card.is_empty() {
+                "streamcard"
+            } else {
+                "streamcard on"
+            },
+        );
     }
     dom::set_var("stage", "--p", &format!("{:.3}", app.load_progress()));
     let stage_class = if matches!(app.screen, Screen::Playing) && !app.starting() {
@@ -570,7 +600,8 @@ fn backdrop(app: &App) -> String {
 }
 
 fn hero(app: &App) -> String {
-    let mark = match app.meta.as_ref().and_then(|m| m.logo.as_ref()) {
+    let logo = app.meta.as_ref().and_then(|m| m.logo.as_ref());
+    let mark = match logo {
         Some(logo) => format!(
             r#"<img class="logo" src="{}" alt="{}">"#,
             escape(logo),
@@ -578,15 +609,174 @@ fn hero(app: &App) -> String {
         ),
         None => format!(r#"<h1>{}</h1>"#, escape(&app.title())),
     };
+    // A light that sweeps across the logo while loading, cut to the logo's own shape.
+    let gleam = logo
+        .map(|logo| {
+            let url = escape(logo);
+            format!(
+                r#"<div class="gleam" style="-webkit-mask-image:url('{url}');mask-image:url('{url}')"><i></i></div>"#
+            )
+        })
+        .unwrap_or_default();
     // The mark twice: a faint ghost, and a copy that fills in over it as loading goes on.
     let title = format!(
-        r#"<div class="markfill"><div class="ghost">{mark}</div><div class="fill">{mark}</div></div>"#
+        r#"<div class="markfill"><div class="ghost">{mark}</div><div class="fill">{mark}</div>{gleam}</div>"#
     );
+    let facts = facts_line(app)
+        .map(|line| format!(r#"<div class="facts">{}</div>"#, escape(&line)))
+        .unwrap_or_default();
     let episode = app
         .episode_line()
         .map(|line| format!(r#"<div class="episode">{}</div>"#, escape(&line)))
         .unwrap_or_default();
-    format!("{title}{episode}")
+    format!("{title}{facts}{episode}")
+}
+
+/// "2024 · Sci-Fi, Drama · 2h 46m" under the logo.
+fn facts_line(app: &App) -> Option<String> {
+    let meta = app.meta.as_ref()?;
+    let mut parts: Vec<String> = Vec::new();
+    if !meta.year.is_empty() {
+        parts.push(meta.year.clone());
+    }
+    let genres: Vec<&str> = meta
+        .genres
+        .iter()
+        .filter_map(|id| genre_name(*id))
+        .take(2)
+        .collect();
+    if !genres.is_empty() {
+        parts.push(genres.join(", "));
+    }
+    if let Some(minutes) = meta.runtime.filter(|m| *m > 0.) {
+        let minutes = minutes.round() as u32;
+        parts.push(match (minutes / 60, minutes % 60) {
+            (0, m) => format!("{m}m"),
+            (h, 0) => format!("{h}h"),
+            (h, m) => format!("{h}h {m}m"),
+        });
+    }
+    (!parts.is_empty()).then(|| parts.join("  ·  "))
+}
+
+/// Specks of light drifting up the loading screen, each on its own path and pace. The same
+/// every time (no randomness), so the stage's HTML stays put and they never restart.
+fn motes() -> String {
+    let mut html = String::from(r#"<div class="motes">"#);
+    for i in 0u32..18 {
+        let n = i.wrapping_mul(2_654_435_761).rotate_left(7);
+        let x = 4 + (n % 92);
+        let size = 2 + (n >> 8) % 5;
+        let duration = 11 + (n >> 12) % 9;
+        let delay = (n >> 16) % 12;
+        let drift = ((n >> 20) % 140) as i32 - 70;
+        let opacity = 0.18 + ((n >> 24) % 40) as f32 / 100.;
+        html.push_str(&format!(
+            r#"<i style="left:{x}%;width:{size}px;height:{size}px;--dx:{drift}px;--o:{opacity:.2};animation-duration:{duration}s;animation-delay:-{delay}s"></i>"#
+        ));
+    }
+    html.push_str("</div>");
+    html
+}
+
+/// The loading steps: details, streams, connecting, buffering; each ticked once done, the
+/// current one pulsing.
+fn steps(app: &App) -> String {
+    let stage = app.load_stage_now();
+    let steps: [(&str, bool, bool); 4] = [
+        ("Details", stage >= 1, stage == 0),
+        ("Streams", stage >= 2, stage == 1),
+        ("Connecting", stage >= 4, stage == 2 || stage == 3),
+        ("Buffering", stage >= 5, stage == 4),
+    ];
+    let mut html = String::new();
+    for (i, (label, done, active)) in steps.iter().enumerate() {
+        if i > 0 {
+            html.push_str(&format!(
+                r#"<span class="link{}"></span>"#,
+                if *done || *active { " lit" } else { "" }
+            ));
+        }
+        let (class, mark) = if *done {
+            ("step done", icons::svg(icons::CHECK))
+        } else if *active {
+            ("step active", String::from("<b></b>"))
+        } else {
+            ("step", String::new())
+        };
+        html.push_str(&format!(
+            r#"<span class="{class}"><span class="mark">{mark}</span>{label}</span>"#
+        ));
+    }
+    html
+}
+
+/// A badge's inside: Dolby's in two lines, as their marks read; the rest a word, some with
+/// an icon.
+fn badge_body(kind: BadgeKind, label: &str) -> String {
+    match kind {
+        BadgeKind::DolbyVision => "<b>Dolby</b><em>Vision</em>".into(),
+        BadgeKind::Atmos => "<b>Dolby</b><em>Atmos</em>".into(),
+        BadgeKind::Source => format!("{}{}", icons::svg(icons::DISC), escape(label)),
+        BadgeKind::Audio => format!("{}{}", icons::svg(icons::SPEAKER), escape(label)),
+        BadgeKind::Language => format!("{}{}", icons::svg(icons::GLOBE), escape(label)),
+        BadgeKind::Cam => format!("{}{}", icons::svg(icons::ALERT), escape(label)),
+        _ => escape(label),
+    }
+}
+
+fn badges_html(info: &StreamInfo) -> String {
+    let mut html = String::new();
+    for (i, badge) in info.badges.iter().enumerate() {
+        html.push_str(&format!(
+            r#"<span class="badge {}" style="--i:{i}">{}</span>"#,
+            badge.kind.class(),
+            badge_body(badge.kind, &badge.label)
+        ));
+    }
+    if let Some(size) = &info.size {
+        html.push_str(&format!(
+            r#"<span class="badge size" style="--i:{}">{}{}</span>"#,
+            info.badges.len(),
+            icons::svg(icons::DRIVE),
+            escape(size)
+        ));
+    }
+    html
+}
+
+/// The stream being loaded: its service (and whether the file is ready there), its place in
+/// AIOStreams' list, its badges and the release's name.
+fn stream_card(app: &App) -> String {
+    let Some((index, count, info)) = app.stream_details() else {
+        return String::new();
+    };
+    let service = info
+        .service
+        .clone()
+        .unwrap_or_else(|| "Direct stream".into());
+    let tag = match info.cached {
+        Some(true) => r#"<span class="sc-tag ready">Cached</span>"#,
+        Some(false) => r#"<span class="sc-tag wait">Downloading</span>"#,
+        None => "",
+    };
+    let release = info
+        .release
+        .as_ref()
+        .map(|name| format!(r#"<div class="sc-file">{}</div>"#, escape(name)))
+        .unwrap_or_default();
+    format!(
+        r#"<div class="sc" data-s="{index}"><div class="sc-top"><span class="sc-icon{}">{}</span><span class="sc-src">{}</span>{tag}<span class="sc-count">Stream {} of {count}</span></div><div class="badges">{}</div>{release}</div>"#,
+        if info.cached == Some(true) {
+            " ready"
+        } else {
+            ""
+        },
+        icons::svg(icons::BOLT),
+        escape(&service),
+        index + 1,
+        badges_html(&info)
+    )
 }
 
 fn button(label: &str, focused: bool, index: usize) -> String {
@@ -601,8 +791,9 @@ fn stage(app: &App) -> String {
     match &app.screen {
         Screen::Playing if !app.starting() => String::new(),
         Screen::Loading(_) | Screen::Playing => format!(
-            r#"{}<div class="shade"></div><div class="hero">{}<div class="status" id="lstatus"></div></div>"#,
+            r#"{}<div class="aurora"><i></i><i></i><i></i></div><div class="shade"></div>{}<div class="vignette"></div><div class="hero">{}<div class="steps" id="lsteps"></div><div class="status" id="lstatus"></div><div class="meter"><div class="bar"></div><div class="glint"></div></div></div><div class="streamcard" id="lstream"></div>"#,
             backdrop(app),
+            motes(),
             hero(app),
         ),
         Screen::SignIn { code, url, qr } => format!(
@@ -1101,4 +1292,11 @@ mod icons {
     pub const SETTINGS: &str = r#"<path d="M20 7h-9M14 17H4"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>"#;
     pub const CHECK: &str = r#"<path d="M20 6 9 17l-5-5"/>"#;
     pub const CHEVRON: &str = r#"<path d="m9 18 6-6-6-6"/>"#;
+    pub const BOLT: &str =
+        r#"<path d="M13 2 4.5 13.5H12L11 22l8.5-11.5H12z" fill="currentColor" stroke="none"/>"#;
+    pub const DISC: &str = r#"<circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="12" r="2.5"/><path d="M12 5.5a6.5 6.5 0 0 1 6.5 6.5"/>"#;
+    pub const SPEAKER: &str = r#"<path d="M4 9.5v5h3.5L12 19V5L7.5 9.5z" fill="currentColor" stroke="none"/><path d="M15.5 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11"/>"#;
+    pub const GLOBE: &str = r#"<circle cx="12" cy="12" r="9.5"/><path d="M2.5 12h19M12 2.5a14.5 14.5 0 0 1 0 19M12 2.5a14.5 14.5 0 0 0 0 19"/>"#;
+    pub const DRIVE: &str = r#"<rect x="2.5" y="13" width="19" height="7" rx="2"/><path d="M5.5 13 8 4.5h8l2.5 8.5M17 16.5h.01"/>"#;
+    pub const ALERT: &str = r#"<path d="M12 3 2 20.5h20z"/><path d="M12 9.5v5M12 17.5h.01"/>"#;
 }

@@ -4,8 +4,9 @@
 //!
 //! Configuration is `feeds.json` next to the preferences file. Without it nothing starts.
 use crate::app_artwork::Artwork;
+use crate::feeds::explore::{ANIME_GENRES, Found, GENRES, Genre, Query};
 use crate::feeds::{
-    Details, Episode, Item, Person, Row, Season, Status, TitleInfo, TraktAction, TraktTitle,
+    Details, Episode, Item, Person, Row, Season, Status, TitleInfo, TraktAction, TraktTitle, Watch,
 };
 use image::{ImageReader, Limits};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,12 @@ const UP_NEXT_SHOWS: usize = 12;
 const RETRY: Duration = Duration::from_secs(5 * 60);
 /// Returning to Home refreshes Trakt rows at most this often.
 const TRAKT_REFOCUS: Duration = Duration::from_secs(2 * 60);
+/// Titles a row's full list holds in Explore, and how many posters are looked up per batch
+/// while it fills in.
+const EXPAND_LIMIT: usize = 100;
+const EXPAND_BATCH: usize = 12;
+/// The Watchlist row Explore adds when feeds.json has none.
+const WATCHLIST: &str = "trakt:watchlist";
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -136,6 +143,9 @@ pub struct RowConfig {
     /// `trakt:calendar`, `smart:because[:N]`, `smart:new_season`, `mdblist:USER/LIST` or
     /// `mdblist:LIST_ID`.
     pub source: String,
+    /// Shown only in Explore: the Watchlist row added when feeds.json has none.
+    #[serde(skip)]
+    pub hidden: bool,
 }
 
 impl Config {
@@ -155,6 +165,18 @@ impl Config {
         }
         self.rows.retain(|row| !row.source.trim().is_empty());
         self.rows.truncate(60);
+        // Explore's My Watchlist needs the Watchlist's titles: without a row for it, a hidden
+        // one loads them (only when Trakt is in use, so its sign-in shows on Home).
+        if self.trakt_configured()
+            && self.rows.iter().any(|row| needs_trakt(&row.source))
+            && !self.rows.iter().any(|row| row.source == WATCHLIST)
+        {
+            self.rows.push(RowConfig {
+                title: "My Watchlist".into(),
+                source: WATCHLIST.into(),
+                hidden: true,
+            });
+        }
         self
     }
 
@@ -348,17 +370,21 @@ pub fn initial_rows(config: &Config, saved: &Saved) -> Vec<Row> {
                     .title
                     .clone()
                     .unwrap_or_else(|| static_title(&row.title)),
-                pinned: config.always_loaded(&row.source),
-                hero: config.hero_source(&row.source),
-                extra: config.shelf_source(&row.source),
+                pinned: !row.hidden && config.always_loaded(&row.source),
+                hero: !row.hidden && config.hero_source(&row.source),
+                extra: !row.hidden && config.shelf_source(&row.source),
+                source: row.source.clone(),
+                hidden: row.hidden,
                 status: Status::Ready,
                 items: saved.items.clone(),
             },
             None => Row {
                 title: static_title(&row.title),
-                pinned: config.always_loaded(&row.source),
-                hero: config.hero_source(&row.source),
-                extra: config.shelf_source(&row.source),
+                pinned: !row.hidden && config.always_loaded(&row.source),
+                hero: !row.hidden && config.hero_source(&row.source),
+                extra: !row.hidden && config.shelf_source(&row.source),
+                source: row.source.clone(),
+                hidden: row.hidden,
                 status: Status::Loading,
                 items: vec![],
             },
@@ -388,8 +414,15 @@ pub enum Command {
     /// Home came back from Luma Player: Trakt rows reload at once, whatever the limit.
     RefreshNow,
     /// The rows on or near screen: only their artwork is downloaded and kept.
-    /// With `keep`, posters already sent stay with Home wherever it scrolls.
-    Near { rows: Vec<usize>, keep: bool },
+    /// With `keep`, posters already sent stay with Home wherever it scrolls. `extra` is
+    /// artwork Explore shows, by URL.
+    Near {
+        rows: Vec<usize>,
+        keep: bool,
+        extra: Vec<String>,
+    },
+    /// A row's full list for Explore, up to EXPAND_LIMIT titles.
+    Expand(usize),
     /// What Trakt knows about a title: Watchlist, watched episodes, next episode.
     TitleState(String),
     /// A change on Trakt.
@@ -440,6 +473,23 @@ pub enum Response {
     },
     /// MDBList lists for Settings > Lists > Add.
     Lists(Result<Vec<crate::feeds::ListInfo>, String>),
+    /// A row's full list for Explore, once its posters are looked up.
+    Expanded {
+        row: usize,
+        result: Result<Vec<Item>, String>,
+    },
+    /// TMDB Discover's titles for Explore's filters, answering request `id`.
+    Discover {
+        id: u64,
+        query: Query,
+        result: Result<Vec<Found>, String>,
+    },
+    /// What Trakt says has been watched, and what is on the Watchlist (with its title), by
+    /// card link, each title under both its IMDb and its TMDB link.
+    Marks {
+        watched: HashMap<String, Watch>,
+        watchlist: HashMap<String, String>,
+    },
 }
 
 pub struct Service {
@@ -454,6 +504,8 @@ pub struct Service {
     /// Titles whose artwork Home wants ahead of focus (slides, cards near the screen), each
     /// with whether its full-screen backdrop is wanted too; None without a TMDB key.
     slides: Option<mpsc::Sender<Vec<(String, bool)>>>,
+    /// Explore's filtered searches; None without a TMDB key.
+    discover: Option<mpsc::Sender<(u64, Query)>>,
     trakt: bool,
     /// For lookups that answer on their own thread (Settings > Lists).
     responses: mpsc::Sender<Response>,
@@ -496,6 +548,12 @@ impl Service {
             thread::spawn(move || slides_worker(&key, requests, responses));
             sender
         });
+        let discover = config.as_ref().and_then(tmdb_key).map(|key| {
+            let (sender, requests) = mpsc::channel();
+            let responses = responses.clone();
+            thread::spawn(move || discover_worker(&key, requests, responses));
+            sender
+        });
         // Trakt changes run on the row worker, which holds the sign-in.
         let trakt = config
             .as_ref()
@@ -514,6 +572,7 @@ impl Service {
             details,
             titles,
             slides,
+            discover,
             trakt,
             responses: lookups,
             mdblist,
@@ -586,8 +645,20 @@ impl Service {
         }
     }
 
-    pub fn near(&self, rows: Vec<usize>, keep: bool) {
-        let _ = self.sender.send(Command::Near { rows, keep });
+    pub fn near(&self, rows: Vec<usize>, keep: bool, extra: Vec<String>) {
+        let _ = self.sender.send(Command::Near { rows, keep, extra });
+    }
+
+    /// A row's full list, for Explore.
+    pub fn expand(&self, row: usize) {
+        let _ = self.sender.send(Command::Expand(row));
+    }
+
+    /// TMDB Discover's titles for Explore's filters; answered as `Response::Discover`.
+    pub fn discover(&self, id: u64, query: Query) {
+        if let Some(discover) = &self.discover {
+            let _ = discover.send((id, query));
+        }
     }
 
     pub fn refresh(&self) {
@@ -1231,6 +1302,7 @@ pub fn apply_lists(config: &mut Config, lists: Option<&[crate::model::FeedList]>
             RowConfig {
                 title: list.title.clone(),
                 source: list.source.clone(),
+                hidden: false,
             },
         );
     }
@@ -1787,6 +1859,224 @@ fn slides_worker(
     }
 }
 
+/// Explore's filtered searches, newest first: a search already overtaken is never sent.
+/// Anime keywords (Isekai, Mecha...) are looked up once and remembered.
+fn discover_worker(
+    key: &str,
+    requests: mpsc::Receiver<(u64, Query)>,
+    responses: mpsc::Sender<Response>,
+) {
+    let http = Http::new();
+    let mut keywords: HashMap<String, Option<u64>> = HashMap::new();
+    while let Ok(mut request) = requests.recv() {
+        while let Ok(newer) = requests.try_recv() {
+            request = newer;
+        }
+        let (id, query) = request;
+        let result = discover(&http, key, &query, &mut keywords);
+        if let Err(error) = &result {
+            eprintln!("Luma feeds: Explore search: {error}");
+        }
+        if responses
+            .send(Response::Discover { id, query, result })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Pages of TMDB Discover asked for per kind: about 60 titles of each.
+const DISCOVER_PAGES: u64 = 3;
+
+/// TMDB Discover for Explore's filters: movies, shows or both (anime is Japanese animation
+/// of either), in the chosen genre and order, interleaved and each title once.
+fn discover(
+    http: &Http,
+    key: &str,
+    query: &Query,
+    keywords: &mut HashMap<String, Option<u64>>,
+) -> Result<Vec<Found>, String> {
+    use crate::feeds::explore::{Kind as Type, Sort};
+    let kinds: &[Kind] = match query.kind {
+        Type::Movies => &[Kind::Movie],
+        Type::Shows => &[Kind::Series],
+        Type::All => &[Kind::Movie, Kind::Series],
+        Type::Anime => &[Kind::Series, Kind::Movie],
+    };
+    let anime = query.kind == Type::Anime;
+    let genre: Option<&Genre> = query.genre.and_then(|index| {
+        if anime {
+            ANIME_GENRES.get(index)
+        } else {
+            GENRES.get(index)
+        }
+    });
+    let today = crate::feeds::today();
+    let mut lists: Vec<Vec<Found>> = Vec::new();
+    for &kind in kinds {
+        let mut params: Vec<(&str, String)> = vec![
+            ("include_adult", "false".into()),
+            ("include_null_first_air_dates", "false".into()),
+        ];
+        let mut genres: Vec<String> = Vec::new();
+        if anime {
+            genres.push("16".into());
+            params.push(("with_original_language", "ja".into()));
+        }
+        if let Some(genre) = genre {
+            let id = match kind {
+                Kind::Movie => genre.movie,
+                Kind::Series => genre.tv,
+            };
+            match (id, genre.keyword) {
+                (Some(id), _) => genres.push(id.to_string()),
+                (None, Some(word)) => {
+                    let found = match keywords.get(word) {
+                        Some(found) => *found,
+                        None => {
+                            let found = keyword(http, key, word)?;
+                            keywords.insert(word.to_owned(), found);
+                            found
+                        }
+                    };
+                    match found {
+                        Some(id) => params.push(("with_keywords", id.to_string())),
+                        None => continue,
+                    }
+                }
+                // This kind has no such genre (TV has no Horror): only the other is asked.
+                (None, None) => continue,
+            }
+        }
+        if !genres.is_empty() {
+            params.push(("with_genres", genres.join(",")));
+        }
+        // Enough votes that an order by rating means something, scaled down for anime.
+        let votes = |movie: u32, tv: u32| {
+            let count = if kind == Kind::Movie { movie } else { tv };
+            (if anime { count / 3 } else { count }).to_string()
+        };
+        let date = if kind == Kind::Movie {
+            "primary_release_date"
+        } else {
+            "first_air_date"
+        };
+        match query.sort {
+            Sort::Popular => params.push(("sort_by", "popularity.desc".into())),
+            Sort::Rating => {
+                params.push(("sort_by", "vote_average.desc".into()));
+                params.push(("vote_count.gte", votes(400, 200)));
+            }
+            Sort::Newest => {
+                params.push(("sort_by", format!("{date}.desc")));
+                params.push(("vote_count.gte", votes(30, 15)));
+                params.push((
+                    if kind == Kind::Movie {
+                        "primary_release_date.lte"
+                    } else {
+                        "first_air_date.lte"
+                    },
+                    today.clone(),
+                ));
+            }
+        }
+        let path = format!("/discover/{}", kind.tmdb());
+        let mut list = Vec::new();
+        for page in 1..=DISCOVER_PAGES {
+            let page = page.to_string();
+            let mut query: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect();
+            query.push(("page", page.as_str()));
+            let value = tmdb_request(http, key, &path, &query)?;
+            list.extend(
+                value
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|result| found(kind, result)),
+            );
+            let pages = value
+                .get("total_pages")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            if page.parse::<u64>().unwrap_or(1) >= pages {
+                break;
+            }
+        }
+        lists.push(list);
+    }
+    // Movies and shows by turns, so both show near the top.
+    let mut seen = HashSet::new();
+    let mut titles = Vec::new();
+    let longest = lists.iter().map(Vec::len).max().unwrap_or(0);
+    for index in 0..longest {
+        for list in &lists {
+            if let Some(title) = list.get(index)
+                && seen.insert(title.item.link.clone())
+            {
+                titles.push(title.clone());
+            }
+        }
+    }
+    Ok(titles)
+}
+
+/// One of Discover's results as a card, with its year and rating.
+fn found(kind: Kind, result: &Value) -> Option<Found> {
+    let id = result.get("id").and_then(Value::as_u64)?;
+    let date = first_text(result, &["release_date", "first_air_date"]);
+    let rating = result
+        .get("vote_average")
+        .and_then(Value::as_f64)
+        .filter(|_| {
+            result
+                .get("vote_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                >= 20
+        })
+        .filter(|rating| *rating > 0.)
+        .map(|rating| rating as f32);
+    Some(Found {
+        item: Item {
+            title: first_text(result, &["title", "name"]),
+            link: link(kind, None, Some(id))?,
+            image: result
+                .get("poster_path")
+                .and_then(Value::as_str)
+                .filter(|path| path.starts_with('/'))
+                .map(|path| format!("{TMDB_IMAGES}{path}")),
+            ..Item::default()
+        },
+        year: date.get(..4).and_then(|year| year.parse().ok()),
+        rating,
+    })
+}
+
+/// A TMDB keyword's ID by its name ("isekai"): the exact match, else the first found.
+fn keyword(http: &Http, key: &str, word: &str) -> Result<Option<u64>, String> {
+    let value = tmdb_request(http, key, "/search/keyword", &[("query", word)])?;
+    let results: Vec<&Value> = value
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().collect())
+        .unwrap_or_default();
+    let exact = results.iter().find(|result| {
+        result
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(word))
+    });
+    Ok(exact
+        .or(results.first())
+        .and_then(|result| result.get("id"))
+        .and_then(Value::as_u64))
+}
+
 /// Answers the newest query only, then fetches its posters until a newer query arrives.
 fn search_worker(key: &str, queries: mpsc::Receiver<String>, responses: mpsc::Sender<Response>) {
     let http = Http::new();
@@ -1867,6 +2157,10 @@ struct Worker {
     near_changed: bool,
     /// "Keep loaded posters": Home never drops a poster, so neither does this worker.
     keep: bool,
+    /// Posters Explore shows, by URL, downloaded with the near rows'.
+    extra: HashSet<String>,
+    /// When what Trakt says has been watched was last sent.
+    watched_at: Option<Instant>,
     /// Each row's own title, when its source names it ("Because you watched ...").
     titles: Vec<Option<String>>,
     /// Trakt lookups and changes from menus and title pages, run between row loads.
@@ -1946,6 +2240,8 @@ impl Worker {
             near: (0..4).collect(),
             near_changed: false,
             keep: false,
+            extra: HashSet::new(),
+            watched_at: None,
             titles,
             actions: Vec::new(),
             watchlist: HashMap::new(),
@@ -1988,11 +2284,13 @@ impl Worker {
                 self.last_refocus = Some(Instant::now());
                 self.refocus = true;
             }
-            Command::Near { rows, keep } => {
+            Command::Near { rows, keep, extra } => {
                 let near: HashSet<usize> = rows.into_iter().collect();
-                if near != self.near || keep != self.keep {
+                let extra: HashSet<String> = extra.into_iter().collect();
+                if near != self.near || keep != self.keep || extra != self.extra {
                     self.near = near;
                     self.keep = keep;
+                    self.extra = extra;
                     self.near_changed = true;
                     // Home dropped the artwork of rows outside every set it sends; forget it
                     // here too, even when a later set brings those rows back, so it is resent.
@@ -2000,7 +2298,7 @@ impl Worker {
                     self.images.retain(|url| held.contains(url));
                 }
             }
-            command @ (Command::TitleState(_) | Command::Action(..)) => {
+            command @ (Command::TitleState(_) | Command::Action(..) | Command::Expand(_)) => {
                 // A burst of lookups for the same title needs one answer.
                 if !self
                     .actions
@@ -2030,6 +2328,12 @@ impl Worker {
                         self.last_refocus = Some(Instant::now());
                     }
                     Response::Action { link, result }
+                }
+                Command::Expand(row) => {
+                    if !self.expand(row) {
+                        return false;
+                    }
+                    continue;
                 }
                 Command::Refresh | Command::RefreshNow | Command::Near { .. } => continue,
             };
@@ -2109,6 +2413,45 @@ impl Worker {
                 return false;
             }
         }
+        // Watched marks on posters: with the Trakt rows, on returning to Home and after changes.
+        if self.signed_in()
+            && self.config.trakt_configured()
+            && (refocus
+                || self
+                    .watched_at
+                    .is_none_or(|at| at.elapsed() >= self.config.interval("trakt:watched")))
+        {
+            self.watched_at = Some(Instant::now());
+            match self.watched_state() {
+                Ok(watched) => {
+                    let mut watchlist = HashMap::new();
+                    match self.trakt_watchlist() {
+                        Ok(entries) => {
+                            for entry in entries {
+                                for link in [
+                                    link(entry.kind, entry.imdb.as_deref(), None),
+                                    link(entry.kind, None, entry.tmdb),
+                                ]
+                                .into_iter()
+                                .flatten()
+                                {
+                                    watchlist.insert(link, entry.title.clone());
+                                }
+                            }
+                        }
+                        Err(error) => eprintln!("Luma feeds: watchlist marks: {error}"),
+                    }
+                    if self
+                        .responses
+                        .send(Response::Marks { watched, watchlist })
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                Err(error) => eprintln!("Luma feeds: watched marks: {error}"),
+            }
+        }
         if saved {
             if self.saved.artwork.len() > 3000 {
                 self.saved.artwork.clear();
@@ -2180,9 +2523,11 @@ impl Worker {
                     title: self.titles[index]
                         .clone()
                         .unwrap_or_else(|| static_title(&row.title)),
-                    pinned: self.config.always_loaded(&row.source),
-                    hero: self.config.hero_source(&row.source),
-                    extra: self.config.shelf_source(&row.source),
+                    pinned: !row.hidden && self.config.always_loaded(&row.source),
+                    hero: !row.hidden && self.config.hero_source(&row.source),
+                    extra: !row.hidden && self.config.shelf_source(&row.source),
+                    source: row.source.clone(),
+                    hidden: row.hidden,
                     status,
                     items,
                 }
@@ -2209,12 +2554,14 @@ impl Worker {
             .filter(|(index, (row, _))| {
                 // Trakt rows (Continue Watching) keep their posters wherever Home is scrolled.
                 (self.near.contains(index)
-                    || self.config.always_loaded(&row.source)
+                    || (!row.hidden && self.config.always_loaded(&row.source))
                     || (held && self.keep))
                     && (signed_in || !needs_trakt(&row.source))
             })
             .flat_map(|(_, (_, items))| items)
             .filter_map(|item| item.image.clone())
+            // Explore's posters, which may be from a row's full list.
+            .chain(self.extra.iter().cloned())
             .collect()
     }
 
@@ -2267,8 +2614,26 @@ impl Worker {
     }
 
     fn fetch(&mut self, source: &str) -> Result<Fetched, String> {
+        let (mut entries, title) = self.entries(source, self.config.limit)?;
+        entries.truncate(self.config.limit);
+        let mut items = Vec::new();
+        for entry in entries {
+            if let Some(item) = self.item(entry, true) {
+                items.push(item);
+            }
+        }
+        Ok(Fetched { items, title })
+    }
+
+    /// A row's titles before their artwork, up to about `limit`, and the row's own title when
+    /// its source names it.
+    fn entries(
+        &mut self,
+        source: &str,
+        limit: usize,
+    ) -> Result<(Vec<Entry>, Option<String>), String> {
         let mut title = None;
-        let mut entries = match source {
+        let entries = match source {
             "trakt:continue" => {
                 let mut entries = self.trakt_playback()?;
                 entries.extend(self.trakt_up_next()?);
@@ -2311,28 +2676,115 @@ impl Worker {
                 entries
             }
             _ => match source.strip_prefix("mdblist:") {
-                Some(list) => self.mdblist(list.trim())?,
+                Some(list) => self.mdblist(list.trim(), limit)?,
                 None => return Err(format!("Unknown row source {source}")),
             },
         };
-        entries.truncate(self.config.limit);
-        let mut items = Vec::new();
-        for entry in entries {
-            let Some(link) = link(entry.kind, entry.imdb.as_deref(), entry.tmdb) else {
-                continue;
-            };
-            let image = self.artwork(entry.kind, entry.tmdb, entry.imdb.as_deref());
-            items.push(Item {
-                title: entry.title,
-                subtitle: entry.subtitle,
-                link,
-                image,
-                progress: entry.progress,
-                episode: entry.episode,
-                badge: entry.badge,
-            });
+        Ok((entries, title))
+    }
+
+    /// A card for an entry: its artwork looked up on TMDB, or (without `lookup`) only what is
+    /// already known. None when the entry has no ID to link.
+    fn item(&mut self, entry: Entry, lookup: bool) -> Option<Item> {
+        let link = link(entry.kind, entry.imdb.as_deref(), entry.tmdb)?;
+        let image = if lookup {
+            self.artwork(entry.kind, entry.tmdb, entry.imdb.as_deref())
+        } else {
+            self.known_artwork(entry.kind, entry.tmdb, entry.imdb.as_deref())
+        };
+        Some(Item {
+            title: entry.title,
+            subtitle: entry.subtitle,
+            link,
+            image,
+            progress: entry.progress,
+            episode: entry.episode,
+            badge: entry.badge,
+        })
+    }
+
+    /// A row's full list for Explore, sent once its posters are looked up (between batches,
+    /// other commands and artwork go on). False once Home has gone away.
+    fn expand(&mut self, index: usize) -> bool {
+        let Some(source) = self.config.rows.get(index).map(|row| row.source.clone()) else {
+            return true;
+        };
+        if needs_trakt(&source) && !self.signed_in() {
+            return true;
         }
-        Ok(Fetched { items, title })
+        let entries = match self.entries(&source, EXPAND_LIMIT) {
+            Ok((mut entries, _)) => {
+                entries.truncate(EXPAND_LIMIT);
+                entries
+            }
+            Err(error) => {
+                eprintln!("Luma feeds: Explore {source}: {error}");
+                let response = Response::Expanded {
+                    row: index,
+                    result: Err(error),
+                };
+                return self.responses.send(response).is_ok();
+            }
+        };
+        // Keep each entry's kind and IDs for the lookups after the first answer.
+        let keys: Vec<(Kind, Option<u64>, Option<String>)> = entries
+            .iter()
+            .map(|entry| (entry.kind, entry.tmdb, entry.imdb.clone()))
+            .collect();
+        let mut items: Vec<Option<Item>> = Vec::new();
+        for entry in entries {
+            items.push(self.item(entry, false));
+        }
+        let missing: Vec<usize> = (0..items.len())
+            .filter(|i| items[*i].as_ref().is_some_and(|item| item.image.is_none()))
+            .collect();
+        for batch in missing.chunks(EXPAND_BATCH) {
+            for &i in batch {
+                let (kind, tmdb, imdb) = &keys[i];
+                let image = self.artwork(*kind, *tmdb, imdb.as_deref());
+                if let Some(item) = items[i].as_mut() {
+                    item.image = image;
+                }
+            }
+            // Between batches: Explore's posters and Home's, and anything else asked for.
+            loop {
+                match self.commands.try_recv() {
+                    Ok(command) => self.handle(command),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return false,
+                }
+            }
+            if !self.load_images() {
+                return false;
+            }
+            // Explore moved on to another row: that one's list comes first.
+            if self
+                .actions
+                .iter()
+                .any(|action| matches!(action, Command::Expand(other) if *other != index))
+            {
+                return true;
+            }
+        }
+        self.save();
+        // Sent once, whole: the list never grows on screen.
+        let list: Vec<Item> = items.into_iter().flatten().collect();
+        self.responses
+            .send(Response::Expanded {
+                row: index,
+                result: Ok(list),
+            })
+            .is_ok()
+    }
+
+    /// A title's poster when it has been looked up before, without asking TMDB.
+    fn known_artwork(&self, kind: Kind, tmdb: Option<u64>, imdb: Option<&str>) -> Option<String> {
+        let key = match (tmdb, imdb) {
+            (Some(id), _) => format!("{}:{id}", kind.tmdb()),
+            (None, Some(imdb)) => format!("imdb:{imdb}"),
+            (None, None) => return None,
+        };
+        self.saved.artwork.get(&key).cloned().flatten()
     }
 
     // ---- TMDB artwork ----
@@ -2391,7 +2843,7 @@ impl Worker {
 
     // ---- MDBList ----
 
-    fn mdblist(&self, list: &str) -> Result<Vec<Entry>, String> {
+    fn mdblist(&self, list: &str, limit: usize) -> Result<Vec<Entry>, String> {
         let key = self
             .config
             .mdblist
@@ -2406,7 +2858,7 @@ impl Worker {
                 .ok_or("MDBList rows need mdblist:USER/LIST or mdblist:LIST_ID")?;
             format!("/lists/{}/{}/items", segment(user), segment(name))
         };
-        let limit = self.config.limit.to_string();
+        let limit = limit.to_string();
         let reply = self.http.get(
             &format!("{MDBLIST}{path}"),
             &[("apikey", key.as_str()), ("limit", limit.as_str())],
@@ -2715,6 +3167,82 @@ impl Worker {
             return Err(format!("Trakt answered HTTP {}", reply.status));
         }
         Err("Trakt sign-in failed".into())
+    }
+
+    /// Titles watched on Trakt, by card link: films seen and shows with every aired episode
+    /// seen are done; shows begun, and anything paused part way, are started.
+    fn watched_state(&mut self) -> Result<HashMap<String, Watch>, String> {
+        let mut marks: HashMap<String, Watch> = HashMap::new();
+        let mut mark = |kind: Kind, ids: &Ids, watch: Watch| {
+            for link in [
+                link(kind, ids.imdb.as_deref(), None),
+                link(kind, None, ids.tmdb),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let entry = marks.entry(link).or_insert(watch);
+                if watch == Watch::Done {
+                    *entry = Watch::Done;
+                }
+            }
+        };
+        let movies = self.trakt_get("/sync/watched/movies", &[])?;
+        for item in movies.as_array().into_iter().flatten() {
+            if let Some(movie) = item.get("movie") {
+                mark(Kind::Movie, &ids(movie), Watch::Done);
+            }
+        }
+        // With every episode seen, a show is done; a large history may not fit in one reply,
+        // and then every show watched counts as started.
+        match self.trakt_get("/sync/watched/shows", &[("extended", "full")]) {
+            Ok(shows) => {
+                for item in shows.as_array().into_iter().flatten() {
+                    let Some(show) = item.get("show") else {
+                        continue;
+                    };
+                    let aired = show
+                        .get("aired_episodes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let seen: u64 = item
+                        .get("seasons")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|season| season.get("number").and_then(Value::as_u64) != Some(0))
+                        .filter_map(|season| season.get("episodes").and_then(Value::as_array))
+                        .map(|episodes| episodes.len() as u64)
+                        .sum();
+                    let watch = if aired > 0 && seen >= aired {
+                        Watch::Done
+                    } else {
+                        Watch::Started
+                    };
+                    mark(Kind::Series, &ids(show), watch);
+                }
+            }
+            Err(_) => {
+                let shows = self.trakt_get("/sync/watched/shows", &[("extended", "noseasons")])?;
+                for item in shows.as_array().into_iter().flatten() {
+                    if let Some(show) = item.get("show") {
+                        mark(Kind::Series, &ids(show), Watch::Started);
+                    }
+                }
+            }
+        }
+        let playback = self.trakt_get("/sync/playback", &[])?;
+        for item in playback.as_array().into_iter().flatten() {
+            let (kind, media) = match item.get("type").and_then(Value::as_str) {
+                Some("movie") => (Kind::Movie, item.get("movie")),
+                Some("episode") => (Kind::Series, item.get("show")),
+                _ => continue,
+            };
+            if let Some(media) = media {
+                mark(kind, &ids(media), Watch::Started);
+            }
+        }
+        Ok(marks)
     }
 
     fn trakt_playback(&mut self) -> Result<Vec<Entry>, String> {
@@ -3320,6 +3848,7 @@ fn same_command(a: &Command, b: &Command) -> bool {
     match (a, b) {
         (Command::TitleState(a), Command::TitleState(b)) => a == b,
         (Command::Action(a, x), Command::Action(b, y)) => a == b && x == y,
+        (Command::Expand(a), Command::Expand(b)) => a == b,
         _ => false,
     }
 }

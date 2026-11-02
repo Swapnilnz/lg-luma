@@ -8,6 +8,11 @@ use crate::state::{
     TextField,
 };
 use serde::{Deserialize, Serialize};
+
+#[path = "explore.rs"]
+pub mod explore;
+pub use explore::{Category, Explore};
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
@@ -114,6 +119,9 @@ const PREVIEW_GIVE_UP: Duration = Duration::from_secs(4);
 /// Home's slide between its first screen and the Top Shelf.
 pub const PAGE_SLIDE: Duration = Duration::from_millis(480);
 
+/// The "See all" tile at the end of each row, which opens it in Explore.
+pub const MORE_WIDTH: f32 = 168.;
+
 /// Created by the remote's mic button through LG Input Hook (see feeds.md): Luma then listens.
 pub const VOICE_TRIGGER: &str = "/tmp/luma-voice-search";
 
@@ -160,8 +168,21 @@ pub struct Row {
     /// Its titles appear as small posters on the Top Shelf ("This week", new seasons).
     #[serde(default)]
     pub extra: bool,
+    /// Its source in feeds.json, e.g. `trakt:watchlist`.
+    #[serde(default)]
+    pub source: String,
+    /// Shown only in Explore: the Watchlist row added when feeds.json has none.
+    #[serde(default)]
+    pub hidden: bool,
     pub status: Status,
     pub items: Vec<Item>,
+}
+
+/// What Trakt says of a title: begun (a show part way, anything paused) or watched through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Watch {
+    Started,
+    Done,
 }
 
 impl Feeds {
@@ -261,6 +282,21 @@ pub struct Feeds {
     pub list_moving: Option<usize>,
     /// The lists changed: `main` restarts the feed worker with them.
     pub lists_changed: bool,
+    /// The Explore page: its category, filters and grid.
+    pub explore: Explore,
+    /// Watched and started titles from Trakt, and the Watchlist's titles, by card link, for
+    /// the marks on posters; whether they have come once (later changes can prompt).
+    pub watched: HashMap<String, Watch>,
+    pub watchlist: HashMap<String, String>,
+    pub marks_loaded: bool,
+    /// Watchlist titles just finished: each asks whether to take it off the Watchlist.
+    pub finished: Vec<Item>,
+    /// Rows' full lists for Explore, by row, and when each arrived.
+    pub expanded: HashMap<usize, (Vec<Item>, Instant)>,
+    /// When each row's full list was last asked for.
+    pub expand_asked: HashMap<usize, Instant>,
+    /// Explore's posters last sent to the worker, with the near rows and "keep" setting.
+    pub extra_sent: Vec<String>,
 }
 
 /// An MDBList list offered in Settings > Lists > Add.
@@ -324,6 +360,9 @@ impl Feeds {
                     .filter_map(|item| item.image.as_ref()),
             )
             .chain(self.title.iter().flat_map(TitlePage::images))
+            .chain(self.explore.images.iter())
+            .chain(self.explore.backdrop.iter())
+            .chain(self.explore.previous.iter())
             .collect()
     }
 
@@ -403,7 +442,7 @@ impl Feeds {
             .max()
             .unwrap_or(0);
         for index in 0..longest {
-            for row in &self.rows {
+            for row in self.rows.iter().filter(|row| !row.hidden) {
                 if let Some(item) = row.items.get(index)
                     && items.len() < AMBIENT_LIMIT
                     && seen.insert(item.link.clone())
@@ -550,9 +589,21 @@ impl Feeds {
     /// Whether a row is drawn on Home: not a finished empty row, nor one the Top Shelf shows
     /// in its place.
     pub fn row_visible(&self, index: usize) -> bool {
-        self.rows
-            .get(index)
-            .is_some_and(|row| row.shown() && !(self.hero.is_some() && (row.hero || row.extra)))
+        self.rows.get(index).is_some_and(|row| {
+            row.shown() && !row.hidden && !(self.hero.is_some() && (row.hero || row.extra))
+        })
+    }
+
+    /// The first row drawn with cards after `row` (before it, with `up`); from the top with
+    /// `row` None.
+    pub fn next_row(&self, row: Option<usize>, up: bool) -> Option<usize> {
+        let has_cards =
+            |index: &usize| self.row_visible(*index) && !self.rows[*index].items.is_empty();
+        match (row, up) {
+            (None, _) => (0..self.rows.len()).find(has_cards),
+            (Some(row), false) => (row + 1..self.rows.len()).find(has_cards),
+            (Some(row), true) => (0..row).rev().find(has_cards),
+        }
     }
 
     fn max_scroll(&self, row: usize) -> f32 {
@@ -560,8 +611,12 @@ impl Feeds {
         if count == 0 {
             return 0.;
         }
-        // Room for a focused card widened to landscape.
-        let content = (count - 1) as f32 * CARD_PITCH + CARD_WIDTH + (WIDE_WIDTH - CARD_WIDTH);
+        // Room for a focused card widened to landscape, and the "See all" tile after them.
+        let content = (count - 1) as f32 * CARD_PITCH
+            + CARD_WIDTH
+            + (WIDE_WIDTH - CARD_WIDTH)
+            + (CARD_PITCH - CARD_WIDTH)
+            + MORE_WIDTH;
         (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.)
     }
 }
@@ -572,33 +627,6 @@ fn in_strip(rect: Rect) -> bool {
 
 fn distance(control: &Control, x: f32) -> f32 {
     (control.rect.center().0 - x).abs()
-}
-
-/// The fully visible card nearest to `x` in the first (or, with `last`, the last) row whose
-/// index `rows` accepts.
-fn nearest_feed(
-    controls: &[Control],
-    x: f32,
-    rows: impl Fn(usize) -> bool,
-    last: bool,
-) -> Option<Target> {
-    let candidates: Vec<(usize, &Control)> = controls
-        .iter()
-        .filter_map(|control| match control.target {
-            Target::Feed(row, _) if rows(row) && in_strip(control.rect) => Some((row, control)),
-            _ => None,
-        })
-        .collect();
-    let row = if last {
-        candidates.iter().map(|(row, _)| *row).max()?
-    } else {
-        candidates.iter().map(|(row, _)| *row).min()?
-    };
-    candidates
-        .iter()
-        .filter(|(candidate, _)| *candidate == row)
-        .min_by(|a, b| distance(a.1, x).total_cmp(&distance(b.1, x)))
-        .map(|(_, control)| control.target.clone())
 }
 
 /// The search bar or its mic button, whichever is nearer to `x`.
@@ -623,6 +651,18 @@ impl State {
     /// no row shows any more.
     pub fn set_feed_rows(&mut self, rows: Vec<Row>) {
         let feeds = &mut self.feeds;
+        // A row whose titles changed (a Watchlist change, say) has its full list asked for
+        // again the next time Explore shows it.
+        for (index, row) in rows.iter().enumerate() {
+            if feeds
+                .rows
+                .get(index)
+                .is_none_or(|old| old.items != row.items)
+            {
+                feeds.expand_asked.remove(&index);
+            }
+        }
+        feeds.explore.stale = true;
         feeds.rows = rows;
         feeds.scroll.resize(feeds.rows.len(), 0.);
         for row in 0..feeds.rows.len() {
@@ -643,13 +683,41 @@ impl State {
                 self.focus = Target::Feed(row, count - 1);
             }
         }
+        if let Target::FeedMore(row) = self.focus
+            && (!self.feeds.row_visible(row)
+                || self
+                    .feeds
+                    .rows
+                    .get(row)
+                    .is_none_or(|row| row.items.is_empty()))
+        {
+            self.focus = if self.feeds.hero.is_some() {
+                Target::Hero
+            } else {
+                self.first_content()
+            };
+        }
         let minis = self.feeds.shelf_minis().len();
         if matches!(self.focus, Target::HeroExtra(index) if index >= minis)
             || (self.focus == Target::HeroMore && minis == 0)
+            || (self.focus == Target::HeroWatchlist && self.feeds.watchlist_row().is_none())
         {
             self.focus = Target::Hero;
         }
         self.dirty = true;
+    }
+
+    /// The first card of the next row down (or up) from `from`, or of the first row, with
+    /// that row scrolled back to its start.
+    fn row_start(&mut self, from: Option<(usize, bool)>) -> Option<Target> {
+        let row = match from {
+            Some((row, up)) => self.feeds.next_row(Some(row), up)?,
+            None => self.feeds.next_row(None, false)?,
+        };
+        if let Some(scroll) = self.feeds.scroll.get_mut(row) {
+            *scroll = 0.;
+        }
+        Some(Target::Feed(row, 0))
     }
 
     /// Scrolls a row so its focused card sits fully inside the strip.
@@ -690,7 +758,7 @@ impl State {
         let stacked = self.feeds.hero.is_some();
         match self.focus.clone() {
             Target::App(_) if stacked && matches!(direction, Direction::Down) => {
-                let next = hero().or_else(|| nearest_feed(controls, x, |_| true, false))?;
+                let next = hero().or_else(|| self.row_start(None))?;
                 self.focus(next, controls);
                 Some(vec![])
             }
@@ -713,18 +781,20 @@ impl State {
             Target::App(_) if matches!(direction, Direction::Down) => {
                 let next = nearest_bar(controls, x)
                     .or_else(hero)
-                    .or_else(|| nearest_feed(controls, x, |_| true, false))?;
+                    .or_else(|| self.row_start(None))?;
                 self.focus(next, controls);
                 Some(vec![])
             }
             Target::Hero => {
+                let button = [Target::HeroWatchlist, Target::HeroMore]
+                    .into_iter()
+                    .find(|target| controls.iter().any(|c| c.target == *target));
                 match direction {
-                    // Right past the last poster: the calendar button, when there is one.
-                    Direction::Right
-                        if self.hero_last()
-                            && controls.iter().any(|c| c.target == Target::HeroMore) =>
-                    {
-                        self.focus(Target::HeroMore, controls);
+                    // Right past the last poster: the Watchlist or calendar button.
+                    Direction::Right if self.hero_last() && button.is_some() => {
+                        if let Some(button) = button {
+                            self.focus(button, controls);
+                        }
                     }
                     Direction::Left | Direction::Right => {
                         self.hero_step(matches!(direction, Direction::Right));
@@ -739,23 +809,33 @@ impl State {
                             self.focus(next, controls);
                         }
                     }
-                    // Down is the first row; the calendar is Right from the last poster.
+                    // Down is the first row, at its first card; the buttons are Right from the
+                    // last poster.
                     Direction::Down => {
-                        let next = nearest_feed(controls, 200., |_| true, false).or_else(|| {
-                            [Target::HeroExtra(0), Target::HeroMore]
-                                .into_iter()
-                                .find(|target| controls.iter().any(|c| c.target == *target))
+                        let next = self.row_start(None).or_else(|| {
+                            [
+                                Target::HeroExtra(0),
+                                Target::HeroWatchlist,
+                                Target::HeroMore,
+                            ]
+                            .into_iter()
+                            .find(|target| controls.iter().any(|c| c.target == *target))
                         })?;
                         self.focus(next, controls);
                     }
                 }
                 Some(vec![])
             }
-            // The Top Shelf's small posters and its expand button, in a line.
-            mini @ (Target::HeroExtra(_) | Target::HeroMore) => {
+            // The Top Shelf's small posters and its buttons, in a line.
+            mini @ (Target::HeroExtra(_) | Target::HeroWatchlist | Target::HeroMore) => {
                 let line: Vec<Target> = controls
                     .iter()
-                    .filter(|c| matches!(c.target, Target::HeroExtra(_) | Target::HeroMore))
+                    .filter(|c| {
+                        matches!(
+                            c.target,
+                            Target::HeroExtra(_) | Target::HeroWatchlist | Target::HeroMore
+                        )
+                    })
                     .map(|c| c.target.clone())
                     .collect();
                 let position = line.iter().position(|t| *t == mini).unwrap_or(0);
@@ -767,7 +847,7 @@ impl State {
                         .or(Some(Target::Hero)),
                     Direction::Right => line.get(position + 1).cloned(),
                     Direction::Up => Some(Target::Hero),
-                    Direction::Down => nearest_feed(controls, 200., |_| true, false),
+                    Direction::Down => self.row_start(None),
                 };
                 // At either end, or with no row below, focus stays put.
                 if let Some(next) = next {
@@ -778,9 +858,7 @@ impl State {
             bar @ (Target::FeedSearch | Target::FeedVoice) => {
                 let next = match direction {
                     Direction::Up => nearest_favorite(controls, x)?,
-                    Direction::Down => {
-                        hero().or_else(|| nearest_feed(controls, x, |_| true, false))?
-                    }
+                    Direction::Down => hero().or_else(|| self.row_start(None))?,
                     Direction::Left if bar == Target::FeedVoice => Target::FeedSearch,
                     Direction::Right
                         if bar == Target::FeedSearch
@@ -793,25 +871,30 @@ impl State {
                 self.focus(next, controls);
                 Some(vec![])
             }
-            Target::Feed(row, index) => {
-                let next = match direction {
-                    Direction::Left | Direction::Right => {
-                        let count = self.feeds.rows.get(row).map_or(0, |row| row.items.len());
-                        if count == 0 {
-                            return Some(vec![]);
-                        }
-                        let next = if matches!(direction, Direction::Left) {
-                            index.saturating_sub(1)
-                        } else {
-                            (index + 1).min(count - 1)
-                        };
-                        Target::Feed(row, next)
+            Target::Feed(row, _) | Target::FeedMore(row) => {
+                let count = self.feeds.rows.get(row).map_or(0, |row| row.items.len());
+                let next = match (self.focus.clone(), direction) {
+                    _ if count == 0 && matches!(direction, Direction::Left | Direction::Right) => {
+                        return Some(vec![]);
                     }
-                    Direction::Up => nearest_feed(controls, x, |other| other < row, true)
+                    // Past the last card: the "See all" tile, which opens the row in Explore.
+                    (Target::Feed(_, index), Direction::Right) if index + 1 >= count => {
+                        Target::FeedMore(row)
+                    }
+                    (Target::Feed(_, index), Direction::Right) => Target::Feed(row, index + 1),
+                    (Target::Feed(_, index), Direction::Left) => {
+                        Target::Feed(row, index.saturating_sub(1))
+                    }
+                    (Target::FeedMore(_), Direction::Left) => Target::Feed(row, count - 1),
+                    (_, Direction::Left | Direction::Right) => return Some(vec![]),
+                    // Moving between rows lands on the new row's first card, scrolled back to
+                    // its start: never one along, wherever focus was in the row it left.
+                    (_, Direction::Up) => self
+                        .row_start(Some((row, true)))
                         .or_else(hero)
                         .or_else(|| nearest_bar(controls, x))
                         .or_else(|| nearest_favorite(controls, x))?,
-                    Direction::Down => nearest_feed(controls, x, |other| other > row, false)?,
+                    (_, Direction::Down) => self.row_start(Some((row, false)))?,
                 };
                 self.focus(next, controls);
                 Some(vec![])
@@ -1061,6 +1144,7 @@ fn card_item<'a>(feeds: &'a Feeds, target: &Target) -> Option<&'a Item> {
         Target::Hero => feeds.hero_item(),
         Target::HeroExtra(index) => feeds.shelf_minis().get(*index).copied(),
         Target::SheetItem(index) => feeds.sheet.as_ref()?.items.get(*index),
+        Target::ExploreItem(index) => feeds.explore.items.get(*index),
         Target::TitleMore(index) => feeds.title.as_ref()?.more()?.get(*index),
         Target::TitleButton(_)
         | Target::TitleSeason(_)
@@ -1110,6 +1194,7 @@ impl Feeds {
             .page_slide
             .is_some_and(|(_, since)| since.elapsed() < PAGE_SLIDE + Duration::from_millis(40))
             || self.wide_animating()
+            || self.explore.animating()
             || self
                 .focus_since
                 .as_ref()
@@ -1533,6 +1618,10 @@ pub enum Outgoing {
     Trakt(String, TraktAction),
     /// MDBList lists to add: your own and the most liked, or those matching a search.
     Lists(Option<String>),
+    /// A row's full list, for Explore.
+    Expand(usize),
+    /// A TMDB Discover search for Explore's filters, numbered so a late answer is ignored.
+    Discover(u64, explore::Query),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1742,6 +1831,9 @@ pub enum MenuEntry {
     RemoveContinue,
     /// Play from the beginning, for a card part-watched.
     StartOver,
+    /// Finished a title on the Watchlist: take it off, or keep it.
+    RemoveFinished,
+    KeepFinished,
 }
 
 /// A card's quick actions, opened by holding OK.
@@ -1751,6 +1843,8 @@ pub struct Menu {
     pub entries: Vec<MenuEntry>,
     pub restore: Target,
     pub opened: Instant,
+    /// The line under the title, when the menu asks a question.
+    pub prompt: Option<String>,
 }
 
 /// Trakt's ratings offered from a menu: its 10-point scale, in five steps.
@@ -1914,7 +2008,7 @@ impl State {
             if self.feeds.hero.take().is_some() {
                 if matches!(
                     self.focus,
-                    Target::Hero | Target::HeroExtra(_) | Target::HeroMore
+                    Target::Hero | Target::HeroExtra(_) | Target::HeroMore | Target::HeroWatchlist
                 ) {
                     self.focus = self.first_content();
                 }
@@ -2492,6 +2586,7 @@ impl State {
             entries,
             restore,
             opened: Instant::now(),
+            prompt: None,
         });
         self.focus = Target::MenuItem(0);
         self.pointer = false;
@@ -2605,7 +2700,97 @@ impl State {
                 self.trakt_action(&link, TraktAction::RemoveContinue);
                 vec![]
             }
+            MenuEntry::RemoveFinished => {
+                self.close_menu();
+                self.trakt_action(&link, TraktAction::WatchlistRemove);
+                self.feeds.watchlist.retain(|_, title| *title != item.title);
+                vec![]
+            }
+            MenuEntry::KeepFinished => {
+                self.close_menu();
+                vec![]
+            }
         })
+    }
+
+    /// Whether a title is on the Watchlist: what its page or menu last heard from Trakt,
+    /// else the Watchlist itself.
+    pub fn in_watchlist(&self, link: &str) -> bool {
+        self.feeds.trakt_titles.get(link).map_or_else(
+            || self.feeds.watchlist.contains_key(link),
+            |t| t.in_watchlist,
+        )
+    }
+
+    /// Trakt's watched marks and Watchlist arrived. A Watchlist title newly watched through
+    /// (not on the first load) asks whether to take it off the Watchlist.
+    pub fn marks_arrived(
+        &mut self,
+        watched: HashMap<String, Watch>,
+        watchlist: HashMap<String, String>,
+    ) {
+        if self.feeds.marks_loaded {
+            let mut asked: HashSet<String> = self
+                .feeds
+                .finished
+                .iter()
+                .map(|item| item.title.clone())
+                .collect();
+            for (link, title) in &watchlist {
+                let done = watched.get(link) == Some(&Watch::Done);
+                let was_done = self.feeds.watched.get(link) == Some(&Watch::Done);
+                if done && !was_done && asked.insert(title.clone()) {
+                    self.feeds.finished.push(Item {
+                        title: title.clone(),
+                        link: link.clone(),
+                        ..Item::default()
+                    });
+                }
+            }
+        }
+        self.feeds.watched = watched;
+        self.feeds.watchlist = watchlist;
+        self.feeds.marks_loaded = true;
+        self.dirty = true;
+    }
+
+    /// Asks about the next finished Watchlist title once Home or Explore is in front with
+    /// nothing else open.
+    pub fn finished_tick(&mut self) {
+        if self.feeds.finished.is_empty()
+            || !matches!(self.page, Page::Home | Page::Explore)
+            || self.overlay.is_some()
+            || self.recents_open()
+            || self.launching
+            || self.feeds.menu.is_some()
+            || self.feeds.title.is_some()
+            || self.feeds.search.is_some()
+            || self.feeds.ambient.is_some()
+            || !self.feeds.visible && self.page == Page::Home
+        {
+            return;
+        }
+        let item = self.feeds.finished.remove(0);
+        // The card as a row shows it, when there is one: its poster and episode.
+        let item = self
+            .feeds
+            .rows
+            .iter()
+            .flat_map(|row| &row.items)
+            .find(|card| card.link == item.link)
+            .cloned()
+            .unwrap_or(item);
+        self.feeds.menu = Some(Menu {
+            link: item.link.clone(),
+            item,
+            entries: vec![MenuEntry::RemoveFinished, MenuEntry::KeepFinished],
+            restore: self.focus.clone(),
+            opened: Instant::now(),
+            prompt: Some("You've finished it. Take it off your Watchlist?".into()),
+        });
+        self.focus = Target::MenuItem(0);
+        self.pointer = false;
+        self.dirty = true;
     }
 
     /// Back with a menu or title page open. False when neither is.
@@ -3005,7 +3190,7 @@ impl State {
         let anchor = focus_row.or_else(|| {
             matches!(
                 self.focus,
-                Target::Hero | Target::HeroMore | Target::HeroExtra(_)
+                Target::Hero | Target::HeroMore | Target::HeroExtra(_) | Target::HeroWatchlist
             )
             .then(|| (0..self.feeds.rows.len()).find(|row| self.feeds.row_visible(*row)))
             .flatten()

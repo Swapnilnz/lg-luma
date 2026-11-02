@@ -142,6 +142,8 @@ pub struct Preferences {
     /// The MDBList rows on Home, in order, as Settings > Lists keeps them. None follows
     /// feeds.json's `mdblist:` rows.
     pub feed_lists: Option<Vec<FeedList>>,
+    /// Soft sounds as focus moves, on OK and on Back.
+    pub ui_sounds: bool,
 }
 
 /// One MDBList row: its title and its `mdblist:` source.
@@ -182,6 +184,7 @@ impl Default for Preferences {
             feed_hide_spoilers: true,
             feed_select_details: true,
             feed_lists: None,
+            ui_sounds: true,
         }
     }
 }

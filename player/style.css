@@ -1185,6 +1185,545 @@ svg {
   }
 }
 
+/* ----- Loading, revamped: light, motion and the stream's badges ----- */
+
+/* Slow colour light drifting behind everything, so even a title without a backdrop moves. */
+.aurora i {
+  position: absolute;
+  width: 1100px;
+  height: 1100px;
+  border-radius: 50%;
+  opacity: 0;
+  will-change: transform;
+  transition: opacity 1.6s var(--ease);
+}
+.stage.loading .aurora i {
+  opacity: 1;
+}
+.aurora i:nth-child(1) {
+  top: -420px;
+  left: -260px;
+  background: radial-gradient(circle, rgba(94, 132, 255, 0.24) 0%, rgba(94, 132, 255, 0) 62%);
+  animation: aurora-a 19s ease-in-out infinite alternate;
+}
+.aurora i:nth-child(2) {
+  top: 80px;
+  left: 1040px;
+  background: radial-gradient(circle, rgba(178, 102, 255, 0.18) 0%, rgba(178, 102, 255, 0) 62%);
+  animation: aurora-b 24s ease-in-out infinite alternate;
+}
+.aurora i:nth-child(3) {
+  top: 560px;
+  left: 300px;
+  background: radial-gradient(circle, rgba(52, 211, 199, 0.14) 0%, rgba(52, 211, 199, 0) 62%);
+  animation: aurora-c 29s ease-in-out infinite alternate;
+}
+@keyframes aurora-a {
+  to {
+    transform: translate3d(320px, 180px, 0) scale(1.18);
+  }
+}
+@keyframes aurora-b {
+  to {
+    transform: translate3d(-380px, 140px, 0) scale(0.86);
+  }
+}
+@keyframes aurora-c {
+  to {
+    transform: translate3d(260px, -220px, 0) scale(1.12);
+  }
+}
+
+.vignette {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: radial-gradient(ellipse at 50% 45%, rgba(0, 0, 0, 0) 55%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+/* Specks of light rising slowly, each on its own path (left, size and pace set inline). */
+.motes i {
+  position: absolute;
+  bottom: -24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.7);
+  opacity: 0;
+  animation-name: mote;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform, opacity;
+}
+.stage:not(.loading) .motes i {
+  animation-play-state: paused;
+}
+@keyframes mote {
+  0% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0;
+  }
+  12% {
+    opacity: var(--o);
+  }
+  85% {
+    opacity: var(--o);
+  }
+  100% {
+    transform: translate3d(var(--dx), -1160px, 0);
+    opacity: 0;
+  }
+}
+
+.stage.loading .hero {
+  width: 980px;
+}
+/* As the picture arrives, the hero lifts away into it rather than simply fading. */
+.stage .hero {
+  transition:
+    transform 0.9s var(--ease),
+    opacity 0.7s var(--ease);
+}
+.stage:not(.on) .hero {
+  transform: scale(1.05) translateY(-12px);
+  opacity: 0;
+}
+
+/* The logo floats a little while it fills. */
+.stage.loading .markfill {
+  animation: float 5.5s ease-in-out infinite alternate;
+}
+@keyframes float {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-7px);
+  }
+}
+
+/* A light sweeping across the logo, cut to the logo's own shape. */
+.markfill .gleam {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+.markfill .gleam i {
+  position: absolute;
+  top: -30%;
+  bottom: -30%;
+  left: -45%;
+  width: 38%;
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.85) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: translateX(0) skewX(-12deg);
+  animation: gleam 3.4s var(--ease) 0.6s infinite;
+}
+.stage:not(.loading) .markfill .gleam {
+  display: none;
+}
+@keyframes gleam {
+  0% {
+    transform: translateX(0) skewX(-12deg);
+  }
+  55%,
+  100% {
+    transform: translateX(420%) skewX(-12deg);
+  }
+}
+
+.hero .facts {
+  font-size: 25px;
+  font-weight: 500;
+  color: var(--dim);
+  letter-spacing: 0.02em;
+  margin: -6px 0 12px;
+}
+
+/* Details, Streams, Connecting, Buffering: ticked as each is done, the current one pulsing. */
+.steps {
+  display: flex;
+  align-items: center;
+  margin-top: 26px;
+  font-size: 21px;
+  font-weight: 600;
+  color: var(--faint);
+}
+.stage:not(.loading) .steps,
+.stage:not(.loading) .meter {
+  display: none;
+}
+.step {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  transition: color 0.4s var(--ease);
+}
+.step .mark {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(235, 235, 245, 0.3);
+  transition:
+    background-color 0.4s var(--ease),
+    border-color 0.4s var(--ease);
+}
+.step.done {
+  color: var(--dim);
+}
+.step.done .mark {
+  background: var(--text);
+  border-color: var(--text);
+  color: #000;
+}
+.step.done .mark svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 3;
+  animation: tick 0.45s var(--spring) both;
+}
+.step.active {
+  color: var(--text);
+}
+.step.active .mark {
+  border-color: var(--text);
+}
+.step.active .mark b {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.step.active .mark::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--text);
+  animation: ripple 1.6s var(--ease) infinite;
+}
+.steps .link {
+  width: 44px;
+  height: 2px;
+  margin: 0 16px;
+  border-radius: 1px;
+  background: rgba(235, 235, 245, 0.2);
+  transition: background-color 0.4s var(--ease);
+}
+.steps .link.lit {
+  background: rgba(235, 235, 245, 0.7);
+}
+@keyframes tick {
+  from {
+    transform: scale(0.3) rotate(-25deg);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes ripple {
+  from {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  to {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+.stage.loading .hero .status {
+  margin-top: 18px;
+  font-size: 22px;
+  color: var(--faint);
+}
+
+/* The load meter: fills with --p, a glint running along it. */
+.meter {
+  position: relative;
+  width: 560px;
+  height: 4px;
+  margin-top: 22px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.14);
+}
+.meter .bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #ffffff 0%, #cfe0ff 100%);
+  transform-origin: left center;
+  transform: scaleX(var(--p));
+}
+.meter .glint {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 140px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0));
+  animation: glint 1.8s ease-in-out infinite;
+}
+@keyframes glint {
+  from {
+    transform: translateX(-140px);
+  }
+  to {
+    transform: translateX(560px);
+  }
+}
+
+/* ----- The stream's card: service, badges, release ----- */
+
+.streamcard {
+  position: absolute;
+  right: 120px;
+  bottom: 140px;
+  width: 660px;
+  opacity: 0;
+  transform: translateY(36px) scale(0.96);
+  transition:
+    opacity 0.5s var(--ease),
+    transform 0.8s var(--spring);
+}
+.streamcard.on {
+  opacity: 1;
+  transform: none;
+}
+.stage:not(.on) .streamcard {
+  opacity: 0;
+  transform: translateY(-14px) scale(1.03);
+}
+.sc {
+  padding: 24px 28px 22px;
+  border-radius: 24px;
+  background: rgba(24, 24, 28, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.sc-top {
+  display: flex;
+  align-items: center;
+  font-size: 23px;
+  font-weight: 600;
+}
+.sc-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  margin-right: 14px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #ffd60a, #ff9f0a);
+  color: #1c1c1e;
+}
+.sc-icon.ready {
+  background: linear-gradient(145deg, #4cd964, #30b04a);
+}
+.sc-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.sc-icon::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.6);
+  animation: ripple 1.8s var(--ease) infinite;
+}
+.sc-tag {
+  margin-left: 12px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.sc-tag.ready {
+  color: #4cd964;
+  background: rgba(76, 217, 100, 0.15);
+}
+.sc-tag.wait {
+  color: #ffd60a;
+  background: rgba(255, 214, 10, 0.14);
+}
+.sc-count {
+  margin-left: auto;
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--faint);
+}
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 13px;
+  margin: 0 10px 10px 0;
+  border-radius: 8px;
+  border: 1.5px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  color: #fff;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(10px) scale(0.85);
+  animation: badge-in 0.55s var(--spring) forwards;
+  animation-delay: calc(var(--i) * 70ms + 320ms);
+}
+.badge svg {
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  stroke-width: 1.8;
+}
+@keyframes badge-in {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 4K: the solid chip, as Apple TV marks it. */
+.badge.res {
+  background: #f5f5f7;
+  border-color: #f5f5f7;
+  color: #111;
+  font-size: 20px;
+  font-weight: 800;
+}
+/* Dolby's: the name small and spaced above the format, on a tinted glass. */
+.badge.dv,
+.badge.atmos {
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 0 14px;
+}
+.badge.dv b,
+.badge.atmos b {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  margin-bottom: 3px;
+}
+.badge.dv em,
+.badge.atmos em {
+  font-style: normal;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.badge.dv {
+  border-color: rgba(176, 150, 255, 0.8);
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.34), rgba(0, 170, 255, 0.24));
+}
+.badge.atmos {
+  border-color: rgba(110, 210, 255, 0.8);
+  background: linear-gradient(135deg, rgba(0, 196, 255, 0.28), rgba(0, 96, 255, 0.22));
+}
+.badge.hdr {
+  color: #ffd66b;
+  border-color: rgba(255, 214, 107, 0.75);
+  background: rgba(255, 196, 64, 0.08);
+}
+.badge.src {
+  color: #8cc8ff;
+  border-color: rgba(64, 156, 255, 0.8);
+  background: rgba(10, 132, 255, 0.12);
+}
+.badge.codec,
+.badge.lang {
+  color: var(--dim);
+  border-color: rgba(255, 255, 255, 0.28);
+  font-size: 17px;
+}
+.badge.audio,
+.badge.ch {
+  border-color: rgba(255, 255, 255, 0.45);
+}
+.badge.size {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--dim);
+  font-size: 17px;
+}
+.badge.cam {
+  color: #ff6961;
+  border-color: rgba(255, 69, 58, 0.85);
+  background: rgba(255, 69, 58, 0.12);
+}
+.sc-file {
+  margin-top: 4px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 15px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora i,
+  .motes i,
+  .markfill .gleam i,
+  .stage.loading .markfill,
+  .meter .glint,
+  .step.active .mark::after,
+  .sc-icon::after {
+    animation: none;
+  }
+  .badge {
+    animation-duration: 0.01s;
+    animation-delay: 0s;
+  }
+}
+
 /* ----- Letterboxd ----- */
 
 .sheet.lbx {

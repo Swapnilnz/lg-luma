@@ -526,18 +526,14 @@ impl App {
     /// loading, its first frame. Within a stage it creeps on, so a slow AIOStreams never
     /// looks stuck.
     pub fn load_progress(&self) -> f64 {
-        let (stage, from, to) = if self.first_frame {
-            (5, 1., 1.)
-        } else if self.metadata {
-            (4, 0.82, 0.96)
-        } else if self.current.is_some() {
-            (3, 0.62, 0.8)
-        } else if !self.streams.is_empty() {
-            (2, 0.5, 0.6)
-        } else if self.meta.is_some() {
-            (1, 0.22, 0.48)
-        } else {
-            (0, 0.06, 0.2)
+        let stage = self.load_stage_now();
+        let (from, to) = match stage {
+            5 => (1., 1.),
+            4 => (0.82, 0.96),
+            3 => (0.62, 0.8),
+            2 => (0.5, 0.6),
+            1 => (0.22, 0.48),
+            _ => (0.06, 0.2),
         };
         let now = now_ms();
         let (seen, since) = self.load_stage.get();
@@ -549,6 +545,36 @@ impl App {
         };
         let creep = 1. - (-(now - since) / 6_000.).exp();
         from + (to - from) * creep
+    }
+
+    /// Where loading has got: 0 details, 1 finding streams, 2 picking one, 3 connecting,
+    /// 4 buffering, 5 playing.
+    pub fn load_stage_now(&self) -> u8 {
+        if self.first_frame {
+            5
+        } else if self.metadata {
+            4
+        } else if self.current.is_some() {
+            3
+        } else if !self.streams.is_empty() {
+            2
+        } else if self.meta.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// The stream loading (or playing): its badges, service, size and release, and its place
+    /// in AIOStreams' list.
+    pub fn stream_details(&self) -> Option<(usize, usize, luma_core::badges::StreamInfo)> {
+        let index = self.current?;
+        let stream = self.streams.get(index)?;
+        Some((
+            index,
+            self.streams.len(),
+            luma_core::badges::stream_info(stream),
+        ))
     }
 
     pub fn loading_status(&self) -> String {

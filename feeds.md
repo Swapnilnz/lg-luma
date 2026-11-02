@@ -65,12 +65,14 @@ steps aside). Below it come the remaining rows.
 
 - Its titles come from the `hero` rows (default: Continue Watching, Up Next, Watchlist), and
   those rows are no longer shown as rows. Slides change every nine seconds; Left and Right turn
-  them, OK opens the title, Menu opens its page.
+  them, OK opens the title's page (as a row's poster does; Settings decides), Menu opens it
+  too.
 - Every slide's poster runs along the bottom right; the current one is lit.
 - Above them, the `shelf` rows (default `trakt:calendar` and `smart:new_season`) show as two
   small posters, the first of each (or two from This Week), with an expand button that opens
-  all of them in a grid. Right from the last slide reaches the calendar button; Down from the
-  banner goes to the first row. These rows are not shown as rows either.
+  all of them in a grid. Right from the last slide reaches the Watchlist button (My Watchlist
+  in Explore) and then the calendar button; Down from the banner goes to the first card of the
+  first row. These rows are not shown as rows either.
 - Pressing Home again while on Home closes whatever is open and goes back to the very top
   (the Home key on a keyboard does the same in the desktop preview).
 - Settings > Interface > Top Shelf turns it off: every row is then a row again.
@@ -79,6 +81,48 @@ steps aside). Below it come the remaining rows.
 | --- | --- | --- |
 | `hero` | Row sources whose titles take turns in the banner | Trakt continue, playback, up_next, watchlist |
 | `shelf` | Row sources shown as small posters on the banner | `trakt:calendar`, `smart:new_season` |
+
+## Moving between rows
+
+Up and Down always land on the first card of the next row, scrolled back to its start,
+wherever focus was in the row it left. Right past a row's last card is a **See all** tile,
+which opens that row in Explore.
+
+## Explore
+
+Explore is a tab beside Home: a grid of titles under a bar of filters.
+
+- **My Lists** (the first pill) picks what the grid shows: **Everything** searches all of TMDB;
+  My Watchlist and each row show that list in full (up to 100 titles, past the `limit` Home
+  shows). Down from the tabs always lands here.
+- **All, Movies, Shows, Anime**: the type. Anime is Japanese animation, films and series, and
+  is offered only with Everything.
+- **Genre** and **Sort** (dropdowns, with Everything): the usual genres; with Anime, its own
+  list too (Isekai, Mecha, Shōnen, Shōjo, Seinen, Slice of Life, Sports, Supernatural...),
+  which TMDB keeps as keywords. Sort is Popular, Top rated or Newest.
+- Each change of filter runs one TMDB Discover search, about sixty titles of each type; nothing
+  loads in the background and the grid never grows. Searches are remembered while Luma runs.
+- **Surprise me** opens a title picked at random from the grid.
+- The focused title's backdrop fades in behind the page, and its year, length, genres and
+  rating show under the page's name. OK opens its page, holding OK its quick actions, Play its
+  trailer, as on Home.
+- **My Watchlist** is the `trakt:watchlist` row's titles. Without such a row in feeds.json,
+  Luma adds a hidden one when Trakt is in use; the Top Shelf's bookmark button opens it.
+- Back closes an open dropdown, then goes up to the tabs, then Home.
+
+## Watched marks
+
+Posters on Home and in Explore carry small marks from Trakt in their top right corner: a tick
+for a film or show watched through (every aired episode), a half-filled circle for one begun,
+and a bookmark for one on the Watchlist. They reload with the Trakt rows. When a Watchlist
+title is newly watched through (in Luma Player or Nuvio), Luma asks, once you're back, whether
+to take it off the Watchlist.
+
+## Navigation sounds
+
+A soft tick as focus moves, a chime on OK and a falling note on Back, made by Luma (no files)
+and played through the TV's audio only while you use it. Settings > Interface > Navigation
+sounds turns them off.
 
 ## Wide posters
 

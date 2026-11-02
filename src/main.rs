@@ -25,6 +25,7 @@ mod renderer;
 #[path = "scroll-preview.rs"]
 mod scroll_preview;
 mod sdl_events;
+mod sounds;
 mod state;
 mod storage;
 mod text_rendering;
@@ -676,20 +677,26 @@ fn feeds_tick(
     state.feeds.visible = home;
     // Artwork follows the rows on screen and the preload setting; other pages keep the last set.
     let keep = state.preferences.feed_keep_posters;
-    if home {
+    // Explore: its list, the search or full row it wants, and the posters in its grid.
+    state.explore_tick();
+    let near = if home {
         let ahead = usize::from(state.preferences.feed_preload_rows);
         let near = state.feeds.near_rows(controls, ahead);
-        let near = if near.is_empty() {
+        if near.is_empty() {
             state.feeds.near.clone()
         } else {
             near
-        };
-        if near != state.feeds.near || keep != state.feeds.keep {
-            service.near(near.iter().copied().collect(), keep);
-            state.feeds.near = near;
-            state.feeds.keep = keep;
-            state.feeds.prune_images();
         }
+    } else {
+        state.feeds.near.clone()
+    };
+    let extra = state.feeds.explore.images.clone();
+    if near != state.feeds.near || keep != state.feeds.keep || extra != state.feeds.extra_sent {
+        service.near(near.iter().copied().collect(), keep, extra.clone());
+        state.feeds.near = near;
+        state.feeds.keep = keep;
+        state.feeds.extra_sent = extra;
+        state.feeds.prune_images();
     }
     if let Some(query) = state.search_tick() {
         service.search(query);
@@ -715,6 +722,8 @@ fn feeds_tick(
             feeds::Outgoing::TraktState(link) => service.trakt_state(link),
             feeds::Outgoing::Trakt(link, action) => service.trakt_action(link, action),
             feeds::Outgoing::Lists(query) => service.lists(query),
+            feeds::Outgoing::Expand(row) => service.expand(row),
+            feeds::Outgoing::Discover(id, query) => service.discover(id, query),
         }
     }
     while let Ok(response) = service.receiver.try_recv() {
@@ -752,8 +761,19 @@ fn feeds_tick(
             }
             feeds_service::Response::Action { link, result } => state.trakt_done(link, result),
             feeds_service::Response::Lists(result) => state.lists_found(result),
+            feeds_service::Response::Expanded { row, result } => {
+                state.expanded_arrived(row, result)
+            }
+            feeds_service::Response::Discover { id, query, result } => {
+                state.discover_arrived(id, query, result)
+            }
+            feeds_service::Response::Marks { watched, watchlist } => {
+                state.marks_arrived(watched, watchlist)
+            }
         }
     }
+    // A Watchlist title just finished: ask whether to take it off.
+    state.finished_tick();
     // A title page may have asked for a season while its data arrived: send it now.
     for request in std::mem::take(&mut state.feeds.outbox) {
         if let feeds::Outgoing::Season(link, season) = request {
@@ -978,6 +998,8 @@ fn run() -> Result<(), String> {
                 pinned: false,
                 hero: false,
                 extra: false,
+                source: String::new(),
+                hidden: false,
                 status: feeds::Status::Error(error),
                 items: vec![],
             }]);
@@ -1124,6 +1146,8 @@ fn run() -> Result<(), String> {
         .map_err(|error| eprintln!("Luma keep-awake: no audio output: {error}"))
         .ok();
     let mut tone_playing: Option<(sdl2::audio::AudioQueue<i16>, Instant)> = None;
+    // Navigation sounds, through the same audio output (see `sounds`).
+    let mut sounds = sounds::Sounds::new();
     let mut last_tone: Option<Instant> = None;
     // Lifecycle as Home: sam sends "relaunch" (bring the running Luma to the front) instead of
     // killing and restarting it, and "close" when it wants Luma to exit. `end_registration`
@@ -1387,6 +1411,8 @@ fn run() -> Result<(), String> {
                         feeds_state_path.clone(),
                         local_offset,
                     );
+                    // Explore's full lists are by row, and the rows moved: ask again.
+                    state.explore_rows_restarted();
                     eprintln!("Luma feeds: rows changed in Settings; worker restarted");
                 }
                 Ok(None) => {}
@@ -1396,6 +1422,12 @@ fn run() -> Result<(), String> {
         feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
         state.ambient_tick(last_input.elapsed(), visible);
         keep_awake_tick(&state, audio.as_ref(), &mut tone_playing, &mut last_tone);
+        sounds.tick(
+            state.sound.take(),
+            state.preferences.ui_sounds,
+            audio.as_ref(),
+            visible,
+        );
         // While our screensaver is due, LG's would cut in first: hold it off, for at most an
         // hour of ours, after which LG's (and its power saving) may take over.
         if webos {

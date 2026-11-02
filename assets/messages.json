@@ -109,6 +109,17 @@
     "pl": "Aplikacje",
     "fr": "Applications"
   },
+  "explore": {
+    "en": "Explore",
+    "de": "Entdecken",
+    "es": "Explorar",
+    "zh": "探索",
+    "pt": "Explorar",
+    "it": "Esplora",
+    "ru": "Обзор",
+    "pl": "Odkrywaj",
+    "fr": "Explorer"
+  },
   "inputs": {
     "en": "Inputs",
     "de": "Eingänge",

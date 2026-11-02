@@ -5,8 +5,8 @@ use crate::{
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
         APPS_COLUMNS, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT, HOME_STRIP_RIGHT,
-        HOME_TILE_PITCH, HOME_TILE_WIDTH, KEYS, Overlay, Page, Rect, SYSTEM_SECTION, State,
-        Subpage, Target, TextField, WEATHER_SECTION,
+        HOME_TILE_PITCH, HOME_TILE_WIDTH, KEYS, NAV_ORDER, Overlay, Page, Rect, SYSTEM_SECTION,
+        State, Subpage, Target, TextField, WEATHER_SECTION,
     },
     weather::{self, Unit},
 };
@@ -21,8 +21,13 @@ const FACE_HEIGHT: f32 = 154.4;
 const GRID_PITCH: f32 = 296.4;
 const RECENTS_BACKDROP_OPACITY: f32 = 0.86;
 
+#[path = "explore-view.rs"]
+mod explore_view;
 #[path = "recents-view.rs"]
 mod recents_view;
+
+/// The tabs' labels, by page index (Home, Apps, Settings, Explore).
+const NAV_KEYS: [&str; 4] = ["home", "apps", "settings", "explore"];
 
 pub struct Assets {
     pub root: PathBuf,
@@ -261,18 +266,19 @@ fn text(size: f32, weight: u16, tracking: f32) -> TextStyle {
 
 pub struct Navigation {
     pub surface: Rect,
-    pub items: [Rect; 3],
+    /// Each tab's rectangle, by page index; laid out in NAV_ORDER.
+    pub items: [Rect; 4],
 }
 pub fn navigation(assets: &Assets, language: Language) -> Navigation {
-    let widths = ["home", "apps", "settings"]
+    let widths = NAV_KEYS
         .map(|key| (assets.width(language.t(key), text(20.8, 550, -0.02)) + 46.4).max(99.2));
-    let width = widths.iter().sum::<f32>() + 25.6 + 19.6;
+    let width = widths.iter().sum::<f32>() + 12.8 * 3. + 19.6;
     let mut x = (1920. - width) / 2. + 9.8;
-    let items = widths.map(|width| {
-        let rect = Rect::new(x, 52.3, width, 49.);
-        x += width + 12.8;
-        rect
-    });
+    let mut items = [Rect::default(); 4];
+    for page in NAV_ORDER {
+        items[page] = Rect::new(x, 52.3, widths[page], 49.);
+        x += widths[page] + 12.8;
+    }
     Navigation {
         surface: Rect::new((1920. - width) / 2., 42.5, width, 68.6),
         items,
@@ -318,6 +324,9 @@ pub fn scene_with_pill(
     if state.page == Page::Home && !recents_replaces_page(state) {
         preview_backdrop(&mut out, state);
     }
+    if state.page == Page::Explore && !recents_replaces_page(state) {
+        explore_view::backdrop(&mut out, state);
+    }
     let content_start = out.draw.len();
     if recents_replaces_page(state) {
         out.shape(
@@ -346,6 +355,7 @@ pub fn scene_with_pill(
         Page::Home => home(&mut out, state, assets, now),
         Page::Apps => library(&mut out, state, assets),
         Page::Settings => settings(&mut out, state, assets),
+        Page::Explore => explore_view::render(&mut out, state, assets),
     }
     if let Some(error) = &state.error
         && !state.inventory.apps.is_empty()
@@ -390,7 +400,7 @@ pub fn scene_with_pill(
         && state.feeds.hero.is_some()
         && matches!(
             state.focus,
-            Target::Hero | Target::HeroExtra(_) | Target::HeroMore
+            Target::Hero | Target::HeroExtra(_) | Target::HeroMore | Target::HeroWatchlist
         );
     // While Home slides between its screens, the header fades with it.
     let slide = state.feeds.page_slide.and_then(|(_, since)| {
@@ -521,7 +531,7 @@ fn header(
         // the destination tab's control rectangle.
         out.border(pill.inset(-5.), 37., 2., c(0xf0f0f0, 0.95));
     }
-    for (index, key) in ["home", "apps", "settings"].into_iter().enumerate() {
+    for (index, key) in NAV_KEYS.into_iter().enumerate() {
         let rect = layout.items[index];
         out.text(
             language.t(key),
@@ -1155,7 +1165,12 @@ fn clip_words(value: &str, limit: usize) -> String {
     format!("{}...", cut.trim_end_matches([',', '.', ';', ':', ' ']))
 }
 
-/// The previewed title's logo (or name), details, synopsis and trailer hint, top left.
+/// How far the preview's details sit below where they were drawn before: room the trailer
+/// hint left, so the tallest logo (PREVIEW_LOGO_HEIGHT) starts below the header band.
+const PREVIEW_DROP: f32 = 40.;
+const PREVIEW_LOGO_HEIGHT: f32 = 160.;
+
+/// The previewed title's logo (or name), details and synopsis, top left.
 fn preview_details(out: &mut Scene, state: &State, progress: f32) {
     let Some(preview) = &state.feeds.preview else {
         return;
@@ -1178,8 +1193,9 @@ fn preview_details(out: &mut Scene, state: &State, progress: f32) {
         .unwrap_or(card_title);
     let start = out.draw.len();
     // Rises a little as it appears, like the rest of Apple TV's motion.
-    // Raised by PREVIEW_RAISE so the row below the previewed one has room to peek in.
-    let lift = (1. - progress) * 18. - crate::feeds::PREVIEW_RAISE;
+    // Raised by PREVIEW_RAISE so the row below the previewed one has room to peek in, and
+    // lowered by PREVIEW_DROP so a tall logo clears the header band (Home is clipped there).
+    let lift = (1. - progress) * 18. - crate::feeds::PREVIEW_RAISE + PREVIEW_DROP;
     let x = 84.;
     // Following focus onto a title not looked up yet: its shape at once, never Home.
     if details.is_none() {
@@ -1198,12 +1214,12 @@ fn preview_details(out: &mut Scene, state: &State, progress: f32) {
         skeleton(out, Rect::new(x, 190. + lift, 460., 130.), 14.);
     } else if let Some((image, url)) = logo {
         let (width, height) = (image.pixels.width() as f32, image.pixels.height() as f32);
-        let scale = (560. / width).min(170. / height);
+        let scale = (560. / width).min(PREVIEW_LOGO_HEIGHT / height);
         out.draw.push(Draw::AppImage(
             image.clone(),
             Rect::new(
                 x,
-                150. + 170. - height * scale + lift,
+                320. - height * scale + lift,
                 width * scale,
                 height * scale,
             ),
@@ -1245,15 +1261,6 @@ fn preview_details(out: &mut Scene, state: &State, progress: f32) {
                 Rect::new(x, 384. + lift, 960., 96.),
                 text(20., 400, 0.).leading(1.45),
                 c(0xffffff, 0.86),
-                false,
-            );
-        }
-        if details.trailer.is_some() {
-            out.text(
-                "Hold OK or press Play for the trailer",
-                Rect::new(x, 506. + lift, 900., 22.),
-                text(16.8, 500, 0.),
-                c(0xffffff, 0.55),
                 false,
             );
         }
@@ -1496,6 +1503,12 @@ fn feed_rows(
             }
             feed_card(out, state, assets, item, rect, &target);
         }
+        // "See all": the row's every title in Explore.
+        let more = Rect::new(x, cards_y, crate::feeds::MORE_WIDTH, CARD_HEIGHT);
+        out.control(Target::FeedMore(row_index), more, true);
+        if more.x < 1920. && more.y < 1054. && more.y + more.h > MAIN_TOP {
+            see_all_tile(out, state, assets, more, &Target::FeedMore(row_index));
+        }
         if let Some((item, rect, target)) = focused_card {
             feed_card(out, state, assets, item, rect, &target);
         }
@@ -1518,6 +1531,81 @@ fn feed_rows(
         y,
         focused_row.map(|(start, end)| (start, end, peek_end.unwrap_or(end))),
     )
+}
+
+/// The tile after a row's last card that opens the row in Explore: a frosted card with a
+/// grid mark, white with dark marks when focused, growing like a poster.
+fn see_all_tile(out: &mut Scene, state: &State, assets: &Assets, rect: Rect, target: &Target) {
+    use crate::feeds::CARD_RADIUS;
+    let focused = state.focus == *target;
+    let scale = state.feeds.scale(target, state.preferences.reduced_motion);
+    let rect = Rect::new(
+        rect.x - rect.w * (scale - 1.) / 2.,
+        rect.y - rect.h * (scale - 1.) / 2.,
+        rect.w * scale,
+        rect.h * scale,
+    );
+    out.shadow(
+        rect,
+        CARD_RADIUS,
+        if focused { 34. } else { 18. },
+        if focused { 14. } else { 6. },
+        if focused { 0.45 } else { 0.16 },
+    );
+    if focused {
+        out.draw.push(Draw::RoundedGradient(
+            rect,
+            CARD_RADIUS,
+            c(0xfafafa, 1.),
+            c(0xe2e2e2, 1.),
+        ));
+    } else {
+        out.draw.push(Draw::RoundedGradient(
+            rect,
+            CARD_RADIUS,
+            c(0x2a3037, 0.82),
+            c(0x161a1f, 0.82),
+        ));
+        out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.09));
+    }
+    let ink = if focused { c(0x1d1d1f, 1.) } else { WHITE };
+    let disc = Rect::new(
+        rect.x + rect.w / 2. - 34.,
+        rect.y + rect.h / 2. - 58.,
+        68.,
+        68.,
+    );
+    out.shape(
+        disc,
+        34.,
+        if focused {
+            c(0x1d1d1f, 0.08)
+        } else {
+            c(0xffffff, 0.10)
+        },
+    );
+    out.icon(assets, "grid", disc.inset(20.), ink);
+    out.text(
+        "See all",
+        Rect::new(rect.x, disc.y + disc.h + 18., rect.w, 26.),
+        text(20.8, 600, -0.01),
+        ink,
+        true,
+    );
+    out.text(
+        "in Explore",
+        Rect::new(rect.x, disc.y + disc.h + 48., rect.w, 20.),
+        text(15.2, 500, 0.),
+        if focused {
+            c(0x1d1d1f, 0.6)
+        } else {
+            c(0xffffff, 0.55)
+        },
+        true,
+    );
+    if focused {
+        out.ring(rect, CARD_RADIUS);
+    }
 }
 
 /// A feed row's poster with its episode caption, grown while focused.
@@ -1709,6 +1797,7 @@ fn poster(
             true,
         );
     }
+    poster_marks(out, state, assets, item, rect);
     if let Some(progress) = item.progress {
         let track = Rect::new(rect.x + 16., rect.y + rect.h - 20., rect.w - 32., 5.);
         out.shape(track, 2.5, c(0x000000, 0.5));
@@ -1727,6 +1816,53 @@ fn poster(
         out.ring(rect, CARD_RADIUS);
     }
     rect
+}
+
+/// Small marks in a poster's top right corner, from Trakt: a tick for a title watched
+/// through, a half-filled circle for one begun (unless its progress bar already says so),
+/// and a bookmark for one on the Watchlist. They scale down with smaller posters.
+fn poster_marks(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+) {
+    use crate::feeds::Watch;
+    let watched = match state.feeds.watched.get(&item.link) {
+        Some(Watch::Done) => Some("check"),
+        Some(Watch::Started) if item.progress.is_none() => Some("half"),
+        _ => None,
+    };
+    let listed = state.feeds.trakt && state.in_watchlist(&item.link);
+    if watched.is_none() && !listed {
+        return;
+    }
+    let size = (28. * rect.w / crate::feeds::CARD_WIDTH).clamp(18., 30.);
+    let gap = size * 0.25;
+    let mut x = rect.x + rect.w - gap - size;
+    let y = rect.y + gap;
+    for icon in [watched, listed.then_some("bookmark")]
+        .into_iter()
+        .flatten()
+    {
+        let disc = Rect::new(x, y, size, size);
+        out.shape(disc, size / 2., c(0x0b0d10, 0.62));
+        out.border(disc, size / 2., 1., c(0xffffff, 0.22));
+        let mark = size * 0.52;
+        out.icon(
+            assets,
+            icon,
+            Rect::new(
+                disc.x + (size - mark) / 2.,
+                disc.y + (size - mark) / 2.,
+                mark,
+                mark,
+            ),
+            c(0xffffff, 0.92),
+        );
+        x -= size + gap * 0.8;
+    }
 }
 
 const SEARCH_BAR_HEIGHT: f32 = 72.;
@@ -2209,8 +2345,44 @@ fn hero_banner(out: &mut Scene, state: &State, assets: &Assets, y: f32) -> f32 {
             out.fade(start, 0.55, 0.7);
         }
     }
+    // My Watchlist, in Explore: left of the calendar button (or in its place).
+    let calendar = !state.feeds.shelf_minis().is_empty();
+    if state.feeds.watchlist_row().is_some() {
+        let right = if calendar { 1808. - 76. - 20. } else { 1808. };
+        let button = Rect::new(right - 76., band.y + 1080. - 76. - 72., 76., 76.);
+        let focused = state.focus == Target::HeroWatchlist;
+        out.pill(button, focused, false);
+        out.icon(
+            assets,
+            "bookmark",
+            button.inset(23.),
+            if focused { c(0x2c2c2c, 1.) } else { WHITE },
+        );
+        if focused {
+            out.ring(button, button.h / 2.);
+            // Its name, above it, while focused.
+            let style = text(17.6, 600, 0.);
+            let label = "My Watchlist";
+            let width = assets.width(label, style) + 28.;
+            let tag = Rect::new(
+                button.x + button.w / 2. - width / 2.,
+                button.y - 50.,
+                width,
+                34.,
+            );
+            out.shape(tag, 17., c(0x101317, 0.86));
+            out.text(
+                label,
+                Rect::new(tag.x, tag.y + 8., tag.w, 20.),
+                style,
+                WHITE,
+                true,
+            );
+        }
+        out.control(Target::HeroWatchlist, button, false);
+    }
     // "This week" and new seasons: one calendar button, bottom right, opening them all.
-    if !state.feeds.shelf_minis().is_empty() {
+    if calendar {
         let button = Rect::new(1808. - 76., band.y + 1080. - 76. - 72., 76., 76.);
         let calendar_focused = state.focus == Target::HeroMore;
         out.pill(button, calendar_focused, false);
@@ -2889,7 +3061,9 @@ fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
         WHITE,
         false,
     );
-    let subtitle = if rating {
+    let subtitle = if let Some(prompt) = &menu.prompt {
+        prompt.clone()
+    } else if rating {
         "Rate this title on Trakt".to_owned()
     } else if menu.item.subtitle.is_empty() {
         "Quick actions".to_owned()
@@ -2933,6 +3107,8 @@ fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
             MenuEntry::HideUpNext => ("Hide from Up Next".to_owned(), "eye-off"),
             MenuEntry::RemoveContinue => ("Remove from Continue Watching".to_owned(), "close"),
             MenuEntry::StartOver => ("Start Over".to_owned(), "refresh"),
+            MenuEntry::RemoveFinished => ("Remove from Watchlist".to_owned(), "close"),
+            MenuEntry::KeepFinished => ("Keep it".to_owned(), "bookmark"),
         };
         let rect = Rect::new(717.8, panel.y + 134. + index as f32 * 76.8, 484.4, 67.2);
         let target = Target::MenuItem(index);
@@ -4370,9 +4546,20 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         }),
         false,
     );
-    // The soundbar keep-awake works without feeds, so its row always shows.
+    let sounds = (
+        19,
+        "Navigation sounds",
+        "sound",
+        Some(if state.preferences.ui_sounds {
+            language.t("stateOn")
+        } else {
+            language.t("stateOff")
+        }),
+        false,
+    );
+    // The soundbar keep-awake and the sounds work without feeds, so their rows always show.
     if state.feeds.rows.is_empty() {
-        return vec![keep_awake];
+        return vec![keep_awake, sounds];
     }
     vec![
         (
@@ -4482,6 +4669,7 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         )
     }))
     .chain(std::iter::once(keep_awake))
+    .chain(std::iter::once(sounds))
     .chain(std::iter::once((
         13,
         "Screensaver",
@@ -4750,7 +4938,7 @@ fn keycap(out: &mut Scene, label: &str, x: f32, y: f32, w: f32, small: bool) {
 fn footer(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let style = text(14.4, 400, 0.005);
-    if state.page == Page::Home && state.moving.is_none() {
+    if matches!(state.page, Page::Home | Page::Explore) && state.moving.is_none() {
         return;
     }
     let color = c(0xeeeeee, 0.37);
@@ -4866,11 +5054,12 @@ fn empty(out: &mut Scene, state: &State, assets: &Assets, content: EmptyState<'_
         true,
     );
     if let Some(target) = action {
-        let label = state.preferences.language.t(if target == Target::Retry {
-            "retry"
-        } else {
-            "exploreApps"
-        });
+        let label = match target {
+            Target::Retry => state.preferences.language.t("retry"),
+            Target::ExploreClear => "Clear filters",
+            Target::ExploreRetry => "Try again",
+            _ => state.preferences.language.t("exploreApps"),
+        };
         let width = assets.width(label, text(15.2, 600, 0.)) + 72.;
         let button = Rect::new(center - width / 2., top + 144.8, width, 46.8);
         out.shape(button, 11.2, c(0xededed, 1.));

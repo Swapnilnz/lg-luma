@@ -5,6 +5,7 @@
 //! milliseconds since the epoch, so every state machine here runs in plain `cargo test`.
 
 pub mod aniskip;
+pub mod badges;
 pub mod http;
 pub mod ids;
 pub mod launch;

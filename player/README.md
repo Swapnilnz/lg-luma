@@ -106,9 +106,15 @@ Paused for 10 s, the controls give way to a pause screen: the title or logo, the
 its synopsis, where you paused and how long is left, and the time of day top right. Any key
 brings the controls back; OK or Play resumes.
 
-- **Start:** the TMDB backdrop, with the title's logo (or name) filling in as loading goes on:
-  details, streams found, the stream loading, its first frame. It stays until the picture
-  starts. AIOStreams gets 15 s and one automatic retry. The top stream plays, or, for a
+- **Start:** the TMDB backdrop drifting under slow colour light and rising specks, with the
+  title's logo (or name) filling in as loading goes on and a light sweeping across it; its
+  year, genres and runtime below, then four steps (Details, Streams, Connecting, Buffering)
+  ticked off in turn over a progress line. Once a stream is picked, a card rises in at the
+  bottom right: the debrid service and whether the file is cached there, its place in the
+  list, and badges read from the stream's name, description and file name (`4K`, Dolby
+  Vision, HDR10/HDR10+, Remux/Blu-ray/WEB-DL, HEVC/AV1, 10-bit, Dolby Atmos, TrueHD/DTS:X/
+  DD+, 7.1, size), then the release name. Badges parse in `luma-core::badges`. The screen
+  stays until the picture starts, then lifts away into it. Info (Red) lists the same badges. AIOStreams gets 15 s and one automatic retry. The top stream plays, or, for a
   show, one from the source it last played from (its `bingeGroup`, else the same stream
   name such as `[RD+] 4K DV`), remembered per show across launches as Stremio does.
 - **Resume:** the newer of Trakt's playback point and the local one (saved every 15 s). Past

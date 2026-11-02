@@ -402,12 +402,19 @@ fn reordering_skips_hidden_and_unavailable_favorite_slots() {
 #[test]
 fn focused_navigation_tabs_switch_pages_immediately() {
     let mut state = ready();
+    // Home, Explore, Apps, Settings: Explore keeps the last page index but sits second.
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.page, Page::Explore);
+    assert_eq!(state.focus, Target::Nav(crate::state::EXPLORE_PAGE));
     state.direction(Direction::Right, &controls(&state));
     assert_eq!(state.page, Page::Apps);
     assert_eq!(state.focus, Target::Nav(1));
     state.direction(Direction::Right, &controls(&state));
     assert_eq!(state.page, Page::Settings);
     assert_eq!(state.focus, Target::Nav(2));
+    state.direction(Direction::Left, &controls(&state));
+    state.direction(Direction::Left, &controls(&state));
+    assert_eq!(state.page, Page::Explore);
 }
 
 #[test]

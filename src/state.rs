@@ -26,12 +26,18 @@ pub const HOME_TILE_WIDTH: f32 = 256.;
 pub const HOME_TILE_PITCH: f32 = 281.6;
 pub const HOME_FADE_LEFT: f32 = 8.;
 pub const HOME_FADE_RIGHT: f32 = 1910.;
+/// Explore's page index (Nav target): after Settings, so the other pages keep theirs.
+pub const EXPLORE_PAGE: usize = 3;
+/// The tabs in the order drawn, by page index: Home, Explore, Apps, Settings.
+pub const NAV_ORDER: [usize; 4] = [0, EXPLORE_PAGE, 1, 2];
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum Page {
     Home,
     Apps,
     Settings,
+    /// Every title of the feed rows, by category, with filters.
+    Explore,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -55,6 +61,22 @@ pub enum Target {
     HeroMore,
     /// A title in that grid.
     SheetItem(usize),
+    /// The "See all" tile at the end of a feed row, which opens it in Explore.
+    FeedMore(usize),
+    /// The Top Shelf's Watchlist button, which opens My Watchlist in Explore.
+    HeroWatchlist,
+    /// Explore's filter bar: My Lists, the type (All, Movies, Shows, Anime), Genre and Sort
+    /// (dropdowns), Surprise Me; a choice in an open dropdown; a title; Clear filters and
+    /// Try again (after a failed search).
+    ExploreSource,
+    ExploreType(usize),
+    ExploreGenre,
+    ExploreSort,
+    ExploreSurprise,
+    ExploreOption(usize),
+    ExploreItem(usize),
+    ExploreClear,
+    ExploreRetry,
     /// A title page's buttons, season pills, episodes, cast and More Like This.
     TitleButton(usize),
     TitleSeason(usize),
@@ -179,6 +201,14 @@ pub enum Direction {
     Right,
 }
 
+/// A navigation sound: focus moved, OK, or Back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sound {
+    Move,
+    Select,
+    Back,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Effect {
     Save,
@@ -244,6 +274,8 @@ pub struct State {
     pub input_name: String,
     pub recents: crate::recents::Recents,
     pub feeds: crate::feeds::Feeds,
+    /// The navigation sound the last key asked for; `main` plays it (Settings permitting).
+    pub sound: Option<Sound>,
 }
 
 impl State {
@@ -278,6 +310,7 @@ impl State {
             input_name: String::new(),
             recents: crate::recents::Recents::default(),
             feeds: crate::feeds::Feeds::default(),
+            sound: None,
         }
     }
 
@@ -348,6 +381,7 @@ impl State {
             Page::Home => 0,
             Page::Apps => 1,
             Page::Settings => 2,
+            Page::Explore => EXPLORE_PAGE,
         }
     }
 
@@ -374,6 +408,7 @@ impl State {
         self.page = match index {
             1 => Page::Apps,
             2 => Page::Settings,
+            EXPLORE_PAGE => Page::Explore,
             _ => Page::Home,
         };
         self.focus = Target::Nav(self.page_index());
@@ -426,7 +461,7 @@ impl State {
     }
 
     pub fn content_viewport(&self) -> Rect {
-        let bottom = if self.page == Page::Home && self.moving.is_none() {
+        let bottom = if matches!(self.page, Page::Home | Page::Explore) && self.moving.is_none() {
             1053.6
         } else {
             994.4
@@ -470,6 +505,10 @@ impl State {
     ) -> bool {
         // A title page scrolls instead of the Home page beneath it; so does the sheet's grid.
         if self.title_wheel(y) {
+            return false;
+        }
+        if self.page == Page::Explore && self.feeds.menu.is_none() {
+            self.explore_wheel(y);
             return false;
         }
         if let Some(sheet) = &mut self.feeds.sheet {
@@ -603,6 +642,7 @@ impl State {
                 .map(|app| Target::App(app.id.clone()))
                 .unwrap_or(Target::Filter(1)),
             Page::Settings => Target::Sidebar(0),
+            Page::Explore => self.explore_entry(),
         }
     }
 
@@ -628,6 +668,7 @@ impl State {
             Target::Hero
                 | Target::HeroExtra(_)
                 | Target::HeroMore
+                | Target::HeroWatchlist
                 | Target::App(_)
                 | Target::FeedSearch
                 | Target::FeedVoice
@@ -659,7 +700,7 @@ impl State {
                 }
             }
             if self.page == Page::Home
-                && let Target::Feed(row, _) = self.focus
+                && let Target::Feed(row, _) | Target::FeedMore(row) = self.focus
             {
                 self.reveal_feed(row, control.rect);
             }
@@ -691,7 +732,7 @@ impl State {
                 };
                 // Moving down the rows, the next one peeks in below, as it does moving up.
                 if self.page == Page::Home
-                    && let Target::Feed(row, _) = self.focus
+                    && let Target::Feed(row, _) | Target::FeedMore(row) = self.focus
                     && (row + 1..self.feeds.rows.len()).any(|next| self.feeds.row_visible(next))
                 {
                     bottom -= crate::feeds::ROW_PEEK;
@@ -706,10 +747,12 @@ impl State {
         if self.page == Page::Home && self.feeds.hero.is_some() {
             // Between the two screens Home slides (PAGE_SLIDE) rather than jumps.
             let target = match self.focus {
-                Target::Hero | Target::HeroExtra(_) | Target::HeroMore => controls
-                    .iter()
-                    .find(|c| c.target == Target::Hero)
-                    .map(|band| (drawn + band.rect.y).max(0.)),
+                Target::Hero | Target::HeroExtra(_) | Target::HeroMore | Target::HeroWatchlist => {
+                    controls
+                        .iter()
+                        .find(|c| c.target == Target::Hero)
+                        .map(|band| (drawn + band.rect.y).max(0.))
+                }
                 Target::App(_) | Target::FeedSearch | Target::FeedVoice => Some(0.),
                 _ => None,
             };
@@ -821,7 +864,18 @@ impl State {
         self.dirty = true;
     }
 
+    /// Remote navigation; a move of focus asks for the move sound.
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        let before = self.focus.clone();
+        let page = self.page;
+        let effects = self.navigate(direction, controls);
+        if self.focus != before || self.page != page {
+            self.sound = Some(Sound::Move);
+        }
+        effects
+    }
+
+    fn navigate(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
         if self.recents_open() {
@@ -870,6 +924,11 @@ impl State {
             return vec![];
         }
         if self.overlay.is_none() {
+            if self.page == Page::Explore
+                && let Some(effects) = self.explore_direction(direction, controls)
+            {
+                return effects;
+            }
             if self.page == Page::Home
                 && let Some(effects) = self.feed_direction(direction, controls)
             {
@@ -1140,9 +1199,16 @@ impl State {
                 }
             }
             if let Target::Nav(index) = self.focus {
+                // The tabs as drawn: Explore sits second, though its page index is last.
+                let position = NAV_ORDER
+                    .iter()
+                    .position(|page| *page == index)
+                    .unwrap_or(0);
                 let next = match direction {
-                    Direction::Left if index > 0 => Some(index - 1),
-                    Direction::Right if index < 2 => Some(index + 1),
+                    Direction::Left if position > 0 => Some(NAV_ORDER[position - 1]),
+                    Direction::Right if position + 1 < NAV_ORDER.len() => {
+                        Some(NAV_ORDER[position + 1])
+                    }
                     _ => None,
                 };
                 if let Some(next) = next {
@@ -1569,7 +1635,13 @@ impl State {
         }
     }
 
+    /// OK: the select sound, and whatever the focused control does.
     pub fn activate(&mut self) -> Vec<Effect> {
+        self.sound = Some(Sound::Select);
+        self.press()
+    }
+
+    fn press(&mut self) -> Vec<Effect> {
         if self.recents_open() {
             use crate::recents::Command;
             return match self.focus.clone() {
@@ -1603,6 +1675,11 @@ impl State {
         {
             return effects;
         }
+        if self.overlay.is_none()
+            && let Some(effects) = self.explore_activate()
+        {
+            return effects;
+        }
         if self.moving.take().is_some() {
             // Order was saved at every move. A fresh OK release finishes the
             // mode and keeps the selected favorite, rather than launching it.
@@ -1619,17 +1696,35 @@ impl State {
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
             Target::FeedSearch => return self.open_search(),
             Target::FeedVoice => return self.start_voice(),
+            // Continue Watching and the rest of the Top Shelf open the title's page first, as
+            // the rows' cards do (or play at once, when Settings says so).
             Target::Hero if !self.launching => {
-                if let Some(item) = self.feeds.hero_item() {
-                    return vec![Effect::LaunchTitle(item.clone())];
+                if let Some(item) = self.feeds.hero_item().cloned() {
+                    return self.select_card(item);
                 }
             }
             Target::HeroExtra(index) if !self.launching => {
-                if let Some(&item) = self.feeds.shelf_minis().get(index) {
-                    return vec![Effect::LaunchTitle(item.clone())];
+                if let Some(item) = self
+                    .feeds
+                    .shelf_minis()
+                    .get(index)
+                    .map(|&item| item.clone())
+                {
+                    return self.select_card(item);
                 }
             }
             Target::HeroMore => self.open_sheet(),
+            Target::HeroWatchlist => {
+                return self.open_explore(crate::feeds::Category::Watchlist);
+            }
+            Target::FeedMore(row) => {
+                let category = if self.feeds.watchlist_row() == Some(row) {
+                    crate::feeds::Category::Watchlist
+                } else {
+                    crate::feeds::Category::Row(row)
+                };
+                return self.open_explore(category);
+            }
             Target::Feed(row, index) if !self.launching => {
                 if let Some(item) = self
                     .feeds
@@ -1788,6 +1883,7 @@ impl State {
                     17 => {
                         self.preferences.feed_hide_spoilers = !self.preferences.feed_hide_spoilers;
                     }
+                    19 => self.preferences.ui_sounds = !self.preferences.ui_sounds,
                     18 => {
                         self.preferences.feed_select_details =
                             !self.preferences.feed_select_details;
@@ -1999,7 +2095,13 @@ impl State {
         vec![]
     }
 
+    /// Back: the back sound, then whatever closes or steps out.
     pub fn back(&mut self) -> Vec<Effect> {
+        self.sound = Some(Sound::Back);
+        self.step_back()
+    }
+
+    fn step_back(&mut self) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
         if self.moving.take().is_some() || self.feeds.list_moving.take().is_some() {
@@ -2028,6 +2130,9 @@ impl State {
         if self.feeds_back() {
             return vec![];
         }
+        if self.page == Page::Explore && self.explore_back() {
+            return vec![];
+        }
         if self.feeds.search.is_some() {
             self.close_search();
             return vec![];
@@ -2049,6 +2154,11 @@ impl State {
             self.query.clear();
             self.focus = Target::Nav(1);
             self.scroll = 0.;
+            return vec![];
+        }
+        // Explore: Back goes up to its tab first, then Home.
+        if self.page == Page::Explore && !matches!(self.focus, Target::Nav(_)) {
+            self.focus = Target::Nav(EXPLORE_PAGE);
             return vec![];
         }
         if self.page != Page::Home {
