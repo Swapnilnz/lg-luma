@@ -14,6 +14,7 @@ mod feeds;
 #[path = "feeds-service.rs"]
 mod feeds_service;
 mod font;
+mod gamepad;
 mod i18n;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod luna;
@@ -1141,6 +1142,8 @@ fn run() -> Result<(), String> {
     let mut captured = None;
     let mut last_drawable = None;
     let mut events = sdl.event_pump()?;
+    // Game controllers drive Luma as the remote does (see `gamepad`).
+    let mut gamepads = gamepad::Gamepads::new(&sdl);
     // The soundbar keep-alive's audio, when the TV gives Luma any (see `keep_awake_tick`).
     let audio = sdl
         .audio()
@@ -1510,10 +1513,13 @@ fn run() -> Result<(), String> {
         if state.dirty {
             scene = compose(&mut state, &assets, pill, pill_width, now);
         }
-        for event in queued_event
-            .take()
+        let held_repeat = gamepads.repeat(Instant::now(), visible);
+        let (pads, shown) = (&mut gamepads, visible);
+        for event in held_repeat
             .into_iter()
+            .chain(queued_event.take())
             .chain(std::iter::from_fn(|| sdl_events::poll(&mut events, webos)))
+            .flat_map(move |event| pads.translate(event, shown))
         {
             // Window-entry pointer events can arrive after a slow first upload.
             // Bounded scripted captures own input until their final frame; only
@@ -2214,6 +2220,10 @@ fn run() -> Result<(), String> {
         } else {
             100
         };
+        // A held controller direction repeats on time.
+        let timeout = gamepads
+            .wait(Instant::now())
+            .map_or(timeout, |wait| timeout.min(wait.max(1)));
         queued_event = sdl_events::wait(&mut events, timeout, webos);
     }
     if text_active {

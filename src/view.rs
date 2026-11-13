@@ -2793,8 +2793,9 @@ fn hero_slide(
 fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
     use crate::feeds::{
         CARD_HEIGHT, CARD_PITCH, CARD_WIDTH, CAST_CAPTION, CAST_HEIGHT, CAST_PITCH, CAST_WIDTH,
-        EPISODE_HEIGHT, EPISODE_PITCH, EPISODE_WIDTH, PAGE_ENTRANCE, SEASON_HEIGHT, SEASON_PITCH,
-        SEASON_WIDTH, SECTION_HEADER, Section, TITLE_BUTTON_HEIGHT, TITLE_BUTTONS_Y, TitleButton,
+        EPISODE_CAPTION, EPISODE_HEIGHT, EPISODE_PITCH, EPISODE_WIDTH, PAGE_ENTRANCE,
+        SEASON_HEIGHT, SEASON_PITCH, SEASON_WIDTH, SECTION_HEADER, Section, TITLE_BUTTON_HEIGHT,
+        TITLE_BUTTONS_Y, TitleButton,
     };
     let Some(page) = &state.feeds.title else {
         return;
@@ -3033,6 +3034,13 @@ fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
                 }
                 if let Some((episode, rect, _)) = focused_card {
                     episode_card(out, state, assets, episode, rect, true, trakt);
+                    episode_blurb(
+                        out,
+                        state,
+                        episode,
+                        y + EPISODE_HEIGHT + EPISODE_CAPTION,
+                        trakt,
+                    );
                 }
             }
             Section::Cast => {
@@ -3151,6 +3159,32 @@ fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
     if entrance < 1. {
         out.fade(start, entrance, 1.);
     }
+}
+
+/// The focused episode's synopsis, under the row. Hidden with its still when spoilers are.
+fn episode_blurb(
+    out: &mut Scene,
+    state: &State,
+    episode: &crate::feeds::Episode,
+    y: f32,
+    trakt: Option<&crate::feeds::TraktTitle>,
+) {
+    let watched =
+        trakt.is_some_and(|trakt| trakt.episodes.contains(&[episode.season, episode.number]));
+    let blurb = if state.preferences.feed_hide_spoilers && !watched {
+        "Synopsis hidden until watched.".to_owned()
+    } else if episode.overview.is_empty() {
+        return;
+    } else {
+        clip_words(&episode.overview, 260)
+    };
+    out.text(
+        blurb,
+        Rect::new(86., y, 1400., 60.),
+        text(17.6, 400, 0.).leading(1.4),
+        c(0xffffff, 0.78),
+        false,
+    );
 }
 
 /// An episode's still with its number, name, length and air date, ticked when watched.

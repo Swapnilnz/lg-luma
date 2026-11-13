@@ -1661,6 +1661,7 @@ fn season_episodes(http: &Http, key: &str, id: u64, season: u32) -> Result<Vec<E
                     .filter(|path| path.starts_with('/'))
                     .map(|path| format!("{TMDB_STILLS}{path}")),
                 aired: first_text(episode, &["air_date"]),
+                overview: first_text(episode, &["overview"]),
             })
         })
         .collect())

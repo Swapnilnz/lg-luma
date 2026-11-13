@@ -1493,6 +1493,8 @@ pub const EPISODE_WIDTH: f32 = 384.;
 pub const EPISODE_HEIGHT: f32 = 216.;
 pub const EPISODE_PITCH: f32 = 408.;
 pub const EPISODE_CAPTION: f32 = 70.;
+/// Room under the episode row for the focused episode's synopsis: two lines.
+pub const EPISODE_BLURB: f32 = 66.;
 pub const CAST_WIDTH: f32 = 150.;
 pub const CAST_HEIGHT: f32 = 225.;
 pub const CAST_PITCH: f32 = 174.;
@@ -1579,6 +1581,8 @@ pub struct Episode {
     pub still: Option<String>,
     /// Air date, YYYY-MM-DD.
     pub aired: String,
+    /// TMDB's synopsis, shown under the row while the episode has focus.
+    pub overview: String,
 }
 
 /// Everything a title page shows beyond a preview's details, from TMDB and MDBList.
@@ -1742,8 +1746,9 @@ impl TitlePage {
         if self.series() && !self.seasons().is_empty() {
             sections.push((Section::Seasons, y, SEASON_HEIGHT));
             y += SEASON_HEIGHT + 28.;
-            sections.push((Section::Episodes, y, EPISODE_HEIGHT + EPISODE_CAPTION));
-            y += EPISODE_HEIGHT + EPISODE_CAPTION + SECTION_GAP;
+            let height = EPISODE_HEIGHT + EPISODE_CAPTION + EPISODE_BLURB;
+            sections.push((Section::Episodes, y, height));
+            y += height + SECTION_GAP;
         }
         if !self.cast().is_empty() {
             let height = SECTION_HEADER + CAST_HEIGHT + CAST_CAPTION;
