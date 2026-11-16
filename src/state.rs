@@ -20,6 +20,9 @@ pub const APPS_COLUMNS: usize = 6;
 pub const VOLUME_SETTING: usize = 20;
 pub const THEME_SETTING: usize = 21;
 pub const REDUCED_EFFECTS_SETTING: usize = 22;
+/// Photos from the PC: in the screensaver, and as Home's background.
+pub const PHOTO_SCREENSAVER_SETTING: usize = 23;
+pub const PHOTO_BACKGROUND_SETTING: usize = 24;
 use crate::sounds::VOLUME_MIN;
 /// Automatic inventory retries before the error shows: with the 6.5 s Luna timeout about 50 s.
 pub const INVENTORY_RETRIES: u32 = 5;
@@ -44,6 +47,8 @@ pub enum Page {
     Settings,
     /// Every title of the feed rows, by category, with filters.
     Explore,
+    /// The PC's games (the console agent's library), launched through Hydra.
+    Play,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -133,6 +138,19 @@ pub enum Target {
     /// Settings > Lists > Add: the search field, and the lists found.
     ListSearch,
     ListResult(usize),
+    /// The console transition's buttons, once the PC has not answered.
+    ConsoleSwitch,
+    ConsoleCancel,
+    /// The Play page: a cover on the rail, the info panel's buttons, and the details sheet's
+    /// Play button and screenshots.
+    PlayGame(usize),
+    PlayAction(crate::play::PlayButton),
+    PlayDetailStart,
+    /// The details sheet's Hide (or Unhide) button.
+    PlayHide,
+    PlayShot(usize),
+    /// The rail's last tile, with games hidden: shows them, or puts them away again.
+    PlayHidden,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -202,6 +220,13 @@ pub enum TextField {
 }
 
 #[derive(Clone, Copy)]
+enum ConsoleInput {
+    Move,
+    Press,
+    Back,
+}
+
+#[derive(Clone, Copy)]
 pub enum Direction {
     Up,
     Down,
@@ -215,6 +240,12 @@ pub enum Sound {
     Move,
     Select,
     Back,
+    /// The console launch: a rising swell as the card opens, a soft pulse while the PC wakes,
+    /// a chime when it is ready, and a whoosh into black.
+    Launch,
+    Waiting,
+    Ready,
+    Whoosh,
 }
 
 #[derive(Debug, PartialEq)]
@@ -242,6 +273,8 @@ pub enum Effect {
     },
     Quit,
     Weather(weather::Command),
+    /// The console tile was picked: wake and ready the PC for that session.
+    ConsoleStart(u64),
 }
 
 pub const KEYS: [&str; 40] = [
@@ -284,6 +317,15 @@ pub struct State {
     pub feeds: crate::feeds::Feeds,
     /// The navigation sound the last key asked for; `main` plays it (Settings permitting).
     pub sound: Option<Sound>,
+    /// The console tile's transition, while it runs.
+    pub console: Option<crate::console::Session>,
+    /// Whether the PC's agent answered the last probe (the tile's status dot).
+    pub console_awake: Option<bool>,
+    console_generation: u64,
+    /// The Play page and Home's Play band.
+    pub play: crate::play::Play,
+    /// Photos from the PC, for the screensaver and Home's background.
+    pub photos: crate::photos::Photos,
 }
 
 impl State {
@@ -319,7 +361,128 @@ impl State {
             recents: crate::recents::Recents::default(),
             feeds: crate::feeds::Feeds::default(),
             sound: None,
+            console: None,
+            console_awake: None,
+            console_generation: 0,
+            play: crate::play::Play::default(),
+            photos: crate::photos::Photos::default(),
         }
+    }
+
+    /// Picking the console tile: the card grows to fill the screen while the PC wakes.
+    fn start_console(&mut self) -> Vec<Effect> {
+        self.start_console_with(None)
+    }
+
+    /// The launch, for one game (or just Hydra): it grows from the focused card.
+    pub fn start_console_with(&mut self, game: Option<crate::console::Game>) -> Vec<Effect> {
+        if self.console.is_some() || self.preferences.console.is_none() {
+            return vec![];
+        }
+        self.console_generation += 1;
+        // The Play button grows from its game's cover.
+        let source = match self.focus {
+            Target::PlayAction(_) => Target::PlayGame(self.play.index),
+            _ => self.focus.clone(),
+        };
+        self.console = Some(crate::console::Session::new(
+            self.console_generation,
+            self.focus.clone(),
+            source,
+            game,
+            Instant::now(),
+        ));
+        self.sound = Some(Sound::Launch);
+        self.notice = None;
+        self.dirty = true;
+        vec![Effect::ConsoleStart(self.console_generation)]
+    }
+
+    /// A phase from the console worker for `generation`.
+    pub fn console_phase(&mut self, generation: u64, phase: crate::console::Phase) {
+        let Some(session) = &mut self.console else {
+            return;
+        };
+        if session.generation != generation {
+            return;
+        }
+        session.update(phase, Instant::now());
+        if session.phase == crate::console::Phase::Failed {
+            self.focus = Target::ConsoleSwitch;
+        }
+        if matches!(
+            phase,
+            crate::console::Phase::Starting | crate::console::Phase::Ready
+        ) && self.console_awake != Some(true)
+        {
+            // What failed to load while the PC slept may load now.
+            self.play.retry_art();
+        }
+        if matches!(
+            phase,
+            crate::console::Phase::Starting | crate::console::Phase::Ready
+        ) {
+            self.console_awake = Some(true);
+        }
+        self.dirty = true;
+    }
+
+    /// The HDMI input to switch to, once the transition has faded to black (once per session).
+    pub fn console_launch_due(&mut self) -> Option<String> {
+        let now = Instant::now();
+        let session = self.console.as_mut()?;
+        if !session.launch_due(now) {
+            return None;
+        }
+        session.launched_at = Some(now);
+        self.preferences
+            .console
+            .as_ref()
+            .map(|config| config.input.clone())
+    }
+
+    pub fn cancel_console(&mut self) {
+        if let Some(session) = self.console.take() {
+            session.stop();
+            self.focus = session.restore;
+            self.reconcile_focus();
+        }
+        self.dirty = true;
+    }
+
+    /// Input while the transition shows: Back cancels; once the PC has not answered, the two
+    /// buttons. True when the transition took the input.
+    fn console_input(&mut self, input: ConsoleInput) -> bool {
+        let Some(session) = &self.console else {
+            return false;
+        };
+        let (launched, failed) = (
+            session.launched_at.is_some(),
+            session.phase == crate::console::Phase::Failed,
+        );
+        self.dirty = true;
+        if launched {
+            return true;
+        }
+        match input {
+            ConsoleInput::Back => self.cancel_console(),
+            ConsoleInput::Move if failed => {
+                self.focus = if self.focus == Target::ConsoleSwitch {
+                    Target::ConsoleCancel
+                } else {
+                    Target::ConsoleSwitch
+                };
+            }
+            ConsoleInput::Press if failed => {
+                if self.focus == Target::ConsoleCancel {
+                    self.cancel_console();
+                } else if let Some(session) = &mut self.console {
+                    session.force(Instant::now());
+                }
+            }
+            ConsoleInput::Move | ConsoleInput::Press => {}
+        }
+        true
     }
 
     pub fn notify(&mut self, text: impl Into<String>) {
@@ -328,6 +491,22 @@ impl State {
     }
 
     pub fn tick(&mut self) {
+        if let Some(session) = &mut self.console {
+            let now = Instant::now();
+            if session.tick(now) {
+                self.focus = Target::ConsoleSwitch;
+            }
+            if let Some(cue) = session.cue(now) {
+                self.sound = Some(cue);
+            }
+            if session.finished(now) {
+                self.console = None;
+            }
+            self.dirty = true;
+        }
+        if self.play_available() {
+            self.play_tick();
+        }
         let layout = crate::themes::get(&self.preferences.theme).layout;
         if self.feeds.layout != layout {
             self.feeds.layout = layout;
@@ -397,14 +576,20 @@ impl State {
             Page::Apps => 1,
             Page::Settings => 2,
             Page::Explore => EXPLORE_PAGE,
+            Page::Play => crate::play::PLAY_PAGE,
         }
     }
 
     pub fn animating(&self) -> bool {
-        ((self.recents_open() || self.recents.visibility > 0.)
-            && (self.recents.visibility != if self.recents_open() { 1. } else { 0. }
-                || self.recents.cards_animating(self.pointer)))
+        self.console
+            .as_ref()
+            .is_some_and(crate::console::Session::animating)
+            || self.play_animating()
+            || ((self.recents_open() || self.recents.visibility > 0.)
+                && (self.recents.visibility != if self.recents_open() { 1. } else { 0. }
+                    || self.recents.cards_animating(self.pointer)))
             || self.previous_background.is_some()
+            || (self.photos.fading(Instant::now()) && self.photos_showing())
             || self.panel_started.is_some()
             || self.feeds.fading()
             || ((self.feeds.search_animating() || self.feeds.card_animating())
@@ -424,8 +609,10 @@ impl State {
             1 => Page::Apps,
             2 => Page::Settings,
             EXPLORE_PAGE => Page::Explore,
+            crate::play::PLAY_PAGE if self.play_available() => Page::Play,
             _ => Page::Home,
         };
+        self.play.sheet = None;
         self.focus = Target::Nav(self.page_index());
         self.scroll = 0.;
         if self.page == Page::Home {
@@ -592,6 +779,12 @@ impl State {
 
     pub fn set_inventory(&mut self, next: Inventory, warning: Option<String>) {
         self.inventory.apps = next.apps;
+        if let Some(console) = &self.preferences.console {
+            let mut app = App::new(crate::console::APP_ID, console.title());
+            app.brand = "gaming".into();
+            app.category = "Gaming".into();
+            self.inventory.apps.push(app);
+        }
         if let Some(warning) = warning {
             self.notify(warning);
         } else {
@@ -658,6 +851,7 @@ impl State {
                 .unwrap_or(Target::Filter(1)),
             Page::Settings => Target::Sidebar(0),
             Page::Explore => self.explore_entry(),
+            Page::Play => self.play_entry(),
         }
     }
 
@@ -902,6 +1096,12 @@ impl State {
     fn navigate(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
+        if self.console.is_some() {
+            if matches!(direction, Direction::Left | Direction::Right) {
+                self.console_input(ConsoleInput::Move);
+            }
+            return vec![];
+        }
         if self.recents_open() {
             return self.recent_direction(direction);
         }
@@ -948,6 +1148,9 @@ impl State {
             return vec![];
         }
         if self.overlay.is_none() {
+            if let Some(effects) = self.play_direction(direction) {
+                return effects;
+            }
             if self.page == Page::Explore
                 && let Some(effects) = self.explore_direction(direction, controls)
             {
@@ -1244,15 +1447,11 @@ impl State {
             }
             if let Target::Nav(index) = self.focus {
                 // The tabs as drawn: Explore sits second, though its page index is last.
-                let position = NAV_ORDER
-                    .iter()
-                    .position(|page| *page == index)
-                    .unwrap_or(0);
+                let order = self.nav_order();
+                let position = order.iter().position(|page| *page == index).unwrap_or(0);
                 let next = match direction {
-                    Direction::Left if position > 0 => Some(NAV_ORDER[position - 1]),
-                    Direction::Right if position + 1 < NAV_ORDER.len() => {
-                        Some(NAV_ORDER[position + 1])
-                    }
+                    Direction::Left if position > 0 => Some(order[position - 1]),
+                    Direction::Right if position + 1 < order.len() => Some(order[position + 1]),
                     _ => None,
                 };
                 if let Some(next) = next {
@@ -1387,7 +1586,7 @@ impl State {
     }
 
     pub fn options(&mut self) {
-        if self.overlay.is_some() || self.moving.is_some() {
+        if self.overlay.is_some() || self.moving.is_some() || self.console.is_some() {
             return;
         }
         // Menu on a poster or the Top Shelf: the title's page.
@@ -1408,6 +1607,9 @@ impl State {
     }
 
     pub fn hold(&mut self) {
+        if self.console.is_some() {
+            return;
+        }
         if self.page == Page::Home && self.overlay.is_none() {
             if let Target::App(id) = &self.focus {
                 self.moving = Some(id.clone());
@@ -1686,6 +1888,9 @@ impl State {
     }
 
     fn press(&mut self) -> Vec<Effect> {
+        if self.console_input(ConsoleInput::Press) {
+            return vec![];
+        }
         if self.recents_open() {
             use crate::recents::Command;
             return match self.focus.clone() {
@@ -1693,6 +1898,11 @@ impl State {
                 Target::RecentRetry => self.recent_request(Command::List),
                 _ => vec![],
             };
+        }
+        if self.overlay.is_none()
+            && let Some(effects) = self.play_press()
+        {
+            return effects;
         }
         if self.overlay.is_none()
             && let Some(effects) = self.lists_activate()
@@ -1779,6 +1989,9 @@ impl State {
                 {
                     return self.select_card(item);
                 }
+            }
+            Target::App(id) if id == crate::console::APP_ID && !self.launching => {
+                return self.start_console();
             }
             Target::App(id) | Target::Input(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
@@ -1957,6 +2170,12 @@ impl State {
                     13 => {
                         self.preferences.feed_ambient =
                             (self.preferences.feed_ambient.min(4) + 1) % 5;
+                    }
+                    PHOTO_SCREENSAVER_SETTING => {
+                        self.preferences.photo_screensaver = !self.preferences.photo_screensaver;
+                    }
+                    PHOTO_BACKGROUND_SETTING => {
+                        self.preferences.photo_background = !self.preferences.photo_background;
                     }
                     4 => {
                         self.subpage = Some(Subpage::Language);
@@ -2170,6 +2389,9 @@ impl State {
     fn step_back(&mut self) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
+        if self.console_input(ConsoleInput::Back) {
+            return vec![];
+        }
         if self.moving.take().is_some() || self.feeds.list_moving.take().is_some() {
             return vec![];
         }
@@ -2194,6 +2416,9 @@ impl State {
             return self.commit_text_input();
         }
         if self.feeds_back() {
+            return vec![];
+        }
+        if self.play_back() {
             return vec![];
         }
         if self.page == Page::Explore && self.explore_back() {

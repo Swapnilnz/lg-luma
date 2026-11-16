@@ -938,7 +938,7 @@ fn decode(url: &str, bytes: &[u8]) -> Option<Artwork> {
 
 /// Decodes artwork no larger than `width` x `height`; the key's prefix tells the renderer how
 /// to fit it (`feed:` posters fill their card, `backdrop:` the screen, anything else contains).
-fn decode_as(key: String, bytes: &[u8], width: u32, height: u32) -> Option<Artwork> {
+pub fn decode_as(key: String, bytes: &[u8], width: u32, height: u32) -> Option<Artwork> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;

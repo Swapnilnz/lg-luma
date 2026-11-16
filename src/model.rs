@@ -151,6 +151,14 @@ pub struct Preferences {
     /// Leaves out a theme's heavier or moving effects (blur, grain, scanlines, tilts, glows);
     /// Reduce motion does as well.
     pub reduced_effects: bool,
+    /// The console tile (wake the PC, ready Hydra, switch to its HDMI input); None hides it.
+    pub console: Option<crate::console::Config>,
+    /// Games hidden from the Play page, by `shop:objectId`.
+    pub hidden_games: Vec<String>,
+    /// The screensaver shows photos from the PC (the console agent) while it answers.
+    pub photo_screensaver: bool,
+    /// Home's background is a slideshow of photos from the PC while it answers.
+    pub photo_background: bool,
 }
 
 /// One MDBList row: its title and its `mdblist:` source.
@@ -195,12 +203,20 @@ impl Default for Preferences {
             ui_volume: 70,
             theme: "classic".into(),
             reduced_effects: false,
+            console: None,
+            hidden_games: vec![],
+            photo_screensaver: true,
+            photo_background: true,
         }
     }
 }
 
 impl Preferences {
     pub fn favorites(&self, apps: &[App]) -> Vec<String> {
+        self.saved_favorites(apps)
+    }
+
+    fn saved_favorites(&self, apps: &[App]) -> Vec<String> {
         self.favorites.clone().unwrap_or_else(|| {
             let mut ids = Vec::new();
             for brand in [
@@ -258,6 +274,14 @@ impl Preferences {
     }
 
     pub fn sanitize(&mut self) {
+        if self
+            .console
+            .as_ref()
+            .is_some_and(|console| !console.valid())
+        {
+            eprintln!("Luma console: ignoring the invalid console settings");
+            self.console = None;
+        }
         if !BACKGROUNDS.iter().any(|(id, _)| *id == self.background) {
             self.background = "dunes".into();
         }

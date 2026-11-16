@@ -407,6 +407,7 @@ impl Feeds {
         }
         if let Some(ambient) = &self.ambient
             && !ambient.items.is_empty()
+            && !ambient.photos
         {
             for offset in [0, 1] {
                 let item = &ambient.items[(ambient.slides.index + offset) % ambient.items.len()];
@@ -1555,6 +1556,8 @@ pub struct Ambient {
     pub items: Vec<Item>,
     pub slides: Slides,
     pub started: Instant,
+    /// Photos from the PC (`State::photos`) instead of the titles.
+    pub photos: bool,
 }
 
 /// A person in a title's cast.
@@ -2131,6 +2134,22 @@ impl State {
 
     /// Starts the screensaver after the configured idle time, and turns its slides.
     pub fn ambient_tick(&mut self, idle: Duration, visible: bool) {
+        if let Some(ambient) = &self.feeds.ambient
+            && ambient.photos
+        {
+            if !self.photos_live() && !ambient.items.is_empty() {
+                // The PC stopped answering: on with the titles.
+                if let Some(ambient) = self.feeds.ambient.as_mut() {
+                    ambient.photos = false;
+                    ambient.slides = Slides::new();
+                }
+                eprintln!("Luma photos: the PC stopped answering; screensaver shows titles");
+                self.dirty = true;
+            } else if self.photos.tick(AMBIENT_SLIDE, Instant::now()) {
+                self.dirty = true;
+            }
+            return;
+        }
         if let Some(ambient) = &self.feeds.ambient {
             let count = ambient.items.len();
             let next = &ambient.items[(ambient.slides.index + 1) % count.max(1)].link;
@@ -2162,14 +2181,21 @@ impl State {
             return;
         }
         let items = self.feeds.ambient_items();
-        if items.is_empty() {
+        let photos =
+            self.preferences.photo_screensaver && self.photos_live() && self.photos.ready();
+        if items.is_empty() && !photos {
             return;
+        }
+        if photos {
+            // A fresh photo (or the one showing, from the start) drifts in.
+            self.photos.begin(Instant::now());
         }
         self.feeds.menu = None;
         self.feeds.ambient = Some(Ambient {
             items,
             slides: Slides::new(),
             started: Instant::now(),
+            photos,
         });
         self.pressed = None;
         self.dirty = true;
@@ -2181,7 +2207,8 @@ impl State {
             return;
         };
         self.dirty = true;
-        if !ok || !self.feeds.can_search {
+        // A photo has no title to open.
+        if !ok || !self.feeds.can_search || ambient.photos {
             return;
         }
         let Some(item) = ambient.items.get(ambient.slides.index).cloned() else {
@@ -2528,6 +2555,11 @@ impl State {
     pub fn card_hold(&mut self) -> Option<Vec<Effect>> {
         if self.overlay.is_some() || self.feeds.menu.is_some() {
             return None;
+        }
+        if self.console.is_none()
+            && let Some(effects) = self.play_hold()
+        {
+            return Some(effects);
         }
         // On a title page, holding OK on an episode marks it watched.
         if let Target::TitleEpisode(index) = self.focus

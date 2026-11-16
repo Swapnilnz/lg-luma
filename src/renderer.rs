@@ -524,6 +524,11 @@ fn embolden(physical_size: f32, strength: f32) -> f32 {
     strength * ((28. - physical_size) / 12.).clamp(0., 1.)
 }
 
+/// Covers the whole logical screen, its edges all off it.
+fn full_bleed(rect: Rect) -> bool {
+    rect.x <= 0. && rect.y <= 0. && rect.x + rect.w >= 1920. && rect.y + rect.h >= 1080.
+}
+
 fn snap_rect(rect: Rect, scale: f32) -> Rect {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ENABLED.get_or_init(|| std::env::var("LUMA_SNAP").as_deref() != Ok("0")) {
@@ -1272,7 +1277,12 @@ impl Renderer {
     /// Edges on whole drawable pixels. The TV scales its 1080p graphics plane up 2x, which
     /// turns a half-covered edge pixel into a soft 2-pixel band; whole pixels stay crisp.
     /// LUMA_SNAP=0 keeps logical positions (for comparison).
+    /// A rect running past every screen edge (a full-bleed backdrop) is left as it is: none
+    /// of its edges show, and snapping would only move a slow pan or zoom in pixel steps.
     fn snap(&self, rect: Rect) -> Rect {
+        if full_bleed(rect) {
+            return rect;
+        }
         snap_rect(rect, self.stats.viewport.scale)
     }
 

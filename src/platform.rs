@@ -151,9 +151,36 @@ pub enum Request {
         params: Value,
     },
     SyncSplash(String),
+    /// The console tile: wake the PC and ready it, reporting phases for `generation`.
+    Console {
+        generation: u64,
+        config: crate::console::Config,
+        /// The game to launch (`shop:objectId`); None opens Hydra.
+        game: Option<String>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
+    /// Is the PC's console agent answering? (The tile's status dot.) When it is, its library
+    /// comes too, saved in `cache`.
+    ConsoleProbe {
+        config: crate::console::Config,
+        cache: Option<std::path::PathBuf>,
+    },
+    /// Games' art, from the cache or (when `online`) the PC, one after another.
+    ConsoleArt {
+        config: crate::console::Config,
+        cache: Option<std::path::PathBuf>,
+        items: Vec<(crate::console::Game, crate::console::ArtKind)>,
+        online: bool,
+    },
     Recent {
         generation: u64,
         command: crate::recents::Command,
+    },
+    /// A random photo from the PC (the screensaver and Home's background); `id` names its
+    /// textures.
+    Photo {
+        config: crate::console::Config,
+        id: u64,
     },
 }
 pub enum Response {
@@ -161,6 +188,15 @@ pub enum Response {
     Launched(Result<(), String>),
     /// What LG's speech recognition heard, for that request.
     Voice(u64, Result<String, String>),
+    Console(u64, crate::console::Phase),
+    ConsoleAwake(bool),
+    ConsoleLibrary(crate::console::Library),
+    ConsoleArt {
+        key: String,
+        kind: crate::console::ArtKind,
+        image: Option<crate::app_artwork::Artwork>,
+    },
+    Photo(Option<crate::photos::Photo>),
     Recent {
         generation: u64,
         command: crate::recents::Command,
@@ -284,6 +320,94 @@ impl Platform {
                         )
                         .map(|_| ())
                     }),
+                    Request::Console {
+                        generation,
+                        config,
+                        game,
+                        cancel,
+                    } => {
+                        // Waking takes seconds: its own thread, like voice search.
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            crate::console::run(
+                                &config,
+                                game.as_deref(),
+                                webos,
+                                &cancel,
+                                |phase| {
+                                    let _ = responses.send(Response::Console(generation, phase));
+                                },
+                            );
+                        });
+                        continue;
+                    }
+                    Request::ConsoleProbe { config, cache } => {
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            // The desktop preview shows the PC as awake, with the games cached
+                            // from a TV (copied next to its preferences), else demo ones.
+                            let library = if webos {
+                                crate::console::library(&config, cache.as_deref())
+                            } else {
+                                cache
+                                    .as_deref()
+                                    .and_then(crate::console::load_library)
+                                    .or_else(|| Some(crate::console::demo_library()))
+                            };
+                            let awake =
+                                library.is_some() || (webos && crate::console::probe(&config));
+                            let _ = responses.send(Response::ConsoleAwake(awake));
+                            if let Some(library) = library {
+                                let _ = responses.send(Response::ConsoleLibrary(library));
+                            }
+                        });
+                        continue;
+                    }
+                    Request::ConsoleArt {
+                        config,
+                        cache,
+                        items,
+                        online,
+                    } => {
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            for (game, kind) in items {
+                                // The desktop preview reads only the cache (copied from a TV);
+                                // it never asks a PC.
+                                let image = crate::console::art(
+                                    &config,
+                                    cache.as_deref(),
+                                    &game,
+                                    kind,
+                                    online && webos,
+                                );
+                                let message = Response::ConsoleArt {
+                                    key: game.key,
+                                    kind,
+                                    image,
+                                };
+                                if responses.send(message).is_err() {
+                                    return;
+                                }
+                            }
+                        });
+                        continue;
+                    }
+                    Request::Photo { config, id } => {
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            // The desktop preview reads a local folder instead of a PC.
+                            let bytes = if webos {
+                                crate::console::photo(&config)
+                            } else {
+                                crate::photos::local_photo()
+                            };
+                            let photo =
+                                bytes.and_then(|bytes| crate::photos::Photo::decode(&bytes, id));
+                            let _ = responses.send(Response::Photo(photo));
+                        });
+                        continue;
+                    }
                     Request::Voice(id) => {
                         // Listening takes seconds: its own thread, so launches never wait on it.
                         let responses = responses.clone();

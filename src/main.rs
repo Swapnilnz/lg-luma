@@ -5,6 +5,7 @@ mod app_artwork;
 #[path = "app-subscription.rs"]
 mod app_subscription;
 mod branding;
+mod console;
 mod damage;
 mod diagnostics;
 mod egl_damage;
@@ -19,7 +20,9 @@ mod i18n;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod luna;
 mod model;
+mod photos;
 mod platform;
+mod play;
 mod raster;
 mod recents;
 mod renderer;
@@ -410,9 +413,80 @@ fn effects(
                 });
             }
             Effect::Weather(command) => weather.send(command),
+            Effect::ConsoleStart(generation) => {
+                if let (Some(config), Some(session)) = (&state.preferences.console, &state.console)
+                {
+                    let game = session.game.as_ref().map(|game| game.key.clone());
+                    eprintln!(
+                        "Luma console: waking {} for {}",
+                        config.host,
+                        game.as_deref().unwrap_or("Hydra")
+                    );
+                    platform.send(Request::Console {
+                        generation,
+                        config: config.clone(),
+                        game,
+                        cancel: session.cancel.clone(),
+                    });
+                }
+            }
         }
     }
     true
+}
+
+/// The console: switches to the PC's input once the transition has faded to black; asks every
+/// so often whether the PC is awake (for the status dots), with its library, while Home or
+/// Play shows; and loads the games' art they want.
+fn console_tick(
+    state: &mut State,
+    platform: &Platform,
+    visible: bool,
+    last_probe: &mut Option<Instant>,
+    cache: &std::path::Path,
+) {
+    if let Some(input) = state.console_launch_due() {
+        eprintln!("Luma console: switching to {input}");
+        platform.send(Request::Launch(input));
+    }
+    let Some(config) = state.preferences.console.clone() else {
+        return;
+    };
+    // The photo screensaver keeps asking too, so it notices the PC going to sleep.
+    if visible
+        && state.console.is_none()
+        && (matches!(state.page, state::Page::Home | state::Page::Play)
+            || state
+                .feeds
+                .ambient
+                .as_ref()
+                .is_some_and(|ambient| ambient.photos))
+        && last_probe.is_none_or(|at| at.elapsed() >= console::PROBE_EVERY)
+    {
+        *last_probe = Some(Instant::now());
+        platform.send(Request::ConsoleProbe {
+            config: config.clone(),
+            cache: Some(cache.to_owned()),
+        });
+    }
+    if visible && state.photo_wanted() {
+        let id = state.photos.request();
+        platform.send(Request::Photo {
+            config: config.clone(),
+            id,
+        });
+    }
+    if visible || state.console.is_some() {
+        let items = state.wanted_console_art();
+        if !items.is_empty() {
+            platform.send(Request::ConsoleArt {
+                config,
+                cache: Some(cache.to_owned()),
+                items,
+                online: state.console_awake == Some(true),
+            });
+        }
+    }
 }
 
 fn script(
@@ -947,6 +1021,13 @@ fn run() -> Result<(), String> {
         storage::load(&preferences_path)?
     };
     let mut state = State::new(initial_preferences);
+    // The PC's games as last seen, so the Play page has them while the PC sleeps.
+    let console_cache = preferences_path.with_file_name("console");
+    if state.preferences.console.is_some()
+        && let Some(library) = console::load_library(&console_cache)
+    {
+        state.set_console_library(library);
+    }
     if options.test_extra_apps > 0 {
         eprintln!(
             "Luma scroll preview: explicit {}-app expansion; preferences {}",
@@ -1153,6 +1234,7 @@ fn run() -> Result<(), String> {
     // Navigation sounds, through the same audio output (see `sounds`).
     let mut sounds = sounds::Sounds::new();
     let mut last_tone: Option<Instant> = None;
+    let mut console_probe: Option<Instant> = None;
     // Lifecycle as Home: sam sends "relaunch" (bring the running Luma to the front) instead of
     // killing and restarting it, and "close" when it wants Luma to exit. `end_registration`
     // drops a staged Home's registration (webOS 10/11) if a relaunch did not reach the front.
@@ -1261,7 +1343,7 @@ fn run() -> Result<(), String> {
     let mut focused = true;
     let mut press: Option<Press> = None;
     let mut back_button = BackButton::default();
-    let initial_nav = view::navigation(&assets, state.preferences.language);
+    let initial_nav = view::navigation(&assets, state.preferences.language, state.play_available());
     let mut pill = initial_nav.items[0].x;
     let mut pill_width = initial_nav.items[0].w;
     let mut last_frame = Instant::now();
@@ -1357,6 +1439,26 @@ fn run() -> Result<(), String> {
                         initial_focus = false;
                     }
                 }
+                Response::Console(generation, phase) => {
+                    eprintln!("Luma console: {phase:?}");
+                    state.console_phase(generation, phase);
+                }
+                Response::ConsoleAwake(awake) => {
+                    if state.console_awake != Some(awake) {
+                        if awake {
+                            // Art that was missing while the PC slept can load now.
+                            state.play.retry_art();
+                            state.photos.reset_failures();
+                        }
+                        state.console_awake = Some(awake);
+                        state.dirty = true;
+                    }
+                }
+                Response::ConsoleLibrary(library) => state.set_console_library(library),
+                Response::Photo(photo) => state.photo_received(photo),
+                Response::ConsoleArt { key, kind, image } => {
+                    state.set_console_art(key, kind, image);
+                }
                 Response::Voice(id, result) => {
                     if let Err(error) = &result {
                         eprintln!("Luma voice search: {error}");
@@ -1368,6 +1470,14 @@ fn run() -> Result<(), String> {
                     match result {
                         Err(error) => {
                             eprintln!("{error}");
+                            // A failed input switch leaves the black screen: back to Home.
+                            if state
+                                .console
+                                .as_ref()
+                                .is_some_and(|session| session.launched_at.is_some())
+                            {
+                                state.cancel_console();
+                            }
                             state.notify(state.preferences.language.t("appOpenError"));
                         }
                         Ok(()) => {
@@ -1428,7 +1538,15 @@ fn run() -> Result<(), String> {
         }
         feeds_tick(&mut state, &feeds_service, visible, &scene.controls);
         state.ambient_tick(last_input.elapsed(), visible);
+        state.photos_tick(visible);
         keep_awake_tick(&state, audio.as_ref(), &mut tone_playing, &mut last_tone);
+        console_tick(
+            &mut state,
+            &platform,
+            visible,
+            &mut console_probe,
+            &console_cache,
+        );
         sounds.tick(
             state.sound.take(),
             state.preferences.ui_sounds,
@@ -2031,7 +2149,8 @@ fn run() -> Result<(), String> {
         }
         let dt = last_frame.elapsed().as_secs_f32().min(0.1);
         last_frame = Instant::now();
-        let navigation = view::navigation(&assets, state.preferences.language);
+        let navigation =
+            view::navigation(&assets, state.preferences.language, state.play_available());
         let target = navigation.items[state.page_index()].x;
         let target_width = navigation.items[state.page_index()].w;
         if state.preferences.reduced_motion

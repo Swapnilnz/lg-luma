@@ -23,7 +23,7 @@ fn scene(state: &State) -> view::Scene {
         metrics: BTreeMap::new(),
         artwork: crate::app_artwork::Service::new(false),
     };
-    let navigation = view::navigation(&assets, state.preferences.language);
+    let navigation = view::navigation(&assets, state.preferences.language, state.play_available());
     view::scene_with_pill(
         state,
         &assets,
@@ -1506,4 +1506,636 @@ fn inventory_success_resets_failures_and_later_failures_show_at_once() {
     assert_eq!(state.inventory_failed("timeout".into()), None);
     assert!(!state.loading && state.error.is_some());
     assert!(!state.inventory.apps.is_empty());
+}
+
+fn console_config() -> crate::console::Config {
+    crate::console::Config {
+        input: "com.webos.app.hdmi2".into(),
+        title: "Hydra".into(),
+        host: "192.168.4.112".into(),
+        port: 8765,
+        mac: "A8:A1:59:3B:4C:21".into(),
+        broadcast: "192.168.7.255".into(),
+        token: "secret".into(),
+    }
+}
+
+fn console_ready() -> State {
+    let mut state = State::new(Preferences {
+        console: Some(console_config()),
+        ..Preferences::default()
+    });
+    state.set_inventory(demo_inventory(), None);
+    state
+}
+
+#[test]
+fn console_settings_are_validated() {
+    assert!(console_config().valid());
+    for broken in [
+        crate::console::Config {
+            mac: "A8:A1:59:3B:4C".into(),
+            ..console_config()
+        },
+        crate::console::Config {
+            host: "pc.local".into(),
+            ..console_config()
+        },
+        crate::console::Config {
+            input: "netflix".into(),
+            ..console_config()
+        },
+        crate::console::Config {
+            token: String::new(),
+            ..console_config()
+        },
+    ] {
+        assert!(!broken.valid());
+        let mut preferences = Preferences {
+            console: Some(broken),
+            ..Preferences::default()
+        };
+        preferences.sanitize();
+        assert!(preferences.console.is_none());
+    }
+}
+
+#[test]
+fn console_magic_packet_repeats_the_mac() {
+    let mac = crate::console::parse_mac("a8-a1-59-3b-4c-21").unwrap();
+    let packet = crate::console::magic_packet(mac);
+    assert_eq!(&packet[..6], &[0xff; 6]);
+    assert!(packet[6..].chunks(6).all(|chunk| chunk == mac));
+    assert_eq!(packet.len(), 102);
+}
+
+#[test]
+fn console_tile_starts_the_transition() {
+    let mut state = console_ready();
+    // Not a favourite unless it is added: it is in Apps.
+    assert!(
+        state
+            .apps()
+            .iter()
+            .all(|app| app.id != crate::console::APP_ID)
+    );
+    // Added to the favourites, it works from Home.
+    state.preferences.favorites = Some(vec![crate::console::APP_ID.into(), "netflix".into()]);
+    assert_eq!(state.apps()[0].id, crate::console::APP_ID);
+    state.focus = Target::App(crate::console::APP_ID.into());
+    let effects = state.activate();
+    assert!(matches!(effects[..], [Effect::ConsoleStart(1)]));
+    assert!(state.console.is_some());
+    // Arrows do nothing while it runs; Back cancels and restores the tile's focus.
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.focus, Target::App(crate::console::APP_ID.into()));
+    state.back();
+    assert!(state.console.is_none());
+    assert_eq!(state.focus, Target::App(crate::console::APP_ID.into()));
+}
+
+#[test]
+fn console_ready_waits_for_the_transition_then_switches_once() {
+    use crate::console::{FADE, MIN_SHOW, Phase, READY_HOLD, Session};
+    let start = std::time::Instant::now();
+    let mut session = Session::new(1, Target::Nav(0), Target::Nav(0), None, start);
+    session.update(Phase::Ready, start);
+    assert_eq!(session.ready_at, Some(start + MIN_SHOW));
+    // Ready holds (the burst and chime), then fades, then switches.
+    assert!(!session.launch_due(start + MIN_SHOW + FADE));
+    assert_eq!(session.fade(start + MIN_SHOW + READY_HOLD), 0.);
+    let due = start + MIN_SHOW + READY_HOLD + FADE;
+    assert!(session.launch_due(due));
+    session.launched_at = Some(due);
+    assert!(!session.launch_due(due + FADE));
+}
+
+#[test]
+fn console_times_out_to_switch_anyway() {
+    use crate::console::{Phase, READY_TIMEOUT, Session};
+    let start = std::time::Instant::now();
+    let mut session = Session::new(1, Target::Nav(0), Target::Nav(0), None, start);
+    assert!(session.tick(start + READY_TIMEOUT));
+    assert_eq!(session.phase, Phase::Failed);
+    // A late answer no longer changes it; Switch anyway does.
+    session.update(Phase::Ready, start + READY_TIMEOUT);
+    assert_eq!(session.phase, Phase::Failed);
+    session.force(start + READY_TIMEOUT);
+    assert!(session.ready_at.is_some());
+}
+
+#[test]
+fn console_tile_without_settings_is_absent() {
+    let state = ready();
+    assert!(
+        !state
+            .apps()
+            .iter()
+            .any(|app| app.id == crate::console::APP_ID)
+    );
+}
+
+// ---- The Play page ----
+
+fn play_ready() -> State {
+    let mut state = console_ready();
+    state.set_console_library(crate::console::demo_library());
+    state
+}
+
+fn game_json(key: &str) -> serde_json::Value {
+    json!({
+        "key": key,
+        "title": format!("Game {key}"),
+        "playTimeMs": 3_600_000,
+        "lastPlayed": "2026-11-01T10:00:00.000Z",
+        "achievements": {"unlocked": 3, "total": 10},
+        "art": ["cover", "hero", "shot0", "shot9", "poster"],
+    })
+}
+
+#[test]
+fn console_library_is_bounded_and_cleaned() {
+    let mut games: Vec<_> = (0..20).map(|n| game_json(&format!("steam:{n}"))).collect();
+    games.insert(0, game_json("bad key/../x"));
+    games.insert(1, game_json("steam:1"));
+    games[1]["title"] = json!("Line\nbreak\u{7}  and   spaces");
+    games[1]["playTimeMs"] = json!(-5);
+    games[1]["lastPlayed"] = json!("yesterday");
+    games[1]["achievements"] = json!({"unlocked": 50, "total": 10});
+    games[1]["description"] = json!("x".repeat(2000));
+    let library = crate::console::Library::parse(
+        serde_json::to_vec(&json!({"awake": true, "games": games}))
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(library.games.len(), crate::console::GAMES);
+    assert!(
+        library
+            .games
+            .iter()
+            .all(|game| crate::console::valid_key(&game.key))
+    );
+    let keys: std::collections::HashSet<_> = library.games.iter().map(|g| &g.key).collect();
+    assert_eq!(keys.len(), library.games.len());
+    let first = &library.games[0];
+    assert_eq!(first.key, "steam:1");
+    assert_eq!(first.title, "Line break and spaces");
+    assert_eq!(first.play_time_ms, 0.);
+    assert_eq!(first.last_played, None);
+    assert_eq!(first.achievements.unlocked, 10);
+    assert!(first.description.chars().count() <= 600);
+    assert_eq!(first.art, vec!["cover", "hero", "shot0"]);
+    assert!(first.has(crate::console::ArtKind::Shot(0)));
+    assert!(!first.has(crate::console::ArtKind::Logo));
+    assert!(crate::console::Library::parse(b"not json").is_none());
+}
+
+#[test]
+fn console_start_path_names_the_game_only_when_safe() {
+    use crate::console::start_path;
+    assert_eq!(start_path(Some("steam:1313140")), "/play?key=steam:1313140");
+    assert_eq!(start_path(None), "/console");
+    assert_eq!(start_path(Some("steam:1&kind=x")), "/console");
+}
+
+#[test]
+fn play_tab_exists_only_with_a_console() {
+    let mut state = ready();
+    assert_eq!(state.nav_order(), &crate::state::NAV_ORDER);
+    state.open(crate::play::PLAY_PAGE);
+    assert_eq!(state.page, Page::Home);
+    let mut state = play_ready();
+    assert!(state.nav_order().contains(&crate::play::PLAY_PAGE));
+    state.open(crate::play::PLAY_PAGE);
+    assert_eq!(state.page, Page::Play);
+    // Explore's tab is next to Play's.
+    state.focus = Target::Nav(crate::state::EXPLORE_PAGE);
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.page, Page::Play);
+}
+
+#[test]
+fn play_rail_buttons_and_tab_navigate() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayGame(0));
+    for _ in 0..10 {
+        state.direction(Direction::Right, &[]);
+    }
+    let last = state.play.games().len() - 1;
+    assert_eq!(state.focus, Target::PlayGame(last));
+    assert_eq!(state.play.index, last);
+    state.direction(Direction::Up, &[]);
+    assert_eq!(
+        state.focus,
+        Target::PlayAction(crate::play::PlayButton::Play)
+    );
+    for _ in 0..4 {
+        state.direction(Direction::Right, &[]);
+    }
+    assert_eq!(
+        state.focus,
+        Target::PlayAction(crate::play::PlayButton::Hydra)
+    );
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayGame(last));
+    state.back();
+    assert_eq!(state.focus, Target::Nav(crate::play::PLAY_PAGE));
+    state.back();
+    assert_eq!(state.page, Page::Home);
+}
+
+#[test]
+fn play_backdrop_waits_for_focus_to_rest() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.focus = Target::PlayGame(0);
+    state.play_tick();
+    let first = state.play.games()[0].key.clone();
+    assert_eq!(
+        state.play.preview.as_ref().map(|p| p.key.clone()),
+        Some(first.clone())
+    );
+    state.direction(Direction::Right, &[]);
+    state.play_tick();
+    // Just moved: the backdrop stays.
+    assert_eq!(
+        state.play.preview.as_ref().map(|p| p.key.clone()),
+        Some(first)
+    );
+    state.play.focused_at =
+        Some(std::time::Instant::now() - crate::play::DWELL - std::time::Duration::from_millis(5));
+    state.play_tick();
+    assert_eq!(
+        state.play.preview.as_ref().map(|p| p.key.clone()),
+        Some(state.play.games()[1].key.clone())
+    );
+}
+
+#[test]
+fn play_details_open_and_close() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.focus = Target::PlayGame(2);
+    state.play_tick();
+    state.focus = Target::PlayAction(crate::play::PlayButton::Details);
+    assert!(state.activate().is_empty());
+    assert_eq!(state.focus, Target::PlayDetailStart);
+    assert_eq!(
+        state.play.sheet.as_ref().map(|sheet| sheet.key.clone()),
+        Some(state.play.games()[2].key.clone())
+    );
+    state.back();
+    assert!(state.play.sheet.is_none());
+    assert_eq!(state.focus, Target::PlayGame(2));
+}
+
+#[test]
+fn play_art_keeps_covers_and_only_the_previewed_games_extras() {
+    use crate::console::ArtKind;
+    let mut state = play_ready();
+    let keys: Vec<_> = state.play.games().iter().map(|g| g.key.clone()).collect();
+    let image = || crate::app_artwork::Artwork {
+        key: "test".into(),
+        pixels: image::RgbaImage::new(1, 1),
+        color: [0, 0, 0],
+    };
+    for key in &keys[..3] {
+        for kind in [ArtKind::Cover, ArtKind::Shot(0), ArtKind::Hero] {
+            state.set_console_art(key.clone(), kind, Some(image()));
+        }
+    }
+    state.play.preview = Some(crate::play::Preview {
+        key: keys[2].clone(),
+        since: std::time::Instant::now(),
+    });
+    state.play.evict(None);
+    // Covers stay; the first game's (the band's) and the previewed game's extras stay.
+    for key in &keys[..3] {
+        assert!(state.play.image(key, ArtKind::Cover).is_some());
+    }
+    assert!(state.play.image(&keys[0], ArtKind::Hero).is_some());
+    assert!(state.play.image(&keys[1], ArtKind::Shot(0)).is_none());
+    assert!(state.play.image(&keys[2], ArtKind::Shot(0)).is_some());
+    // Art for a game that is not in the library is not kept.
+    state.set_console_art("steam:999".into(), ArtKind::Cover, Some(image()));
+    assert!(state.play.image("steam:999", ArtKind::Cover).is_none());
+}
+
+#[test]
+fn play_stats_read_naturally() {
+    use crate::i18n::Language;
+    use crate::play::{achievement_share, hours, played_ago, size, year};
+    let en = Language::En;
+    assert_eq!(hours(30. * 60_000., en), "30 min");
+    assert_eq!(hours(41.3 * 3_600_000., en), "41.3 h");
+    assert_eq!(hours(250. * 3_600_000., en), "250 h");
+    assert_eq!(hours(0., en), "Not played yet");
+    assert_eq!(size(Some(48.2e9)).as_deref(), Some("48.2 GB"));
+    assert_eq!(size(Some(820e6)).as_deref(), Some("820 MB"));
+    assert_eq!(year("24 Feb, 2022"), Some("2022"));
+    let now = time::OffsetDateTime::parse(
+        "2026-11-16T12:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(
+        played_ago(Some("2026-11-14T12:00:00Z"), now, en).as_deref(),
+        Some("Played 2 days ago")
+    );
+    assert_eq!(
+        played_ago(Some("2026-11-16T08:00:00Z"), now, en).as_deref(),
+        Some("Played today")
+    );
+    let game = crate::console::Game {
+        achievements: crate::console::Achievements {
+            unlocked: 37,
+            total: 42,
+        },
+        ..Default::default()
+    };
+    assert!((achievement_share(&game).unwrap() - 37. / 42.).abs() < 1e-6);
+}
+
+#[test]
+fn hiding_a_game_from_its_details_and_bringing_it_back() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    let count = state.play.games().len();
+    let key = state.play.games()[1].key.clone();
+    state.focus = Target::PlayGame(1);
+    // Holding OK on a cover opens its details; holding again there hides it.
+    assert_eq!(state.card_hold(), Some(vec![]));
+    assert_eq!(state.focus, Target::PlayDetailStart);
+    assert!(matches!(state.card_hold().as_deref(), Some([Effect::Save])));
+    assert!(state.play.sheet.is_none());
+    assert_eq!(state.preferences.hidden_games, vec![key.clone()]);
+    assert_eq!(state.play.games().len(), count - 1);
+    assert!(state.play.games().iter().all(|game| game.key != key));
+    assert_eq!(state.focus, Target::PlayGame(1));
+    // A new library from the PC keeps it hidden.
+    state.set_console_library(crate::console::Library::default());
+    state.set_console_library(crate::console::demo_library());
+    assert_eq!(state.play.games().len(), count - 1);
+    // The rail ends with the Hidden games tile; it shows them, marked.
+    state.focus = Target::PlayGame(count - 2);
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.focus, Target::PlayHidden);
+    assert!(
+        controls(&state)
+            .iter()
+            .any(|c| c.target == Target::PlayHidden)
+    );
+    state.activate();
+    assert!(state.play.show_hidden);
+    assert_eq!(state.play.games().len(), count);
+    assert_eq!(state.focus, Target::PlayGame(1));
+    // Its details offer Unhide; the Hide button sits under Play.
+    state.focus = Target::PlayAction(crate::play::PlayButton::Details);
+    state.activate();
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayHide);
+    assert!(matches!(state.activate()[..], [Effect::Save]));
+    assert!(state.preferences.hidden_games.is_empty());
+    assert!(!state.play.show_hidden);
+    assert_eq!(state.play.games().len(), count);
+    assert!(
+        !controls(&state)
+            .iter()
+            .any(|c| c.target == Target::PlayHidden)
+    );
+}
+
+#[test]
+fn picking_a_game_launches_it_from_its_card() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.focus = Target::PlayGame(1);
+    let effects = state.activate();
+    assert!(matches!(effects[..], [Effect::ConsoleStart(_)]));
+    let session = state.console.as_ref().unwrap();
+    assert_eq!(session.source, Target::PlayGame(1));
+    assert_eq!(
+        session.game.as_ref().map(|g| g.key.clone()),
+        Some(state.play.games()[1].key.clone())
+    );
+    assert_eq!(state.sound, Some(crate::state::Sound::Launch));
+    // Open Hydra launches no game; the Play button grows from its cover.
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.focus = Target::PlayAction(crate::play::PlayButton::Hydra);
+    state.activate();
+    assert!(state.console.as_ref().unwrap().game.is_none());
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.play.index = 3;
+    state.focus = Target::PlayAction(crate::play::PlayButton::Play);
+    state.activate();
+    assert_eq!(state.console.as_ref().unwrap().source, Target::PlayGame(3));
+}
+
+#[test]
+fn launch_cues_play_once_each() {
+    use crate::console::{MIN_SHOW, PULSE, Phase, READY_HOLD, Session};
+    use crate::state::Sound;
+    let start = std::time::Instant::now();
+    let mut session = Session::new(1, Target::Nav(0), Target::Nav(0), None, start);
+    assert_eq!(session.cue(start), None);
+    assert_eq!(session.cue(start + PULSE / 2), Some(Sound::Waiting));
+    assert_eq!(session.cue(start + PULSE / 2), None);
+    session.update(Phase::Ready, start + PULSE);
+    let ready = start + PULSE.max(MIN_SHOW);
+    assert_eq!(session.cue(ready), Some(Sound::Ready));
+    // The chime carries the whoosh: nothing more.
+    assert_eq!(session.cue(ready + READY_HOLD), None);
+    let mut forced = Session::new(1, Target::Nav(0), Target::Nav(0), None, start);
+    forced.force(start + PULSE);
+    assert_eq!(forced.cue(start + PULSE), Some(Sound::Whoosh));
+    assert_eq!(forced.cue(start + PULSE), None);
+}
+
+#[test]
+fn reduced_motion_launch_has_no_burst_ring() {
+    // The burst ring: a wide border round the orbit's centre, a moment after Ready.
+    let rings = |reduced: bool| {
+        let mut state = play_ready();
+        state.preferences.reduced_motion = reduced;
+        state.open(crate::play::PLAY_PAGE);
+        state.focus = Target::PlayGame(0);
+        state.activate();
+        let session = state.console.as_mut().unwrap();
+        session.update(crate::console::Phase::Ready, std::time::Instant::now());
+        session.ready_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(300));
+        scene(&state)
+            .draw
+            .iter()
+            .filter(|draw| {
+                matches!(draw, crate::renderer::Draw::Shape(rect, _, border, _)
+                    if *border > 0.
+                        && rect.w > 300.
+                        && (rect.center().0 - 960.).abs() < 2.
+                        && (rect.center().1 - 600.).abs() < 2.)
+            })
+            .count()
+    };
+    assert!(rings(false) > 0);
+    assert_eq!(rings(true), 0);
+}
+
+#[test]
+fn play_backdrop_keeps_moving_without_input() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    state.tick();
+    state.dirty = false;
+    // No key: the next frame is still drawn, as the screenshots drift.
+    state.tick();
+    assert!(state.dirty);
+    assert!(state.animating());
+    // With Reduce motion it is drawn only when the screenshot changes.
+    state.preferences.reduced_motion = true;
+    state.tick();
+    state.dirty = false;
+    state.tick();
+    assert!(!state.dirty);
+}
+
+// ---- Photos from the PC ----
+
+fn photo(width: u32, height: u32, id: u64) -> crate::photos::Photo {
+    let image = image::RgbImage::from_pixel(width, height, image::Rgb([90, 120, 150]));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    crate::photos::Photo::decode(&bytes, id).unwrap()
+}
+
+fn photos_ready() -> State {
+    let mut state = console_ready();
+    state.console_awake = Some(true);
+    state
+}
+
+#[test]
+fn a_portrait_photo_stands_over_a_blurred_copy() {
+    let portrait = photo(300, 600, 1);
+    assert_eq!(portrait.image.key, "photo:1");
+    let fill = portrait.fill.as_ref().unwrap();
+    assert_eq!(fill.key, "backdrop:photo-fill:1");
+    assert_eq!(fill.pixels.dimensions(), crate::photos::FILL);
+    let landscape = photo(600, 300, 2);
+    assert_eq!(landscape.image.key, "backdrop:photo:2");
+    assert!(landscape.fill.is_none());
+}
+
+#[test]
+fn photos_are_asked_for_only_while_the_pc_answers_and_they_are_on() {
+    let mut state = console_ready();
+    assert!(!state.photo_wanted());
+    state.console_awake = Some(false);
+    assert!(!state.photo_wanted());
+    state.console_awake = Some(true);
+    assert!(state.photo_wanted());
+    state.photos.request();
+    assert!(!state.photo_wanted());
+    state.photo_received(Some(photo(64, 36, 1)));
+    // One is ready: no more until it is shown.
+    assert!(!state.photo_wanted());
+    let mut off = photos_ready();
+    off.preferences.photo_screensaver = false;
+    off.preferences.photo_background = false;
+    assert!(!off.photo_wanted());
+    // Without the console set up, never.
+    let mut plain = State::new(Preferences::default());
+    plain.console_awake = Some(true);
+    assert!(!plain.photo_wanted());
+}
+
+#[test]
+fn the_screensaver_shows_photos_when_the_pc_has_them() {
+    use std::time::Duration;
+    let idle = Duration::from_secs(60 * 60);
+    // No feeds and no photo: no screensaver.
+    let mut state = photos_ready();
+    state.ambient_tick(idle, true);
+    assert!(state.feeds.ambient.is_none());
+    state.photos.request();
+    state.photo_received(Some(photo(64, 36, 1)));
+    state.ambient_tick(idle, true);
+    let ambient = state.feeds.ambient.as_ref().unwrap();
+    assert!(ambient.photos);
+    assert!(state.photos.current.is_some());
+    // OK only ends it: a photo has no title page.
+    state.ambient_input(true);
+    assert!(state.feeds.ambient.is_none());
+    assert!(state.feeds.title.is_none());
+    // Turned off, the photo is not used.
+    let mut off = photos_ready();
+    off.preferences.photo_screensaver = false;
+    off.photos.request();
+    off.photo_received(Some(photo(64, 36, 1)));
+    off.ambient_tick(idle, true);
+    assert!(off.feeds.ambient.is_none());
+}
+
+#[test]
+fn photos_stop_when_the_pc_stops_answering() {
+    let mut state = photos_ready();
+    state.photos.request();
+    state.photo_received(Some(photo(64, 36, 1)));
+    state.photos_tick(true);
+    assert!(state.home_photo());
+    for _ in 0..2 {
+        state.photos.request();
+        state.photo_received(None);
+    }
+    assert!(!state.photos_live());
+    assert!(!state.home_photo());
+    assert!(!state.photo_wanted());
+    // The PC answering a probe again tries at once.
+    state.photos.reset_failures();
+    assert!(state.home_photo());
+}
+
+#[test]
+fn home_photos_change_slowly_and_hold_at_most_three() {
+    use crate::photos::{FADE, HOME_SLIDE, Photos};
+    use std::time::Instant;
+    let mut photos = Photos::default();
+    let start = Instant::now();
+    photos.received(Some(photo(64, 36, 1)));
+    // The first shows at once, over the wallpaper.
+    assert!(photos.tick(HOME_SLIDE, start));
+    assert!(photos.previous.is_none());
+    photos.received(Some(photo(64, 36, 2)));
+    assert!(!photos.tick(HOME_SLIDE, start + HOME_SLIDE / 2));
+    assert!(photos.tick(HOME_SLIDE, start + HOME_SLIDE));
+    assert_eq!(
+        photos.current.as_ref().unwrap().0.image.key,
+        "backdrop:photo:2"
+    );
+    assert!(photos.previous.is_some() && photos.next.is_none());
+    // The one before is let go once the new one has faded in.
+    assert!(photos.tick(HOME_SLIDE, start + HOME_SLIDE + FADE));
+    assert!(photos.previous.is_none());
+}
+
+#[test]
+fn photo_settings_toggle() {
+    use crate::state::{PHOTO_BACKGROUND_SETTING, PHOTO_SCREENSAVER_SETTING};
+    let mut state = photos_ready();
+    state.open(2);
+    state.focus = Target::Setting(PHOTO_SCREENSAVER_SETTING);
+    state.activate();
+    assert!(!state.preferences.photo_screensaver);
+    state.focus = Target::Setting(PHOTO_BACKGROUND_SETTING);
+    state.activate();
+    assert!(!state.preferences.photo_background);
 }

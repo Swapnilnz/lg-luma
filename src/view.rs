@@ -24,11 +24,13 @@ const RECENTS_BACKDROP_OPACITY: f32 = 0.86;
 
 #[path = "explore-view.rs"]
 mod explore_view;
+#[path = "play-view.rs"]
+mod play_view;
 #[path = "recents-view.rs"]
 mod recents_view;
 
 /// The tabs' labels, by page index (Home, Apps, Settings, Explore).
-const NAV_KEYS: [&str; 4] = ["home", "apps", "settings", "explore"];
+const NAV_KEYS: [&str; 5] = ["home", "apps", "settings", "explore", "play"];
 
 pub struct Assets {
     pub root: PathBuf,
@@ -306,18 +308,26 @@ fn text(size: f32, weight: u16, tracking: f32) -> TextStyle {
 
 pub struct Navigation {
     pub surface: Rect,
-    /// Each tab's rectangle, by page index; laid out in NAV_ORDER.
-    pub items: [Rect; 4],
+    /// Each tab's rectangle, by page index; laid out in the state's nav order (Play only
+    /// with a console set up).
+    pub items: [Rect; 5],
 }
-pub fn navigation(assets: &Assets, language: Language) -> Navigation {
+pub fn navigation(assets: &Assets, language: Language, play: bool) -> Navigation {
     let widths = NAV_KEYS
         .map(|key| (assets.width(language.t(key), text(20.8, 550, -0.02)) + 46.4).max(99.2));
-    let width = widths.iter().sum::<f32>() + 12.8 * 3. + 19.6;
+    let order: &[usize] = if play {
+        &[0, crate::state::EXPLORE_PAGE, crate::play::PLAY_PAGE, 1, 2]
+    } else {
+        &NAV_ORDER
+    };
+    let width = order.iter().map(|page| widths[*page]).sum::<f32>()
+        + 12.8 * (order.len() - 1) as f32
+        + 19.6;
     let mut x = (1920. - width) / 2. + 9.8;
-    let mut items = [Rect::default(); 4];
-    for page in NAV_ORDER {
-        items[page] = Rect::new(x, 52.3, widths[page], 49.);
-        x += widths[page] + 12.8;
+    let mut items = [Rect::default(); 5];
+    for page in order {
+        items[*page] = Rect::new(x, 52.3, widths[*page], 49.);
+        x += widths[*page] + 12.8;
     }
     Navigation {
         surface: Rect::new((1920. - width) / 2., 42.5, width, 68.6),
@@ -340,11 +350,15 @@ pub fn scene_with_pill(
     let mut out = Scene::new();
     let style = home_style(state);
     let themed_home = state.page == Page::Home && !recents_replaces_page(state);
+    let home_photo = themed_home && state.home_photo();
     let background = style
         .filter(|_| themed_home)
         .map(|style| style.background())
         .unwrap_or_default();
-    if !background.is_empty() {
+    let photo_fade = state.photos.fade(std::time::Instant::now());
+    if home_photo && (state.photos.previous.is_some() || photo_fade >= 1.) {
+        // The photo covers the wallpaper: only the photos are drawn.
+    } else if !background.is_empty() {
         out.draw.extend(background);
     } else if let Some((previous, start)) = &state.previous_background {
         out.image(
@@ -369,12 +383,18 @@ pub fn scene_with_pill(
             false,
         );
     }
+    if home_photo {
+        home_photos(&mut out, state, photo_fade);
+    }
     let home_start = out.draw.len();
     if state.page == Page::Home && !recents_replaces_page(state) {
         preview_backdrop(&mut out, state);
     }
     if state.page == Page::Explore && !recents_replaces_page(state) {
         explore_view::backdrop(&mut out, state);
+    }
+    if state.page == Page::Play && !recents_replaces_page(state) {
+        play_view::backdrop(&mut out, state, std::time::Instant::now());
     }
     let content_start = out.draw.len();
     if recents_replaces_page(state) {
@@ -410,6 +430,7 @@ pub fn scene_with_pill(
         Page::Apps => library(&mut out, state, assets),
         Page::Settings => settings(&mut out, state, assets),
         Page::Explore => explore_view::render(&mut out, state, assets),
+        Page::Play => play_view::page(&mut out, state, assets),
     }
     if let Some(error) = &state.error
         && !state.inventory.apps.is_empty()
@@ -545,6 +566,25 @@ pub fn scene_with_pill(
             out.modal = parent_modal;
         }
     }
+    if let Some(session) = &state.console {
+        // Grow from wherever the picked card was drawn (a cover, the tile), else
+        // from the centre.
+        let from = out
+            .controls
+            .iter()
+            .find(|control| control.target == session.source)
+            .map_or(Rect::new(832., 463., 256., FACE_HEIGHT), |control| {
+                if matches!(control.target, Target::App(_)) {
+                    Rect::new(control.rect.x, control.rect.y, control.rect.w, FACE_HEIGHT)
+                } else {
+                    control.rect
+                }
+            });
+        out.controls.clear();
+        out.modal = None;
+        play_view::launch(&mut out, state, assets, session, from);
+        return out;
+    }
     // The screensaver covers everything and takes no pointer targets: any input ends it.
     if state.feeds.ambient.is_some() {
         out.controls.clear();
@@ -594,7 +634,7 @@ fn header(
         WHITE,
         false,
     );
-    let layout = navigation(assets, language);
+    let layout = navigation(assets, language, state.play_available());
     let nav = layout.surface;
     out.shadow(nav, 48., 18., 4., 0.06);
     out.shape(nav, 48., c(0x171c20, 0.72));
@@ -612,6 +652,9 @@ fn header(
         out.border(pill.inset(-5.), 37., 2., c(0xf0f0f0, 0.95));
     }
     for (index, key) in NAV_KEYS.into_iter().enumerate() {
+        if index == crate::play::PLAY_PAGE && !state.play_available() {
+            continue;
+        }
         let rect = layout.items[index];
         out.text(
             language.t(key),
@@ -683,7 +726,11 @@ fn tile(
         if focused { 14. } else { 9. },
         if focused { 0.4 } else { 0.165 },
     );
-    app_face(out, assets, app, rect, state.preferences.language, 19.2);
+    if app.id == crate::console::APP_ID {
+        console_face(out, state, assets, app, rect, 19.2);
+    } else {
+        app_face(out, assets, app, rect, state.preferences.language, 19.2);
+    }
     if pinned {
         out.icon(
             assets,
@@ -3417,11 +3464,21 @@ fn feed_menu(out: &mut Scene, state: &State, assets: &Assets) {
 /// The screensaver: titles' backdrops drifting slowly, with their logos, the clock and the
 /// weather. The clock moves a little each minute so nothing stays put on an OLED panel.
 fn ambient(out: &mut Scene, state: &State, now: OffsetDateTime) {
-    use crate::feeds::{AMBIENT_FADE, AMBIENT_SLIDE};
     let Some(screensaver) = &state.feeds.ambient else {
         return;
     };
     out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x000000, 1.));
+    if screensaver.photos {
+        ambient_photos(out, state);
+    } else {
+        ambient_titles(out, state, screensaver);
+    }
+    ambient_clock(out, state, now);
+}
+
+/// The screensaver's titles: their backdrops drifting, with logos and captions.
+fn ambient_titles(out: &mut Scene, state: &State, screensaver: &crate::feeds::Ambient) {
+    use crate::feeds::{AMBIENT_FADE, AMBIENT_SLIDE};
     let reduced_motion = state.preferences.reduced_motion;
     let slides = &screensaver.slides;
     let fade = slides.fade(AMBIENT_FADE, reduced_motion);
@@ -3440,6 +3497,122 @@ fn ambient(out: &mut Scene, state: &State, now: OffsetDateTime) {
         elapsed / total,
         fade,
     );
+}
+
+/// The screensaver's photos from the PC: each drifting slowly towards a corner, fading in
+/// over the one before. The clock is drawn over them.
+fn ambient_photos(out: &mut Scene, state: &State) {
+    use crate::feeds::{AMBIENT_FADE, AMBIENT_SLIDE};
+    let photos = &state.photos;
+    let Some((photo, since)) = &photos.current else {
+        return;
+    };
+    let reduced_motion = state.preferences.reduced_motion;
+    let now = std::time::Instant::now();
+    let total = (AMBIENT_SLIDE + AMBIENT_FADE * 2).as_secs_f32();
+    let elapsed = now.duration_since(*since).as_secs_f32();
+    let fade = if reduced_motion { 1. } else { photos.fade(now) };
+    let id = photo_index(photo);
+    if let Some(previous) = photos.previous.as_ref().filter(|_| fade < 1.) {
+        let t = (AMBIENT_SLIDE.as_secs_f32() + elapsed) / total;
+        photo_slide(out, previous, photo_index(previous), drift(state, t), 1.);
+    }
+    photo_slide(out, photo, id, drift(state, elapsed / total), fade);
+    // Lighter scrims than the titles': only the clock needs them.
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(0., 0., 1920., 300.),
+        0.,
+        c(0x000000, 0.42),
+        c(0x000000, 0.),
+    ));
+}
+
+/// The drift (0 to 1) of a screensaver slide, none with reduced motion.
+fn drift(state: &State, t: f32) -> f32 {
+    if state.preferences.reduced_motion {
+        0.
+    } else {
+        t.clamp(0., 1.)
+    }
+}
+
+/// A photo's number, for the corner it drifts to.
+fn photo_index(photo: &crate::photos::Photo) -> usize {
+    photo
+        .image
+        .key
+        .rsplit(':')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(0)
+}
+
+/// One photo full screen at drift `t`: a landscape one fills the screen; a portrait one
+/// stands whole over a blurred copy of itself.
+fn photo_slide(out: &mut Scene, photo: &crate::photos::Photo, index: usize, t: f32, alpha: f32) {
+    let start = out.draw.len();
+    let zoom = 1.04 + 0.08 * t;
+    let (px, py) = [(-1., -1.), (1., -1.), (-1., 1.), (1., 1.)][index % 4];
+    if let Some(fill) = &photo.fill {
+        out.draw.push(Draw::AppImage(
+            fill.clone(),
+            Rect::new(0., 0., 1920., 1080.),
+            [1., 1., 1., 1.],
+        ));
+        let (w, h) = (
+            photo.image.pixels.width() as f32,
+            photo.image.pixels.height() as f32,
+        );
+        let height = 1080. * (1. + 0.04 * t);
+        let width = height * w / h.max(1.);
+        let rect = Rect::new(
+            960. - width / 2. + px * 20. * t,
+            540. - height / 2.,
+            width,
+            height,
+        );
+        out.draw
+            .push(Draw::Shadow(rect, 0., 60., c(0x000000, 0.55)));
+        out.draw
+            .push(Draw::AppImage(photo.image.clone(), rect, [1., 1., 1., 1.]));
+    } else {
+        let (w, h) = (1920. * zoom, 1080. * zoom);
+        out.draw.push(Draw::AppImage(
+            photo.image.clone(),
+            Rect::new(
+                960. - w / 2. + px * 48. * t,
+                540. - h / 2. + py * 27. * t,
+                w,
+                h,
+            ),
+            [1., 1., 1., 1.],
+        ));
+    }
+    out.fade_range(start, out.draw.len(), alpha, 1.);
+}
+
+/// Home's background photo, still, fading in over the one before (or the wallpaper), under
+/// a wash that keeps the rows readable.
+fn home_photos(out: &mut Scene, state: &State, fade: f32) {
+    let photos = &state.photos;
+    let Some((photo, _)) = &photos.current else {
+        return;
+    };
+    let fade = if state.preferences.reduced_motion {
+        1.
+    } else {
+        fade
+    };
+    if let Some(previous) = photos.previous.as_ref().filter(|_| fade < 1.) {
+        photo_slide(out, previous, 0, 0., 1.);
+    }
+    photo_slide(out, photo, 0, 0., fade);
+    out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x000000, 0.30));
+}
+
+/// The screensaver's clock, date and weather. They move a little each minute so nothing stays
+/// put on an OLED panel.
+fn ambient_clock(out: &mut Scene, state: &State, now: OffsetDateTime) {
     let language = state.preferences.language;
     let shifts = [(0., 0.), (-26., 14.), (18., -10.), (-12., 24.), (24., 8.)];
     let (dx, dy) = shifts[usize::from(now.minute()) % shifts.len()];
@@ -4986,11 +5159,35 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         Some(volume_label(state.preferences.ui_volume)),
         false,
     );
+    // Photos from the PC, with the console set up.
+    let on_off = |on: bool| Some(language.t(if on { "stateOn" } else { "stateOff" }));
+    let photos: Vec<(usize, &str, &str, Option<&str>, bool)> =
+        if state.preferences.console.is_some() {
+            vec![
+                (
+                    crate::state::PHOTO_SCREENSAVER_SETTING,
+                    "Photos in screensaver",
+                    "clock",
+                    on_off(state.preferences.photo_screensaver),
+                    false,
+                ),
+                (
+                    crate::state::PHOTO_BACKGROUND_SETTING,
+                    "Photo background on Home",
+                    "sparkles",
+                    on_off(state.preferences.photo_background),
+                    false,
+                ),
+            ]
+        } else {
+            vec![]
+        };
     // The soundbar keep-awake and the sounds work without feeds, so their rows always show.
     if state.feeds.rows.is_empty() {
         return std::iter::once(keep_awake)
             .chain(std::iter::once(sounds))
             .chain(state.preferences.ui_sounds.then_some(volume))
+            .chain(photos)
             .collect();
     }
     vec![
@@ -5116,6 +5313,7 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
         }),
         false,
     )))
+    .chain(photos)
     .chain(state.feeds.can_search.then(|| {
         (
             10,
@@ -5371,7 +5569,7 @@ fn keycap(out: &mut Scene, label: &str, x: f32, y: f32, w: f32, small: bool) {
 fn footer(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let style = text(14.4, 400, 0.005);
-    if matches!(state.page, Page::Home | Page::Explore) && state.moving.is_none() {
+    if matches!(state.page, Page::Home | Page::Explore | Page::Play) && state.moving.is_none() {
         return;
     }
     let color = c(0xeeeeee, 0.37);
@@ -5758,5 +5956,86 @@ fn full_screen_fill(draw: &Draw) -> bool {
         Draw::Shape(rect, radius, border, _) => whole(rect) && *radius <= 0. && *border <= 0.,
         Draw::RoundedGradient(rect, radius, ..) => whole(rect) && *radius <= 0.,
         _ => false,
+    }
+}
+
+/// The console card's colours: deep violet to night blue.
+const CONSOLE_TOP: u32 = play_view::TOP;
+const CONSOLE_BOTTOM: u32 = play_view::BOTTOM;
+
+/// The console tile: a gradient card with the controller mark, its title and a dot for
+/// whether the PC is awake.
+fn console_face(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    app: &App,
+    rect: Rect,
+    radius: f32,
+) {
+    out.draw.push(Draw::RoundedGradient(
+        rect,
+        radius,
+        c(CONSOLE_TOP, 1.),
+        c(CONSOLE_BOTTOM, 1.),
+    ));
+    // A soft highlight across the top, like light on glass.
+    out.draw.push(Draw::RoundedGradient(
+        Rect::new(rect.x, rect.y, rect.w, rect.h * 0.55),
+        radius,
+        c(0xffffff, 0.16),
+        c(0xffffff, 0.),
+    ));
+    out.border(rect, radius, 1., c(0xffffff, 0.12));
+    let scale = rect.h / FACE_HEIGHT;
+    let font = text(26. * scale, 650, -0.035).leading(1.1);
+    let icon = 44. * scale;
+    let gap = 14. * scale;
+    let label = app.title.as_str();
+    let label_w = assets
+        .width(label, font)
+        .min(rect.w - icon - gap - 40. * scale);
+    let total = icon + gap + label_w;
+    let (cx, cy) = rect.center();
+    let x = cx - total / 2.;
+    out.icon(
+        assets,
+        "gaming",
+        Rect::new(x, cy - icon / 2., icon, icon),
+        WHITE,
+    );
+    out.text(
+        label,
+        Rect::new(
+            x + icon + gap,
+            cy - font.size * font.line_height / 2.,
+            label_w + 4.,
+            font.size * font.line_height,
+        ),
+        font,
+        WHITE,
+        false,
+    );
+    if let Some(awake) = state.console_awake {
+        let dot = 11. * scale;
+        let at = Rect::new(
+            rect.x + rect.w - dot - 14. * scale,
+            rect.y + 14. * scale,
+            dot,
+            dot,
+        );
+        if awake {
+            out.draw
+                .push(Draw::Shadow(at.inset(-3.), dot, 8., c(0x3ddc84, 0.55)));
+        }
+        out.shape(
+            at,
+            dot / 2.,
+            if awake {
+                c(0x3ddc84, 1.)
+            } else {
+                c(0xc8cbd6, 0.55)
+            },
+        );
     }
 }
