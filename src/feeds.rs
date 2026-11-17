@@ -9,8 +9,13 @@ use crate::state::{
 };
 use serde::{Deserialize, Serialize};
 
+#[path = "browse.rs"]
+pub mod browse;
 #[path = "explore.rs"]
 pub mod explore;
+#[path = "platforms.rs"]
+pub mod platforms;
+pub use browse::{PersonPage, PlatformPage};
 pub use explore::{Category, Explore};
 
 use std::{
@@ -23,6 +28,8 @@ use std::{
 pub const CARD_WIDTH: f32 = 216.;
 pub const CARD_HEIGHT: f32 = 324.;
 pub const CARD_PITCH: f32 = 240.;
+/// A "Browse by Platform" tile: about two posters and a bit wide, a poster tall.
+pub const PLATFORM_WIDTH: f32 = 476.;
 /// How much of the next row shows below the focused one on Home: its title and the top of
 /// its posters.
 pub const ROW_PEEK: f32 = 190.;
@@ -304,6 +311,10 @@ pub struct Feeds {
     pub expand_asked: HashMap<usize, Instant>,
     /// Explore's posters last sent to the worker, with the near rows and "keep" setting.
     pub extra_sent: Vec<String>,
+    /// A Browse by Platform page, over Home.
+    pub platform: Option<PlatformPage>,
+    /// A person's page (from a title page's Cast & Crew).
+    pub person: Option<PersonPage>,
 }
 
 /// An MDBList list offered in Settings > Lists > Add.
@@ -370,6 +381,7 @@ impl Feeds {
             .chain(self.explore.images.iter())
             .chain(self.explore.backdrop.iter())
             .chain(self.explore.previous.iter())
+            .chain(self.browse_images())
             .collect()
     }
 
@@ -383,6 +395,7 @@ impl Feeds {
                 .as_ref()
                 .and_then(|preview| preview.previous.as_ref()),
             self.title.as_ref().map(|page| &page.link),
+            self.platform_hero().map(|item| &item.link),
         ]
         .into_iter()
         .flatten()
@@ -626,6 +639,11 @@ impl Feeds {
         let count = self.rows.get(row).map_or(0, |row| row.items.len());
         if count == 0 {
             return 0.;
+        }
+        // Platform tiles never widen, and their row has no "See all".
+        if self.platform_row(row) {
+            let content = count as f32 * (PLATFORM_WIDTH + self.card_gap()) - self.card_gap();
+            return (content - (HOME_STRIP_RIGHT - HOME_STRIP_LEFT)).max(0.);
         }
         // Every card and gap, room for a focused card widened (to landscape, or pulled off the
         // shelf), and the "See all" tile after them.
@@ -894,7 +912,13 @@ impl State {
                     _ if count == 0 && matches!(direction, Direction::Left | Direction::Right) => {
                         return Some(vec![]);
                     }
-                    // Past the last card: the "See all" tile, which opens the row in Explore.
+                    // Past the last card: the "See all" tile, which opens the row in Explore
+                    // (a platform row has none).
+                    (Target::Feed(_, index), Direction::Right)
+                        if index + 1 >= count && self.feeds.platform_row(row) =>
+                    {
+                        return Some(vec![]);
+                    }
                     (Target::Feed(_, index), Direction::Right) if index + 1 >= count => {
                         Target::FeedMore(row)
                     }
@@ -1156,6 +1180,8 @@ fn card_link(feeds: &Feeds, target: &Target) -> Option<String> {
 /// (the page's own title, or one of More Like This).
 fn card_item<'a>(feeds: &'a Feeds, target: &Target) -> Option<&'a Item> {
     match target {
+        // A platform tile is no title: no details, preview, backdrop or quick actions.
+        Target::Feed(row, _) if feeds.platform_row(*row) => None,
         Target::Feed(row, index) => feeds.rows.get(*row)?.items.get(*index),
         Target::SearchResult(index) => feeds.search.as_ref()?.results.get(*index),
         Target::Hero => feeds.hero_item(),
@@ -1163,6 +1189,9 @@ fn card_item<'a>(feeds: &'a Feeds, target: &Target) -> Option<&'a Item> {
         Target::SheetItem(index) => feeds.sheet.as_ref()?.items.get(*index),
         Target::ExploreItem(index) => feeds.explore.items.get(*index),
         Target::TitleMore(index) => feeds.title.as_ref()?.more()?.get(*index),
+        Target::PlatformItem(index) => feeds.platform_items().get(*index).copied(),
+        Target::PlatformPlay | Target::PlatformDetails => feeds.platform_hero(),
+        Target::PersonCredit(row, index) => feeds.person_credit(*row, *index),
         Target::TitleButton(_)
         | Target::TitleSeason(_)
         | Target::TitleEpisode(_)
@@ -1212,6 +1241,7 @@ impl Feeds {
             .is_some_and(|(_, since)| since.elapsed() < PAGE_SLIDE + Duration::from_millis(40))
             || self.wide_animating()
             || self.explore.animating()
+            || self.browse_animating()
             || self
                 .focus_since
                 .as_ref()
@@ -1272,7 +1302,7 @@ impl State {
         let previewable = self.page == Page::Home
             && self.overlay.is_none()
             && self.feeds.search.is_none()
-            && self.feeds.title.is_none()
+            && !self.feeds.page_open()
             && self.feeds.menu.is_none()
             && self.feeds.ambient.is_none()
             && self.moving.is_none()
@@ -1560,12 +1590,39 @@ pub struct Ambient {
     pub photos: bool,
 }
 
-/// A person in a title's cast.
-#[derive(Clone, Debug, Default)]
+/// A person in a title's cast or crew.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Person {
+    /// TMDB's person id, for their page.
+    pub id: u64,
     pub name: String,
+    /// The character played, or the jobs ("Director, Writer").
     pub role: String,
     pub image: Option<String>,
+    /// Behind the camera: the role is a job.
+    pub crew: bool,
+}
+
+/// A person's page: who they are, and what they made, by department.
+#[derive(Clone, Debug, Default)]
+pub struct PersonInfo {
+    pub name: String,
+    /// "Acting", "Directing", "Writing"...
+    pub department: String,
+    pub image: Option<String>,
+    /// "Born 1970 · London, England, UK".
+    pub born: String,
+    pub bio: String,
+    /// ("Directing", titles), the department they are known for first.
+    pub rows: Vec<(String, Vec<Item>)>,
+}
+
+/// A page a title page or person's page was opened over: Back returns to it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Back {
+    Title(Item),
+    /// A person's page, and the credit focused on it.
+    Person(Person, Target),
 }
 
 /// A season of a show, as the title page lists it.
@@ -1645,6 +1702,8 @@ pub enum Outgoing {
     Expand(usize),
     /// A TMDB Discover search for Explore's filters, numbered so a late answer is ignored.
     Discover(u64, explore::Query),
+    /// A person's page, by TMDB id.
+    Person(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1686,8 +1745,9 @@ pub struct TitlePage {
     pub page_scroll: f32,
     pub restore: Target,
     pub opened: Instant,
-    /// Pages this one was opened over from More Like This; Back returns to them.
-    pub back: Vec<Item>,
+    /// Pages this one was opened over (More Like This, a person's credits); Back returns
+    /// to them.
+    pub back: Vec<Back>,
 }
 
 impl TitlePage {
@@ -2043,7 +2103,7 @@ impl State {
         let paused = self.page != Page::Home
             || self.overlay.is_some()
             || self.feeds.search.is_some()
-            || self.feeds.title.is_some()
+            || self.feeds.page_open()
             || self.feeds.menu.is_some()
             || self.feeds.ambient.is_some()
             || self.feeds.sheet.is_some()
@@ -2086,6 +2146,8 @@ impl State {
         let drawn = self.drawn_scroll();
         self.feeds.menu = None;
         self.feeds.title = None;
+        self.feeds.person = None;
+        self.feeds.platform = None;
         self.feeds.sheet = None;
         self.feeds.search = None;
         self.feeds.preview = None;
@@ -2216,6 +2278,8 @@ impl State {
         };
         self.feeds.search = None;
         self.feeds.title = None;
+        self.feeds.person = None;
+        self.feeds.platform = None;
         if self.page != Page::Home {
             self.open(0);
         }
@@ -2291,6 +2355,8 @@ impl State {
         };
         if let Target::TitleMore(_) = self.focus {
             self.title_more(item);
+        } else if let Target::PersonCredit(..) = self.focus {
+            self.person_open_credit(item);
         } else {
             self.open_title(item, self.focus.clone());
         }
@@ -2303,7 +2369,7 @@ impl State {
             return;
         };
         let mut back = page.back;
-        back.push(page.item);
+        back.push(Back::Title(page.item));
         let restore = page.restore;
         self.open_title(item, restore);
         if let Some(page) = &mut self.feeds.title {
@@ -2316,21 +2382,37 @@ impl State {
         let Some(mut page) = self.feeds.title.take() else {
             return;
         };
-        if let Some(item) = page.back.pop() {
-            let back = std::mem::take(&mut page.back);
-            self.open_title(item, page.restore);
-            if let Some(page) = &mut self.feeds.title {
-                page.back = back;
-                // Returning is not an entrance.
-                page.opened = Instant::now() - PAGE_ENTRANCE;
+        let back = std::mem::take(&mut page.back);
+        self.page_back(back, page.restore);
+    }
+
+    /// Returns to the last page of `back` (a title's or a person's), else to `restore`.
+    pub(crate) fn page_back(&mut self, mut back: Vec<Back>, restore: Target) {
+        match back.pop() {
+            Some(Back::Title(item)) => {
+                self.open_title(item, restore);
+                if let Some(page) = &mut self.feeds.title {
+                    page.back = back;
+                    // Returning is not an entrance.
+                    page.opened = Instant::now() - PAGE_ENTRANCE;
+                }
             }
-            return;
+            Some(Back::Person(person, focus)) => {
+                self.open_person(person, restore, back);
+                if let Some(page) = &mut self.feeds.person {
+                    page.opened = Instant::now() - PAGE_ENTRANCE;
+                }
+                self.focus = focus;
+                self.reveal_person_focus();
+            }
+            None => {
+                self.focus = restore;
+                self.feeds.prune_images();
+                self.reconcile_focus();
+                self.pointer = false;
+                self.dirty = true;
+            }
         }
-        self.focus = page.restore;
-        self.feeds.prune_images();
-        self.reconcile_focus();
-        self.pointer = false;
-        self.dirty = true;
     }
 
     fn title_target(section: Section, index: usize) -> Target {
@@ -2508,6 +2590,19 @@ impl State {
             Target::TitleMore(index) => {
                 if let Some(item) = page.more().and_then(|more| more.get(index)).cloned() {
                     self.title_more(item);
+                }
+                vec![]
+            }
+            // A director, writer or actor: their page, over this one.
+            Target::TitleCast(index) => {
+                if let Some(person) = page.cast().get(index).cloned()
+                    && person.id != 0
+                    && let Some(page) = self.feeds.title.take()
+                {
+                    let mut back = page.back;
+                    back.push(Back::Title(page.item));
+                    self.open_person(person, page.restore, back);
+                    self.sound = Some(crate::state::Sound::Select);
                 }
                 vec![]
             }
@@ -2697,6 +2792,10 @@ impl State {
                 match open_page {
                     // From a page's More Like This: over that page.
                     Some(_) if matches!(restore, Target::TitleMore(_)) => self.title_more(item),
+                    _ if matches!(restore, Target::PersonCredit(..)) => {
+                        self.focus = restore;
+                        self.person_open_credit(item);
+                    }
                     Some(true) => self.focus = Target::TitleButton(0),
                     _ => self.open_title(item, restore),
                 }
@@ -2816,7 +2915,7 @@ impl State {
             || self.recents_open()
             || self.launching
             || self.feeds.menu.is_some()
-            || self.feeds.title.is_some()
+            || self.feeds.page_open()
             || self.feeds.search.is_some()
             || self.feeds.ambient.is_some()
             || !self.feeds.visible && self.page == Page::Home
@@ -2854,6 +2953,14 @@ impl State {
         }
         if self.feeds.title.is_some() {
             self.title_back();
+            return true;
+        }
+        if self.feeds.person.is_some() {
+            self.person_back();
+            return true;
+        }
+        if self.feeds.platform.is_some() {
+            self.close_platform();
             return true;
         }
         if self.feeds.sheet.is_some() {
@@ -3058,6 +3165,13 @@ impl Feeds {
             .map_or_else(|| "Coming up".to_owned(), |row| row.title.clone())
     }
 
+    /// Whether a row is "Browse by Platform" (wide brand tiles, built without a fetch).
+    pub fn platform_row(&self, row: usize) -> bool {
+        self.rows
+            .get(row)
+            .is_some_and(|row| platforms::is_source(&row.source))
+    }
+
     /// A row card's width before focus changes it, by the theme's layout.
     pub fn base_width(&self, index: usize) -> f32 {
         use crate::themes::Layout;
@@ -3110,6 +3224,7 @@ impl Feeds {
     /// shelf, pulled out face-first).
     pub fn card_width(&self, target: &Target, reduced_motion: bool) -> f32 {
         let index = match target {
+            Target::Feed(row, _) if self.platform_row(*row) => return PLATFORM_WIDTH,
             Target::Feed(_, index) => *index,
             _ => 1,
         };
@@ -3166,7 +3281,7 @@ impl State {
         }
         let eligible = self.preferences.feed_wide
             && self.page == Page::Home
-            && self.feeds.title.is_none()
+            && !self.feeds.page_open()
             && self.feeds.search.is_none()
             && matches!(self.focus, Target::Feed(..));
         if !eligible || self.feeds.wide.is_some() {

@@ -22,6 +22,8 @@ const FACE_HEIGHT: f32 = 154.4;
 const GRID_PITCH: f32 = 296.4;
 const RECENTS_BACKDROP_OPACITY: f32 = 0.86;
 
+#[path = "browse-view.rs"]
+mod browse_view;
 #[path = "explore-view.rs"]
 mod explore_view;
 #[path = "play-view.rs"]
@@ -507,9 +509,17 @@ pub fn scene_with_pill(
         out.controls.clear();
         shelf_sheet(&mut out, state, assets);
     }
+    if state.feeds.platform.is_some() {
+        out.controls.clear();
+        browse_view::platform_page(&mut out, state, assets);
+    }
     if state.feeds.title.is_some() {
         out.controls.clear();
         title_page(&mut out, state, assets);
+    }
+    if state.feeds.person.is_some() {
+        out.controls.clear();
+        browse_view::person_page(&mut out, state, assets);
     }
     if state.feeds.menu.is_some() {
         out.controls.clear();
@@ -1618,6 +1628,7 @@ fn feed_rows(
             HOME_FADE_RIGHT,
         ])));
         let mut focused_card = None;
+        let platforms = state.feeds.platform_row(row_index);
         // Cards sit CARD_PITCH apart; a widened one pushes those after it along.
         let mut x = 84. - scroll;
         for (index, item) in row.items.iter().enumerate() {
@@ -1644,16 +1655,26 @@ fn feed_rows(
                 focused_card = Some((item, rect, target));
                 continue;
             }
-            feed_card(out, state, assets, item, rect, &target);
+            if platforms {
+                platform_tile(out, state, assets, item, rect, &target);
+            } else {
+                feed_card(out, state, assets, item, rect, &target);
+            }
         }
-        // "See all": the row's every title in Explore.
-        let more = Rect::new(x, cards_y, crate::feeds::MORE_WIDTH, CARD_HEIGHT);
-        out.control(Target::FeedMore(row_index), more, true);
-        if more.x < 1920. && more.y < 1054. && more.y + more.h > MAIN_TOP {
-            see_all_tile(out, state, assets, more, &Target::FeedMore(row_index));
+        // "See all": the row's every title in Explore (not for platforms).
+        if !platforms {
+            let more = Rect::new(x, cards_y, crate::feeds::MORE_WIDTH, CARD_HEIGHT);
+            out.control(Target::FeedMore(row_index), more, true);
+            if more.x < 1920. && more.y < 1054. && more.y + more.h > MAIN_TOP {
+                see_all_tile(out, state, assets, more, &Target::FeedMore(row_index));
+            }
         }
         if let Some((item, rect, target)) = focused_card {
-            feed_card(out, state, assets, item, rect, &target);
+            if platforms {
+                platform_tile(out, state, assets, item, rect, &target);
+            } else {
+                feed_card(out, state, assets, item, rect, &target);
+            }
         }
         out.draw.push(Draw::EdgeFadeX(None));
         out.draw.push(Draw::Clip(Some(content)));
@@ -1674,6 +1695,81 @@ fn feed_rows(
         y,
         focused_row.map(|(start, end)| (start, end, peek_end.unwrap_or(end))),
     )
+}
+
+/// A "Browse by Platform" tile: the service's colour with its wordmark (or its name,
+/// lettered) in the middle, growing and ringed like a poster when focused.
+fn platform_tile(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    item: &crate::feeds::Item,
+    rect: Rect,
+    target: &Target,
+) {
+    use crate::feeds::CARD_RADIUS;
+    let Some(platform) =
+        crate::feeds::platforms::from_link(&item.link).and_then(crate::feeds::platforms::get)
+    else {
+        return;
+    };
+    let focused = state.focus == *target;
+    let scale = state.feeds.scale(target, state.preferences.reduced_motion);
+    let rect = Rect::new(
+        rect.x - rect.w * (scale - 1.) / 2.,
+        rect.y - rect.h * (scale - 1.) / 2.,
+        rect.w * scale,
+        rect.h * scale,
+    );
+    out.shadow(
+        rect,
+        CARD_RADIUS,
+        if focused { 34. } else { 18. },
+        if focused { 14. } else { 6. },
+        if focused { 0.45 } else { 0.2 },
+    );
+    let base = c(platform.background, 1.);
+    let lighter = [
+        (base[0] + 0.06).min(1.),
+        (base[1] + 0.06).min(1.),
+        (base[2] + 0.06).min(1.),
+        1.,
+    ];
+    out.draw
+        .push(Draw::RoundedGradient(rect, CARD_RADIUS, lighter, base));
+    out.border(rect, CARD_RADIUS, 1., c(0xffffff, 0.08));
+    let ink = c(platform.ink, 1.);
+    if platform.logo {
+        // The wordmark fits a box in the middle, by the brand's own optical size.
+        let (ratio, height) = crate::branding::for_key(platform.key)
+            .map_or((0.62, 64.), |brand| brand.artwork_size());
+        let w = rect.w * (ratio * 0.78).min(0.62);
+        let h = rect.h * (height / 88. * 0.30).clamp(0.16, 0.36);
+        out.draw.push(Draw::TintedImage(
+            assets.path(format!("logos/{}.lvec", platform.key)),
+            Rect::new(rect.x + (rect.w - w) / 2., rect.y + (rect.h - h) / 2., w, h),
+            0.,
+            true,
+            ink,
+        ));
+    } else {
+        let size = 64. * scale;
+        out.text(
+            platform.title.to_uppercase(),
+            Rect::new(
+                rect.x,
+                rect.y + (rect.h - size * 1.2) / 2.,
+                rect.w,
+                size * 1.2,
+            ),
+            text(size, 800, -0.02),
+            ink,
+            true,
+        );
+    }
+    if focused {
+        out.ring(rect, CARD_RADIUS);
+    }
 }
 
 /// The tile after a row's last card that opens the row in Explore: a frosted card with a
@@ -3092,7 +3188,11 @@ fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
             }
             Section::Cast => {
                 out.text(
-                    "Cast",
+                    if page.cast().iter().any(|person| person.crew) {
+                        "Cast & Crew"
+                    } else {
+                        "Cast"
+                    },
                     Rect::new(84., y + 3., 600., 31.),
                     text(23.2, 550, -0.035),
                     WHITE,
@@ -3153,11 +3253,16 @@ fn title_page(out: &mut Scene, state: &State, assets: &Assets) {
                         WHITE,
                         false,
                     );
+                    // A job (Director, Writer) in gold; a character in grey.
                     out.text(
                         clip_words(&person.role, 20),
                         Rect::new(rect.x, rect.y + rect.h + 32., rect.w, 20.),
-                        text(14.4, 400, 0.),
-                        c(0xffffff, 0.55),
+                        text(14.4, if person.crew { 550 } else { 400 }, 0.),
+                        if person.crew {
+                            c(0xf3d27a, 0.9)
+                        } else {
+                            c(0xffffff, 0.55)
+                        },
                         false,
                     );
                     out.control(
@@ -5176,6 +5281,13 @@ fn feed_settings(state: &State) -> Vec<(usize, &str, &str, Option<&str>, bool)> 
                     "Photo background on Home",
                     "sparkles",
                     on_off(state.preferences.photo_background),
+                    false,
+                ),
+                (
+                    crate::state::SHOW_HIDDEN_GAMES_SETTING,
+                    "Show hidden games",
+                    "eye",
+                    on_off(state.preferences.show_hidden_games),
                     false,
                 ),
             ]

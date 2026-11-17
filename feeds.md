@@ -46,6 +46,12 @@ Sources:
 - `smart:new_season`: shows you have finished whose next season is out. Checks up to 15 of
   your most recently watched shows each refresh.
 - `mdblist:USER/LIST-SLUG` or `mdblist:LIST_ID`: an MDBList list.
+- `platforms:netflix,disney-plus,…`: **Browse by Platform**, one row of wide tiles in each
+  service's colour with its wordmark. Nothing is fetched for it. OK on a tile opens that
+  service's page (needs `tmdb`): Movies and TV Shows pills, a row of its popular titles, and
+  the focused one large above it with Play and Details. Keys: `netflix`, `disney-plus`, `hbo-max`,
+  `prime-video`, `apple-tv`, `paramount-plus`, `crunchyroll` (US catalogue), `stan`, `binge`
+  (Australian). Unknown keys are skipped. The row has no "See all" tile.
 
 **Settings > Lists** (shown when `mdblist.api_key` is set) keeps the MDBList rows on the TV:
 Add a list offers your own MDBList lists and the most liked ones, or searches MDBList; OK on
@@ -160,8 +166,12 @@ Letterboxd scores, the synopsis and director or creators. Below that:
   The page opens on the season of the card's episode, or of the next one to watch. OK on an
   episode opens the show in Nuvio (Nuvio's links open a show, not one episode); holding OK on
   an episode marks it watched on Trakt.
-- Cast, and More Like This, whose posters open their own page. Back returns to the page
-  before, then to Home.
+- Cast & Crew: a film's directors and writers (a show's creators), then its cast, with their
+  photos. OK on one opens their page: photo, what they are known for, their story, and rows
+  of the films and shows they directed, wrote or acted in (talk shows and appearances as
+  themselves left out). OK on one of those opens its page.
+- More Like This, whose posters open their own page. Back returns to each page before in
+  turn, then to Home.
 
 ## Quick actions
 

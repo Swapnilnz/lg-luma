@@ -27,6 +27,7 @@
     { "title": "New Seasons", "source": "smart:new_season" },
     { "title": "Because you watched {title}", "source": "smart:because" },
     { "title": "Because you watched {title}", "source": "smart:because:2" },
+    { "title": "Browse by Platform", "source": "platforms:netflix,disney-plus,hbo-max,prime-video,apple-tv,paramount-plus,crunchyroll,stan,binge" },
     { "title": "Popular Movies", "source": "mdblist:USERNAME/LIST-SLUG" }
   ]
 }

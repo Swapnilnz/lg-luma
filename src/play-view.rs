@@ -5,8 +5,9 @@
 use super::{Assets, Scene, c, clip_words, text};
 use crate::console::{ArtKind, Game, Phase, Session};
 use crate::play::{
-    COVER_H, COVER_PITCH, COVER_W, PANEL_IN, PlayButton, RAIL_X, RAIL_Y, SHEET_IN,
-    achievement_share, chips, ease_out_cubic, hours, played_ago, size,
+    COVER_H, COVER_PITCH, COVER_W, ConfirmPhase, DELETE_CHOICES, DeleteChoice, PANEL_IN,
+    PlayButton, RAIL_X, RAIL_Y, SHEET_IN, achievement_share, chips, delete_error_message,
+    ease_out_cubic, hours, played_ago, size,
 };
 use crate::renderer::{Blend, Draw, Filter, Pattern, Quad, QuadImage, WHITE};
 use crate::state::{Rect, State, Target};
@@ -20,6 +21,8 @@ pub const TOP: u32 = 0x5b3df5;
 pub const BOTTOM: u32 = 0x10195a;
 const ACCENT: u32 = 0x8b7bff;
 const GOOD: u32 = 0x3ddc84;
+/// A low battery, and a failed delete.
+const LOW: u32 = 0xff5c5c;
 const COVER_RADIUS: f32 = 14.;
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
@@ -788,7 +791,6 @@ fn rail(out: &mut Scene, state: &State, assets: &Assets, now: Instant) {
         );
         badges(out, state, assets, game, rect);
     }
-    hidden_tile(out, state, assets);
     // The focused one last, over its neighbours.
     if let Some((index, game, rect)) = focused_draw {
         let scale = play.cover_scale(index, true, now, reduced);
@@ -821,66 +823,6 @@ fn rail(out: &mut Scene, state: &State, assets: &Assets, now: Instant) {
         }
     }
     out.draw.push(Draw::EdgeFadeX(None));
-}
-
-/// The rail's last tile while games are hidden: shows them (marked), or puts them away.
-fn hidden_tile(out: &mut Scene, state: &State, assets: &Assets) {
-    let play = &state.play;
-    let count = play.hidden_count();
-    if count == 0 {
-        return;
-    }
-    let language = state.preferences.language;
-    let x = RAIL_X + play.games().len() as f32 * COVER_PITCH - play.rail;
-    if x > 1920. {
-        return;
-    }
-    let base = Rect::new(x, RAIL_Y, COVER_W, COVER_H);
-    out.control(Target::PlayHidden, base, false);
-    let focused = state.focus == Target::PlayHidden && state.console.is_none();
-    let rect = if focused { scaled(base, 1.06) } else { base };
-    out.shape(
-        rect,
-        COVER_RADIUS,
-        c(if focused { 0x2a2e3a } else { 0x15171f }, 0.78),
-    );
-    out.border(
-        rect,
-        COVER_RADIUS,
-        1.5,
-        c(0xffffff, if focused { 0.5 } else { 0.16 }),
-    );
-    let (cx, cy) = rect.center();
-    out.icon(
-        assets,
-        if play.show_hidden { "eye-off" } else { "eye" },
-        Rect::new(cx - 22., cy - 70., 44., 44.),
-        c(0xffffff, 0.85),
-    );
-    out.text(
-        language.t("hiddenGames"),
-        Rect::new(rect.x + 16., cy - 6., rect.w - 32., 30.),
-        text(22.4, 650, -0.02),
-        WHITE,
-        true,
-    );
-    let detail = if play.show_hidden {
-        language.t("hiddenPutAway").to_owned()
-    } else {
-        language
-            .t("hiddenShow")
-            .replace("{count}", &count.to_string())
-    };
-    out.text(
-        detail,
-        Rect::new(rect.x + 16., cy + 32., rect.w - 32., 24.),
-        text(17.6, 550, 0.),
-        c(0xffffff, 0.65),
-        true,
-    );
-    if focused && !state.pointer {
-        out.border(rect.inset(-6.), COVER_RADIUS + 6., 2.5, c(0xf3f3f3, 0.95));
-    }
 }
 
 /// A cover's PLAYING pill, favourite star and (when shown) hidden mark.
@@ -981,7 +923,40 @@ fn sheet(out: &mut Scene, state: &State, assets: &Assets, now: Instant) {
         language.t(if hidden { "unhideGame" } else { "hideGame" }),
         false,
     );
-    status_line(out, state, assets, Some(game), 148., 864. + lift);
+    // Delete: dimmed, with the reason under it, while it cannot be done.
+    let blocked = state.delete_blocked(game);
+    let deleting = play.deleting.as_deref() == Some(game.key.as_str());
+    let delete_rect = Rect::new(140., 856. + lift, 340., 56.);
+    let before = out.draw.len();
+    button(
+        out,
+        state,
+        assets,
+        (Target::PlayDelete, delete_rect),
+        Some("trash"),
+        language.t(if deleting {
+            "deleteDeleting"
+        } else {
+            "deleteGame"
+        }),
+        false,
+    );
+    if blocked.is_some() && !deleting {
+        out.fade(before, 0.45, 1.);
+    }
+    match blocked.filter(|_| !deleting) {
+        Some(hint) => {
+            let style = text(16., 550, 0.);
+            out.text(
+                language.t(hint),
+                Rect::new(148., 924. + lift, 340., 22.),
+                style,
+                c(0xffffff, 0.55),
+                false,
+            );
+        }
+        None => status_line(out, state, assets, Some(game), 148., 926. + lift),
+    }
 
     let x = 560.;
     out.text(
@@ -1096,6 +1071,259 @@ fn sheet(out: &mut Scene, state: &State, assets: &Assets, now: Instant) {
         }
     }
     out.fade_range(start, out.draw.len(), t, 1.);
+    if let Some(confirm) = &sheet.confirm {
+        confirm_card(out, state, assets, game, confirm, now);
+    }
+}
+
+/// The delete confirmation over the sheet: what goes and how much space it frees, then
+/// Delete keeping the saves, Delete everything, Cancel. While the PC works, a spinner; if
+/// it fails, why.
+fn confirm_card(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    game: &Game,
+    confirm: &crate::play::Confirm,
+    now: Instant,
+) {
+    let language = state.preferences.language;
+    let reduced = state.preferences.reduced_motion;
+    let t = if reduced {
+        1.
+    } else {
+        ease_out_cubic((now.duration_since(confirm.since).as_secs_f32() / 0.22).min(1.))
+    };
+    // The controls behind it are not reachable by pointer while it shows.
+    out.controls
+        .retain(|control| matches!(control.target, Target::PlayConfirm(_)));
+    out.shape(FULL, 0., c(0x020308, 0.62));
+    let start = out.draw.len();
+    let card = Rect::new(560., 250. + 16. * (1. - t), 800., 520.);
+    out.shadow(card, 28., 60., 24., 0.6);
+    out.shape(card, 28., c(0x12141c, 0.97));
+    out.border(card, 28., 1., c(0xffffff, 0.12));
+    let x = card.x + 56.;
+    let w = card.w - 112.;
+    let failed = match confirm.phase {
+        ConfirmPhase::Failed(error) => Some(error),
+        _ => None,
+    };
+    out.icon(
+        assets,
+        if failed.is_some() { "alert" } else { "trash" },
+        Rect::new(x, card.y + 52., 40., 40.),
+        c(if failed.is_some() { LOW } else { 0xffffff }, 0.9),
+    );
+    out.text(
+        clip_words(
+            &language.format("deleteConfirmTitle", &[("game", game.title.as_str())]),
+            60,
+        ),
+        Rect::new(x, card.y + 112., w, 46.),
+        text(36., 750, -0.035),
+        WHITE,
+        false,
+    );
+    let detail = match confirm.phase {
+        ConfirmPhase::Failed(error) => language.t(delete_error_message(error)).to_owned(),
+        _ => size(game.installed_bytes).map_or_else(
+            || language.t("deleteFromPc").to_owned(),
+            |bytes| language.format("deleteFrees", &[("size", bytes.as_str())]),
+        ),
+    };
+    out.text(
+        detail,
+        Rect::new(x, card.y + 168., w, 28.),
+        text(21.6, 500, 0.),
+        c(0xffffff, 0.72),
+        false,
+    );
+    let row = |index: usize| Rect::new(x, card.y + 236. + index as f32 * 76., w, 60.);
+    match confirm.phase {
+        ConfirmPhase::Asking => {
+            for (index, choice) in DELETE_CHOICES.into_iter().enumerate() {
+                let (icon, label) = match choice {
+                    DeleteChoice::KeepSaves => (Some("trash"), language.t("deleteKeepSaves")),
+                    DeleteChoice::AllData => (Some("trash"), language.t("deleteAllData")),
+                    DeleteChoice::Cancel => (None, language.t("cancel")),
+                };
+                button(
+                    out,
+                    state,
+                    assets,
+                    (Target::PlayConfirm(choice), row(index)),
+                    icon,
+                    label,
+                    false,
+                );
+            }
+        }
+        ConfirmPhase::Deleting => {
+            spinner(out, (x + 22., row(0).y + 30.), now, reduced);
+            out.text(
+                language.t("deleteDeleting"),
+                Rect::new(x + 60., row(0).y + 16., w - 60., 30.),
+                text(22.4, 600, -0.01),
+                c(0xffffff, 0.9),
+                false,
+            );
+            out.text(
+                language.t("deleteBackground"),
+                Rect::new(x, row(1).y + 8., w, 24.),
+                text(17.6, 500, 0.),
+                c(0xffffff, 0.5),
+                false,
+            );
+        }
+        ConfirmPhase::Failed(_) => {
+            button(
+                out,
+                state,
+                assets,
+                (Target::PlayConfirm(DeleteChoice::Cancel), row(2)),
+                None,
+                language.t("close"),
+                false,
+            );
+        }
+    }
+    if t < 1. {
+        out.fade_range(start, out.draw.len(), t, 1.);
+    }
+}
+
+/// A small ring of dots chasing round (still with Reduce motion).
+fn spinner(out: &mut Scene, (cx, cy): (f32, f32), now: Instant, reduced: bool) {
+    let spin = if reduced { 0. } else { seconds(now) / 1.1 };
+    let count = 10;
+    for index in 0..count {
+        let p = index as f32 / count as f32;
+        let angle = (p + spin) * TAU;
+        let d = 3. + 4. * p;
+        let (x, y) = (cx + 14. * angle.cos(), cy + 14. * angle.sin());
+        out.shape(
+            Rect::new(x - d / 2., y - d / 2., d, d),
+            d / 2.,
+            c(0xffffff, 0.2 + 0.8 * p),
+        );
+    }
+}
+
+/// Top right of the Play page, under the tabs, while the PC answers: each controller's
+/// battery, then each drive's free space.
+fn system_strip(out: &mut Scene, state: &State, assets: &Assets) {
+    let Some(system) = state.play.system.as_ref() else {
+        return;
+    };
+    if state.console_awake != Some(true)
+        || (system.controllers.is_empty() && system.drives.is_empty())
+    {
+        return;
+    }
+    let language = state.preferences.language;
+    let style = text(17.6, 600, 0.);
+    let height = 44.;
+    let y = 128.;
+    let gap = 26.;
+    // Each item: its width and how to draw it at x.
+    enum Item<'a> {
+        Pad(&'a crate::console::Pad, String),
+        Drive(&'a crate::console::Drive, String),
+    }
+    let mut items = Vec::new();
+    for pad in &system.controllers {
+        items.push(Item::Pad(pad, format!("{}%", pad.battery)));
+    }
+    for drive in &system.drives {
+        let free = size(Some(drive.free)).unwrap_or_default();
+        let label = format!(
+            "{}: {}",
+            drive.letter,
+            language.format("driveFree", &[("size", free.as_str())])
+        );
+        items.push(Item::Drive(drive, label));
+    }
+    let width = |item: &Item| match item {
+        Item::Pad(pad, label) => {
+            24. + 8. + 30. + 8. + assets.width(label, style) + if pad.charging { 20. } else { 0. }
+        }
+        Item::Drive(_, label) => 22. + 8. + assets.width(label, style) + 10. + 52.,
+    };
+    let total: f32 =
+        items.iter().map(width).sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
+    let pill = Rect::new(1800. - total - 40., y, total + 40., height);
+    out.shape(pill, height / 2., c(0x0b0d14, 0.5));
+    out.border(pill, height / 2., 1., c(0xffffff, 0.09));
+    let mut x = pill.x + 20.;
+    let mid = y + height / 2.;
+    let ink = c(0xffffff, 0.82);
+    for item in &items {
+        let w = width(item);
+        match item {
+            Item::Pad(pad, label) => {
+                let low = pad.battery < 20 && !pad.charging;
+                out.icon(assets, "gaming", Rect::new(x, mid - 12., 24., 24.), ink);
+                // A battery: its outline, the nub and the fill.
+                let body = Rect::new(x + 32., mid - 7.5, 27., 15.);
+                out.border(body, 3.5, 1.5, c(0xffffff, 0.6));
+                out.shape(
+                    Rect::new(body.x + body.w + 1., mid - 3., 2.5, 6.),
+                    1.,
+                    c(0xffffff, 0.6),
+                );
+                let fill = (body.w - 5.) * (f32::from(pad.battery) / 100.).clamp(0.06, 1.);
+                out.shape(
+                    Rect::new(body.x + 2.5, body.y + 2.5, fill, body.h - 5.),
+                    1.5,
+                    if low {
+                        c(LOW, 1.)
+                    } else if pad.charging {
+                        c(GOOD, 1.)
+                    } else {
+                        c(0xffffff, 0.9)
+                    },
+                );
+                let mut tx = x + 32. + 30. + 8.;
+                if pad.charging {
+                    out.icon(
+                        assets,
+                        "zap",
+                        Rect::new(tx - 2., mid - 9., 18., 18.),
+                        c(GOOD, 1.),
+                    );
+                    tx += 20.;
+                }
+                out.text(
+                    label.as_str(),
+                    Rect::new(tx, mid - 12., assets.width(label, style) + 6., 24.),
+                    style,
+                    if low { c(LOW, 1.) } else { ink },
+                    false,
+                );
+            }
+            Item::Drive(drive, label) => {
+                out.icon(assets, "hard-drive", Rect::new(x, mid - 11., 22., 22.), ink);
+                let lw = assets.width(label, style);
+                out.text(
+                    label.as_str(),
+                    Rect::new(x + 30., mid - 12., lw + 6., 24.),
+                    style,
+                    ink,
+                    false,
+                );
+                let bar = Rect::new(x + 30. + lw + 10., mid - 2., 52., 4.);
+                out.shape(bar, 2., c(0xffffff, 0.16));
+                let used = drive.used();
+                out.shape(
+                    Rect::new(bar.x, bar.y, bar.w * used.max(0.04), bar.h),
+                    2.,
+                    c(if used > 0.9 { LOW } else { ACCENT }, 1.),
+                );
+            }
+        }
+        x += w + gap;
+    }
 }
 
 fn non_empty(value: &str) -> String {
@@ -1166,6 +1394,7 @@ pub fn page(out: &mut Scene, state: &State, assets: &Assets) {
     }
     panel(out, state, assets, now);
     rail(out, state, assets, now);
+    system_strip(out, state, assets);
 }
 
 // ---- The launch ----

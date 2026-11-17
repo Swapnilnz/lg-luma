@@ -23,6 +23,8 @@ pub const REDUCED_EFFECTS_SETTING: usize = 22;
 /// Photos from the PC: in the screensaver, and as Home's background.
 pub const PHOTO_SCREENSAVER_SETTING: usize = 23;
 pub const PHOTO_BACKGROUND_SETTING: usize = 24;
+/// Play: hidden games show on the rail (marked) instead of being left out.
+pub const SHOW_HIDDEN_GAMES_SETTING: usize = 25;
 use crate::sounds::VOLUME_MIN;
 /// Automatic inventory retries before the error shows: with the 6.5 s Luna timeout about 50 s.
 pub const INVENTORY_RETRIES: u32 = 5;
@@ -94,6 +96,14 @@ pub enum Target {
     TitleEpisode(usize),
     TitleCast(usize),
     TitleMore(usize),
+    /// A Browse by Platform page: its Movies and Shows pills, Play and Details for the
+    /// title shown large, and its row of titles.
+    PlatformKind(usize),
+    PlatformPlay,
+    PlatformDetails,
+    PlatformItem(usize),
+    /// A title in a person's rows: (row, index).
+    PersonCredit(usize, usize),
     /// An entry of a card's quick-actions menu.
     MenuItem(usize),
     RecentEmpty,
@@ -148,9 +158,10 @@ pub enum Target {
     PlayDetailStart,
     /// The details sheet's Hide (or Unhide) button.
     PlayHide,
+    /// The details sheet's Delete button, and its confirmation's choices.
+    PlayDelete,
+    PlayConfirm(crate::play::DeleteChoice),
     PlayShot(usize),
-    /// The rail's last tile, with games hidden: shows them, or puts them away again.
-    PlayHidden,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -275,6 +286,11 @@ pub enum Effect {
     Weather(weather::Command),
     /// The console tile was picked: wake and ready the PC for that session.
     ConsoleStart(u64),
+    /// Delete a game on the PC (`shop:objectId`), keeping its save data or not.
+    ConsoleDelete {
+        key: String,
+        keep_saves: bool,
+    },
 }
 
 pub const KEYS: [&str; 40] = [
@@ -1115,6 +1131,12 @@ impl State {
         if self.feeds.title.is_some() && self.overlay.is_none() {
             return self.title_direction(direction);
         }
+        if self.feeds.person.is_some() && self.overlay.is_none() {
+            return self.person_direction(direction);
+        }
+        if self.feeds.platform.is_some() && self.overlay.is_none() {
+            return self.platform_direction(direction);
+        }
         if self.feeds.sheet.is_some() && self.overlay.is_none() {
             return self.sheet_direction(direction);
         }
@@ -1920,6 +1942,16 @@ impl State {
             return effects;
         }
         if self.overlay.is_none()
+            && let Some(effects) = self.person_activate()
+        {
+            return effects;
+        }
+        if self.overlay.is_none()
+            && let Some(effects) = self.platform_activate()
+        {
+            return effects;
+        }
+        if self.overlay.is_none()
             && let Some(effects) = self.sheet_activate()
         {
             return effects;
@@ -1987,6 +2019,11 @@ impl State {
                     .and_then(|row| row.items.get(index))
                     .cloned()
                 {
+                    // A platform tile opens that service's page.
+                    if self.feeds.platform_row(row) {
+                        return crate::feeds::platforms::from_link(&item.link)
+                            .map_or_else(Vec::new, |platform| self.open_platform_page(platform));
+                    }
                     return self.select_card(item);
                 }
             }
@@ -2177,6 +2214,7 @@ impl State {
                     PHOTO_BACKGROUND_SETTING => {
                         self.preferences.photo_background = !self.preferences.photo_background;
                     }
+                    SHOW_HIDDEN_GAMES_SETTING => self.toggle_show_hidden_games(),
                     4 => {
                         self.subpage = Some(Subpage::Language);
                         self.focus = Target::Choice(self.preferences.language.index());

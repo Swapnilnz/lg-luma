@@ -155,6 +155,8 @@ pub struct Preferences {
     pub console: Option<crate::console::Config>,
     /// Games hidden from the Play page, by `shop:objectId`.
     pub hidden_games: Vec<String>,
+    /// Settings > Show hidden games: hidden games stay on the Play rail, marked.
+    pub show_hidden_games: bool,
     /// The screensaver shows photos from the PC (the console agent) while it answers.
     pub photo_screensaver: bool,
     /// Home's background is a slideshow of photos from the PC while it answers.
@@ -205,6 +207,7 @@ impl Default for Preferences {
             reduced_effects: false,
             console: None,
             hidden_games: vec![],
+            show_hidden_games: false,
             photo_screensaver: true,
             photo_background: true,
         }

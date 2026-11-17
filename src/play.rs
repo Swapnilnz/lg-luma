@@ -6,7 +6,7 @@
 //! Only shown with a `console` block in preferences.json.
 
 use crate::app_artwork::Artwork;
-use crate::console::{ArtKind, Game, Library};
+use crate::console::{ArtKind, DeleteError, Game, Library, System};
 use crate::state::{Direction, Effect, Page, State, Target};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -49,24 +49,56 @@ pub struct Preview {
     pub since: Instant,
 }
 
+/// The delete confirmation's choices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum DeleteChoice {
+    KeepSaves,
+    AllData,
+    Cancel,
+}
+
+pub const DELETE_CHOICES: [DeleteChoice; 3] = [
+    DeleteChoice::KeepSaves,
+    DeleteChoice::AllData,
+    DeleteChoice::Cancel,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmPhase {
+    Asking,
+    /// The PC is deleting it; only Back works (and the job carries on).
+    Deleting,
+    Failed(DeleteError),
+}
+
+/// The details sheet's delete confirmation card.
+#[derive(Clone, Debug)]
+pub struct Confirm {
+    pub phase: ConfirmPhase,
+    pub since: Instant,
+}
+
 #[derive(Clone, Debug)]
 pub struct Sheet {
     pub key: String,
     pub opened: Instant,
     /// The screenshot shown as the backdrop, when one is focused.
     pub shot: Option<usize>,
+    pub confirm: Option<Confirm>,
 }
 
 #[derive(Default)]
 pub struct Play {
-    /// The games shown: the PC's library less the hidden ones (unless they are shown).
+    /// The games shown: the PC's library less the hidden ones (unless Settings shows them).
     pub library: Option<Library>,
     /// Everything the PC sent.
     all: Option<Library>,
     /// Hidden games' keys (the preferences' `hidden_games`).
     pub hidden: HashSet<String>,
-    /// The hidden games are on the rail too, marked, to unhide.
-    pub show_hidden: bool,
+    /// The PC's controllers and drives, while it answers.
+    pub system: Option<System>,
+    /// The game being deleted on the PC, if any.
+    pub deleting: Option<String>,
     /// Decoded art by game key and kind.
     pub art: HashMap<(String, ArtKind), Arc<Artwork>>,
     /// Asked for (or failed while the PC was asleep): not asked again until it wakes.
@@ -108,7 +140,7 @@ impl Play {
     /// Where the rail scrolls for the focused game: it stays in the left third once the
     /// rail is longer than the screen.
     pub fn rail_target(&self) -> f32 {
-        let count = self.games().len() + usize::from(self.hidden_count() > 0);
+        let count = self.games().len();
         let visible = ((1920. - RAIL_X) / COVER_PITCH).floor() as usize;
         if count <= visible {
             return 0.;
@@ -219,31 +251,26 @@ impl Play {
         self.hidden.contains(key)
     }
 
-    /// How many of the PC's games are hidden.
-    pub fn hidden_count(&self) -> usize {
-        self.all.as_ref().map_or(0, |library| {
-            library
-                .games
-                .iter()
-                .filter(|game| self.hidden.contains(&game.key))
-                .count()
-        })
-    }
-
-    pub fn set_library(&mut self, library: Library) {
-        self.all = Some(library);
-        self.refilter();
-    }
-
-    /// Recomputes the games shown after the library, the hidden set or `show_hidden` change.
-    pub fn refilter(&mut self) {
-        if self.hidden_count() == 0 {
-            self.show_hidden = false;
+    /// A game deleted on the PC leaves at once (the PC's next library agrees).
+    pub fn remove(&mut self, key: &str, show_hidden: bool) {
+        if let Some(all) = &mut self.all {
+            all.games.retain(|game| game.key != key);
         }
+        self.refilter(show_hidden);
+    }
+
+    pub fn set_library(&mut self, library: Library, show_hidden: bool) {
+        self.all = Some(library);
+        self.refilter(show_hidden);
+    }
+
+    /// Recomputes the games shown after the library, the hidden set or Settings' "Show
+    /// hidden games" change. Shown, hidden games are on the rail too, marked, to unhide.
+    pub fn refilter(&mut self, show_hidden: bool) {
         let Some(mut library) = self.all.clone() else {
             return;
         };
-        if !self.show_hidden {
+        if !show_hidden {
             library
                 .games
                 .retain(|game| !self.hidden.contains(&game.key));
@@ -278,10 +305,13 @@ impl Play {
                 .previous_preview
                 .as_ref()
                 .is_some_and(|(_, at)| now.duration_since(*at) < SHOT_FADE)
-            || self
-                .sheet
-                .as_ref()
-                .is_some_and(|sheet| now.duration_since(sheet.opened) < SHEET_IN)
+            || self.sheet.as_ref().is_some_and(|sheet| {
+                now.duration_since(sheet.opened) < SHEET_IN
+                    || sheet
+                        .confirm
+                        .as_ref()
+                        .is_some_and(|confirm| confirm.phase == ConfirmPhase::Deleting)
+            })
     }
 }
 
@@ -378,6 +408,15 @@ pub fn chips(game: &Game) -> Vec<String> {
     chips
 }
 
+/// The message for a failed delete.
+pub fn delete_error_message(error: DeleteError) -> &'static str {
+    match error {
+        DeleteError::Running => "deleteFailedRunning",
+        DeleteError::Failed => "deleteFailed",
+        DeleteError::NoAnswer => "deleteFailedNoAnswer",
+    }
+}
+
 // ---- State ----
 
 impl State {
@@ -395,9 +434,7 @@ impl State {
     }
 
     pub fn play_entry(&self) -> Target {
-        if self.play.games().is_empty() && self.play.hidden_count() > 0 {
-            Target::PlayHidden
-        } else if self.play.games().is_empty() {
+        if self.play.games().is_empty() {
             Target::PlayAction(PlayButton::Hydra)
         } else {
             Target::PlayGame(self.play.index)
@@ -417,7 +454,8 @@ impl State {
         if self.play.all() == Some(&library) {
             return;
         }
-        self.play.set_library(library);
+        self.play
+            .set_library(library, self.preferences.show_hidden_games);
         if let Target::PlayGame(index) = self.focus
             && index != self.play.index
         {
@@ -568,10 +606,45 @@ impl State {
                 .as_ref()
                 .and_then(|sheet| self.play.find(&sheet.key))
                 .map_or(0, |game| game.shots().len());
+            if let Some(confirm) = self
+                .play
+                .sheet
+                .as_ref()
+                .and_then(|sheet| sheet.confirm.as_ref())
+            {
+                // The confirmation's choices stack: Up and Down move between them.
+                let (Target::PlayConfirm(choice), ConfirmPhase::Asking) =
+                    (self.focus.clone(), confirm.phase)
+                else {
+                    return Some(vec![]);
+                };
+                let position = DELETE_CHOICES
+                    .iter()
+                    .position(|c| *c == choice)
+                    .unwrap_or(0);
+                let next = match direction {
+                    Direction::Up => position.checked_sub(1),
+                    Direction::Down => {
+                        (position + 1 < DELETE_CHOICES.len()).then_some(position + 1)
+                    }
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    self.focus = Target::PlayConfirm(DELETE_CHOICES[next]);
+                    self.sound = Some(crate::state::Sound::Move);
+                    self.dirty = true;
+                }
+                return Some(vec![]);
+            }
             match (self.focus.clone(), direction) {
                 (Target::PlayDetailStart, Direction::Down) => self.focus = Target::PlayHide,
+                (Target::PlayHide, Direction::Down) => self.focus = Target::PlayDelete,
                 (Target::PlayHide, Direction::Up) => self.focus = Target::PlayDetailStart,
-                (Target::PlayDetailStart | Target::PlayHide, Direction::Right) if shots > 0 => {
+                (Target::PlayDelete, Direction::Up) => self.focus = Target::PlayHide,
+                (
+                    Target::PlayDetailStart | Target::PlayHide | Target::PlayDelete,
+                    Direction::Right,
+                ) if shots > 0 => {
                     self.set_sheet_shot(0);
                 }
                 (Target::PlayShot(0), Direction::Left) => {
@@ -607,18 +680,8 @@ impl State {
                 self.play_focus_game(index + 1, now);
                 None
             }
-            (Target::PlayGame(_), Direction::Right) if self.play.hidden_count() > 0 => {
-                Some(Target::PlayHidden)
-            }
-            (Target::PlayGame(_) | Target::PlayHidden, Direction::Up) => {
-                Some(Target::PlayAction(buttons[0]))
-            }
+            (Target::PlayGame(_), Direction::Up) => Some(Target::PlayAction(buttons[0])),
             (Target::PlayGame(_), _) => return Some(vec![]),
-            (Target::PlayHidden, Direction::Left) if count > 0 => {
-                self.play_focus_game(count - 1, now);
-                None
-            }
-            (Target::PlayHidden, _) => return Some(vec![]),
             (Target::PlayAction(button), Direction::Left | Direction::Right) => {
                 let position = buttons.iter().position(|b| *b == button).unwrap_or(0);
                 let position = match direction {
@@ -630,9 +693,6 @@ impl State {
             (Target::PlayAction(_), Direction::Up) => Some(Target::Nav(PLAY_PAGE)),
             (Target::PlayAction(_), Direction::Down) if count > 0 => {
                 Some(Target::PlayGame(self.play.index))
-            }
-            (Target::PlayAction(_), Direction::Down) if self.play.hidden_count() > 0 => {
-                Some(Target::PlayHidden)
             }
             (Target::PlayAction(_), Direction::Down) => return Some(vec![]),
             _ => return None,
@@ -663,15 +723,25 @@ impl State {
             key: game.key.clone(),
             opened: Instant::now(),
             shot: None,
+            confirm: None,
         });
         self.focus = Target::PlayDetailStart;
         self.dirty = true;
     }
 
-    /// Back on the Play page: the sheet closes, then focus goes up to the tab.
+    /// Back on the Play page: the delete confirmation closes (a delete carries on), then the
+    /// sheet, then focus goes up to the tab.
     pub fn play_back(&mut self) -> bool {
         if self.page != Page::Play {
             return false;
+        }
+        if let Some(sheet) = &mut self.play.sheet
+            && sheet.confirm.take().is_some()
+        {
+            self.focus = Target::PlayDelete;
+            self.sound = Some(crate::state::Sound::Back);
+            self.dirty = true;
+            return true;
         }
         if self.play.sheet.take().is_some() {
             self.focus = Target::PlayGame(self.play.index);
@@ -690,27 +760,8 @@ impl State {
     pub fn play_press(&mut self) -> Option<Vec<Effect>> {
         let game = match self.focus.clone() {
             Target::PlayHide => return Some(self.play_toggle_hidden()),
-            Target::PlayHidden => {
-                self.play.show_hidden = !self.play.show_hidden;
-                self.play.refilter();
-                self.focus = if self.play.games().is_empty() {
-                    self.play_entry()
-                } else {
-                    Target::PlayHidden
-                };
-                if self.play.show_hidden
-                    && let Some(index) = self
-                        .play
-                        .games()
-                        .iter()
-                        .position(|game| self.play.is_hidden(&game.key))
-                {
-                    self.play_focus_game(index, Instant::now());
-                }
-                self.sound = Some(crate::state::Sound::Select);
-                self.dirty = true;
-                return Some(vec![]);
-            }
+            Target::PlayDelete => return Some(self.play_delete()),
+            Target::PlayConfirm(choice) => return Some(self.play_confirm(choice)),
             Target::PlayGame(index) => self.play.game(index).cloned(),
             Target::PlayAction(PlayButton::Play) => self.play.game(self.play.index).cloned(),
             Target::PlayDetailStart | Target::PlayShot(_) => self
@@ -735,7 +786,133 @@ impl State {
         })
     }
 
-    /// Holding OK on a cover opens its details.
+    /// Why the details sheet's game cannot be deleted now (the hint's message), if so.
+    pub fn delete_blocked(&self, game: &Game) -> Option<&'static str> {
+        if self.console_awake != Some(true) {
+            Some("deleteAsleep")
+        } else if game.running {
+            Some("playingNow")
+        } else if self.play.deleting.is_some() {
+            Some("deleteBusy")
+        } else {
+            None
+        }
+    }
+
+    /// Delete on the details sheet: asks first (keep the saves, delete everything, cancel).
+    fn play_delete(&mut self) -> Vec<Effect> {
+        let Some(game) = self
+            .play
+            .sheet
+            .as_ref()
+            .and_then(|sheet| self.play.find(&sheet.key))
+        else {
+            return vec![];
+        };
+        if self.delete_blocked(game).is_some() {
+            return vec![];
+        }
+        if let Some(sheet) = &mut self.play.sheet {
+            sheet.confirm = Some(Confirm {
+                phase: ConfirmPhase::Asking,
+                since: Instant::now(),
+            });
+        }
+        self.focus = Target::PlayConfirm(DeleteChoice::KeepSaves);
+        self.sound = Some(crate::state::Sound::Select);
+        self.dirty = true;
+        vec![]
+    }
+
+    fn play_confirm(&mut self, choice: DeleteChoice) -> Vec<Effect> {
+        let Some(sheet) = &mut self.play.sheet else {
+            return vec![];
+        };
+        let Some(confirm) = &mut sheet.confirm else {
+            return vec![];
+        };
+        let keep_saves = match (confirm.phase, choice) {
+            (ConfirmPhase::Deleting, _) => return vec![],
+            (ConfirmPhase::Failed(_), _) | (ConfirmPhase::Asking, DeleteChoice::Cancel) => {
+                sheet.confirm = None;
+                self.focus = Target::PlayDelete;
+                self.sound = Some(crate::state::Sound::Back);
+                self.dirty = true;
+                return vec![];
+            }
+            (ConfirmPhase::Asking, DeleteChoice::KeepSaves) => true,
+            (ConfirmPhase::Asking, DeleteChoice::AllData) => false,
+        };
+        confirm.phase = ConfirmPhase::Deleting;
+        confirm.since = Instant::now();
+        let key = sheet.key.clone();
+        self.play.deleting = Some(key.clone());
+        self.sound = Some(crate::state::Sound::Select);
+        self.dirty = true;
+        vec![Effect::ConsoleDelete { key, keep_saves }]
+    }
+
+    /// The PC answered a delete: the game leaves the rail and its sheet closes, or the
+    /// confirmation says why it did not work (a notice, once Back closed it).
+    pub fn console_deleted(&mut self, key: &str, result: Result<(), DeleteError>) {
+        if self.play.deleting.as_deref() == Some(key) {
+            self.play.deleting = None;
+        }
+        let title = self
+            .play
+            .all()
+            .and_then(|all| all.games.iter().find(|game| game.key == key))
+            .map_or_else(|| key.to_owned(), |game| game.title.clone());
+        let language = self.preferences.language;
+        let on_sheet = self
+            .play
+            .sheet
+            .as_ref()
+            .is_some_and(|sheet| sheet.key == key);
+        match result {
+            Ok(()) => {
+                if on_sheet {
+                    self.play.sheet = None;
+                }
+                self.play.remove(key, self.preferences.show_hidden_games);
+                if on_sheet || matches!(self.focus, Target::PlayGame(_)) {
+                    self.focus = self.play_entry();
+                }
+                self.notify(language.format("deleteDone", &[("game", title.as_str())]));
+            }
+            Err(error) => {
+                let confirm = self
+                    .play
+                    .sheet
+                    .as_mut()
+                    .filter(|sheet| sheet.key == key)
+                    .and_then(|sheet| sheet.confirm.as_mut());
+                match confirm {
+                    Some(confirm) => {
+                        confirm.phase = ConfirmPhase::Failed(error);
+                        confirm.since = Instant::now();
+                        self.focus = Target::PlayConfirm(DeleteChoice::Cancel);
+                    }
+                    None => self.notify(language.t(delete_error_message(error))),
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Settings > Show hidden games: hidden games come back onto the rail, marked (or go).
+    pub fn toggle_show_hidden_games(&mut self) {
+        self.preferences.show_hidden_games = !self.preferences.show_hidden_games;
+        self.play.hidden = self.preferences.hidden_games.iter().cloned().collect();
+        self.play.refilter(self.preferences.show_hidden_games);
+        if let Target::PlayGame(index) = self.focus
+            && index != self.play.index
+        {
+            self.focus = Target::PlayGame(self.play.index);
+        }
+        self.dirty = true;
+    }
+
     /// Hides the details sheet's game (or unhides it), saving the choice; the sheet closes
     /// and focus stays where the game was on the rail.
     fn play_toggle_hidden(&mut self) -> Vec<Effect> {
@@ -751,7 +928,7 @@ impl State {
         }
         self.play.hidden = list.iter().cloned().collect();
         self.play.sheet = None;
-        self.play.refilter();
+        self.play.refilter(self.preferences.show_hidden_games);
         self.focus = self.play_entry();
         if let Target::PlayGame(index) = self.focus {
             self.play_focus_game(index, Instant::now());
@@ -763,6 +940,14 @@ impl State {
 
     /// Holding OK: a cover opens its details; on the details sheet, hides the game.
     pub fn play_hold(&mut self) -> Option<Vec<Effect>> {
+        if self
+            .play
+            .sheet
+            .as_ref()
+            .is_some_and(|sheet| sheet.confirm.is_some())
+        {
+            return Some(vec![]);
+        }
         if self.page == Page::Play
             && self.play.sheet.is_some()
             && matches!(

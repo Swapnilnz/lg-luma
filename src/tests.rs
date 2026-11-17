@@ -1880,19 +1880,17 @@ fn hiding_a_game_from_its_details_and_bringing_it_back() {
     state.set_console_library(crate::console::Library::default());
     state.set_console_library(crate::console::demo_library());
     assert_eq!(state.play.games().len(), count - 1);
-    // The rail ends with the Hidden games tile; it shows them, marked.
+    // The rail simply ends: no tile for the hidden games.
     state.focus = Target::PlayGame(count - 2);
     state.direction(Direction::Right, &[]);
-    assert_eq!(state.focus, Target::PlayHidden);
-    assert!(
-        controls(&state)
-            .iter()
-            .any(|c| c.target == Target::PlayHidden)
-    );
-    state.activate();
-    assert!(state.play.show_hidden);
+    assert_eq!(state.focus, Target::PlayGame(count - 2));
+    // Settings > Show hidden games brings it back, marked.
+    show_hidden_games(&mut state);
+    assert!(state.preferences.show_hidden_games);
     assert_eq!(state.play.games().len(), count);
-    assert_eq!(state.focus, Target::PlayGame(1));
+    state.open(crate::play::PLAY_PAGE);
+    state.focus = Target::PlayGame(1);
+    state.play_tick();
     // Its details offer Unhide; the Hide button sits under Play.
     state.focus = Target::PlayAction(crate::play::PlayButton::Details);
     state.activate();
@@ -1900,12 +1898,53 @@ fn hiding_a_game_from_its_details_and_bringing_it_back() {
     assert_eq!(state.focus, Target::PlayHide);
     assert!(matches!(state.activate()[..], [Effect::Save]));
     assert!(state.preferences.hidden_games.is_empty());
-    assert!(!state.play.show_hidden);
+    // The setting stays as it was.
+    assert!(state.preferences.show_hidden_games);
     assert_eq!(state.play.games().len(), count);
+}
+
+fn show_hidden_games(state: &mut State) {
+    state.open(2);
+    state.focus = Target::Setting(crate::state::SHOW_HIDDEN_GAMES_SETTING);
+    assert!(matches!(state.activate()[..], [Effect::Save]));
+}
+
+#[test]
+fn the_show_hidden_games_setting_refilters_the_rail() {
+    let mut state = play_ready();
+    let count = state.play.games().len();
+    state.preferences.hidden_games = vec![state.play.games()[0].key.clone()];
+    state.set_console_library(crate::console::Library::default());
+    state.set_console_library(crate::console::demo_library());
+    assert_eq!(state.play.games().len(), count - 1);
+    // Its row is in Settings with the console set up.
+    state.open(2);
     assert!(
-        !controls(&state)
+        controls(&state)
             .iter()
-            .any(|c| c.target == Target::PlayHidden)
+            .any(|c| c.target == Target::Setting(crate::state::SHOW_HIDDEN_GAMES_SETTING))
+    );
+    show_hidden_games(&mut state);
+    assert_eq!(state.play.games().len(), count);
+    assert!(state.play.is_hidden(&state.play.games()[0].key));
+    show_hidden_games(&mut state);
+    assert!(!state.preferences.show_hidden_games);
+    assert_eq!(state.play.games().len(), count - 1);
+    // Every game hidden: the page offers Open Hydra.
+    state.preferences.hidden_games = state
+        .play
+        .all()
+        .unwrap()
+        .games
+        .iter()
+        .map(|game| game.key.clone())
+        .collect();
+    state.set_console_library(crate::console::Library::default());
+    state.set_console_library(crate::console::demo_library());
+    assert!(state.play.games().is_empty());
+    assert_eq!(
+        state.play_entry(),
+        Target::PlayAction(crate::play::PlayButton::Hydra)
     );
 }
 
@@ -2138,4 +2177,635 @@ fn photo_settings_toggle() {
     state.focus = Target::Setting(PHOTO_BACKGROUND_SETTING);
     state.activate();
     assert!(!state.preferences.photo_background);
+}
+
+// ---- The PC's controllers and drives, and deleting games ----
+
+#[test]
+fn console_system_is_bounded_and_cleaned() {
+    use crate::console::System;
+    let pads: Vec<_> = (0..12)
+        .map(|n| json!({"name": format!("Pad\n{n}"), "battery": 250, "charging": n == 0}))
+        .collect();
+    let reply = json!({
+        "controllers": pads,
+        "drives": [
+            {"letter": "c", "label": "Sys\ttem", "free": 2e12, "total": 1e12},
+            {"letter": "D:", "label": "", "free": -5.0, "total": 5e11},
+            {"letter": "E", "label": "", "free": 1e9, "total": 0.0},
+        ],
+    });
+    let system = System::parse(reply.to_string().as_bytes()).unwrap();
+    assert_eq!(system.controllers.len(), crate::console::SYSTEM_ITEMS);
+    assert_eq!(system.controllers[0].name, "Pad 0");
+    assert!(system.controllers.iter().all(|pad| pad.battery == 100));
+    // A drive without a size is left out; free space stays within the drive.
+    assert_eq!(system.drives.len(), 2);
+    assert_eq!(system.drives[0].letter, "C");
+    assert_eq!(system.drives[0].label, "Sys tem");
+    assert_eq!(system.drives[0].free, 1e12);
+    assert_eq!(system.drives[1].letter, "D");
+    assert_eq!(system.drives[1].free, 0.);
+    assert!((system.drives[1].used() - 1.).abs() < 1e-6);
+    assert!(System::parse(b"not json").is_none());
+    assert!(System::parse(br#"{"controllers":[{"battery":-3}]}"#).is_none());
+}
+
+#[test]
+fn console_delete_jobs_parse() {
+    use crate::console::{DeleteError, JobState, valid_job_id};
+    assert!(valid_job_id("0f8b6c2e-1d3a-4b5c-9e7f-0123456789ab"));
+    assert!(!valid_job_id("0F8B6C2E-1D3A-4B5C-9E7F-0123456789AB"));
+    assert!(!valid_job_id("../../etc/passwd"));
+    assert_eq!(
+        JobState::parse(br#"{"state":"pending"}"#),
+        Some(JobState::Pending)
+    );
+    assert_eq!(
+        JobState::parse(br#"{"state":"done"}"#),
+        Some(JobState::Done)
+    );
+    assert_eq!(
+        JobState::parse(br#"{"state":"failed","error":"running"}"#),
+        Some(JobState::Failed(DeleteError::Running))
+    );
+    assert_eq!(
+        JobState::parse(br#"{"state":"failed","error":"io"}"#),
+        Some(JobState::Failed(DeleteError::Failed))
+    );
+    assert_eq!(JobState::parse(br#"{"state":"odd"}"#), None);
+}
+
+fn play_sheet() -> State {
+    let mut state = play_ready();
+    state.console_awake = Some(true);
+    state.open(crate::play::PLAY_PAGE);
+    state.focus = Target::PlayGame(1);
+    state.play_tick();
+    state.focus = Target::PlayAction(crate::play::PlayButton::Details);
+    state.activate();
+    state
+}
+
+#[test]
+fn the_details_sheet_reaches_delete_and_back() {
+    let mut state = play_sheet();
+    assert_eq!(state.focus, Target::PlayDetailStart);
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayHide);
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayDelete);
+    assert!(
+        controls(&state)
+            .iter()
+            .any(|c| c.target == Target::PlayDelete)
+    );
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayDelete);
+    state.direction(Direction::Up, &[]);
+    assert_eq!(state.focus, Target::PlayHide);
+    state.direction(Direction::Up, &[]);
+    assert_eq!(state.focus, Target::PlayDetailStart);
+}
+
+#[test]
+fn deleting_asks_first_and_sends_the_choice() {
+    use crate::play::{ConfirmPhase, DeleteChoice};
+    for (moves, keep) in [(0, true), (1, false)] {
+        let mut state = play_sheet();
+        let key = state.play.sheet.as_ref().unwrap().key.clone();
+        state.focus = Target::PlayDelete;
+        assert!(state.activate().is_empty());
+        assert_eq!(state.focus, Target::PlayConfirm(DeleteChoice::KeepSaves));
+        // The sheet's own controls cannot be reached behind it.
+        assert!(!controls(&state).iter().any(|c| matches!(
+            c.target,
+            Target::PlayDetailStart | Target::PlayHide | Target::PlayDelete | Target::PlayShot(_)
+        )));
+        assert!(
+            controls(&state)
+                .iter()
+                .any(|c| c.target == Target::PlayConfirm(DeleteChoice::AllData))
+        );
+        for _ in 0..moves {
+            state.direction(Direction::Down, &[]);
+        }
+        let effects = state.activate();
+        assert_eq!(
+            effects,
+            vec![Effect::ConsoleDelete {
+                key: key.clone(),
+                keep_saves: keep,
+            }]
+        );
+        let phase = state
+            .play
+            .sheet
+            .as_ref()
+            .unwrap()
+            .confirm
+            .as_ref()
+            .unwrap()
+            .phase;
+        assert_eq!(phase, ConfirmPhase::Deleting);
+        // While it runs, OK and the arrows do nothing.
+        assert!(state.activate().is_empty());
+        state.direction(Direction::Up, &[]);
+        assert!(state.play.sheet.as_ref().unwrap().confirm.is_some());
+        // Done: the game leaves, the sheet closes.
+        let count = state.play.games().len();
+        state.console_deleted(&key, Ok(()));
+        assert!(state.play.sheet.is_none());
+        assert_eq!(state.play.games().len(), count - 1);
+        assert!(state.play.find(&key).is_none());
+        assert!(state.play.deleting.is_none());
+    }
+}
+
+#[test]
+fn delete_cancel_back_and_failure() {
+    use crate::console::DeleteError;
+    use crate::play::{ConfirmPhase, DeleteChoice};
+    let mut state = play_sheet();
+    state.focus = Target::PlayDelete;
+    state.activate();
+    // Cancel, at the bottom, closes it.
+    state.direction(Direction::Down, &[]);
+    state.direction(Direction::Down, &[]);
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlayConfirm(DeleteChoice::Cancel));
+    assert!(state.activate().is_empty());
+    assert!(state.play.sheet.as_ref().unwrap().confirm.is_none());
+    assert_eq!(state.focus, Target::PlayDelete);
+    // Back closes it too, leaving the sheet open.
+    state.activate();
+    state.back();
+    assert!(state.play.sheet.as_ref().unwrap().confirm.is_none());
+    assert!(state.play.sheet.is_some());
+    assert_eq!(state.focus, Target::PlayDelete);
+    // A failure says why.
+    let key = state.play.sheet.as_ref().unwrap().key.clone();
+    state.activate();
+    assert_eq!(state.activate().len(), 1);
+    state.console_deleted(&key, Err(DeleteError::Running));
+    let confirm = state.play.sheet.as_ref().unwrap().confirm.as_ref().unwrap();
+    assert_eq!(confirm.phase, ConfirmPhase::Failed(DeleteError::Running));
+    assert!(state.play.find(&key).is_some());
+    assert_eq!(state.focus, Target::PlayConfirm(DeleteChoice::Cancel));
+    state.activate();
+    assert!(state.play.sheet.as_ref().unwrap().confirm.is_none());
+}
+
+#[test]
+fn delete_waits_for_the_pc() {
+    let mut state = play_sheet();
+    state.console_awake = Some(false);
+    state.focus = Target::PlayDelete;
+    assert!(state.activate().is_empty());
+    assert!(state.play.sheet.as_ref().unwrap().confirm.is_none());
+    let game = state
+        .play
+        .find(&state.play.sheet.as_ref().unwrap().key)
+        .unwrap();
+    assert_eq!(state.delete_blocked(game), Some("deleteAsleep"));
+    // A running game cannot be deleted either.
+    state.console_awake = Some(true);
+    let key = state.play.sheet.as_ref().unwrap().key.clone();
+    let mut library = state.play.all().unwrap().clone();
+    for game in &mut library.games {
+        game.running = game.key == key;
+    }
+    state.set_console_library(library);
+    state.focus = Target::PlayDelete;
+    assert!(state.activate().is_empty());
+    assert!(state.play.sheet.as_ref().unwrap().confirm.is_none());
+}
+
+#[test]
+fn the_status_strip_shows_while_the_pc_answers() {
+    let mut state = play_ready();
+    state.open(crate::play::PLAY_PAGE);
+    for awake in [false, true] {
+        state.console_awake = Some(awake);
+        state.play.system = None;
+        let without = scene(&state).draw.len();
+        state.play.system = Some(crate::console::demo_system());
+        let with = scene(&state).draw.len();
+        assert_eq!(with > without, awake);
+    }
+}
+
+// ---- Browse by Platform ----
+
+const PLATFORM_SOURCE: &str = "platforms:netflix,disney-plus,hbo-max,prime-video,apple-tv,paramount-plus,crunchyroll,stan,binge";
+
+#[test]
+fn platform_sources_parse_and_skip_unknown_keys() {
+    use crate::feeds::platforms::{PLATFORMS, from_link, is_source, items, parse};
+    assert!(is_source(" platforms:netflix"));
+    assert!(!is_source("mdblist:netflix"));
+    let stan = PLATFORMS.iter().position(|p| p.key == "stan").unwrap();
+    assert_eq!(
+        parse("platforms:netflix, hulu ,stan,netflix,,"),
+        vec![0, stan]
+    );
+    assert!(parse("platforms:").is_empty());
+    let cards = items("platforms:netflix,stan");
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[1].title, "Stan");
+    assert_eq!(from_link(&cards[1].link), Some(stan));
+    assert_eq!(from_link("nuvio://tmdb/movie/603"), None);
+    // The full row: one card per platform.
+    assert_eq!(items(PLATFORM_SOURCE).len(), PLATFORMS.len());
+}
+
+fn platform_home() -> State {
+    let mut state = ready();
+    state.feeds.can_search = true;
+    let row = |title: &str, source: &str, items: Vec<crate::feeds::Item>| crate::feeds::Row {
+        title: title.into(),
+        pinned: false,
+        hero: false,
+        extra: false,
+        source: source.into(),
+        hidden: false,
+        status: crate::feeds::Status::Ready,
+        items,
+    };
+    let poster = crate::feeds::Item {
+        title: "Dune".into(),
+        subtitle: String::new(),
+        link: "nuvio://tmdb/movie/438631".into(),
+        image: None,
+        progress: None,
+        episode: None,
+        badge: None,
+    };
+    state.set_feed_rows(vec![
+        row("Trending", "mdblist:a/b", vec![poster]),
+        row(
+            "Browse by Platform",
+            PLATFORM_SOURCE,
+            crate::feeds::platforms::items(PLATFORM_SOURCE),
+        ),
+    ]);
+    state
+}
+
+fn found(titles: &[(&str, &str)]) -> Vec<crate::feeds::explore::Found> {
+    titles
+        .iter()
+        .map(|(title, link)| crate::feeds::explore::Found {
+            item: crate::feeds::Item {
+                title: (*title).into(),
+                link: (*link).into(),
+                ..crate::feeds::Item::default()
+            },
+            year: None,
+            rating: None,
+        })
+        .collect()
+}
+
+/// The Discover search the platform page sent last.
+fn platform_asked(state: &mut State) -> Option<(u64, crate::feeds::explore::Query)> {
+    state.platform_tick();
+    state
+        .feeds
+        .outbox
+        .drain(..)
+        .filter_map(|out| match out {
+            crate::feeds::Outgoing::Discover(id, query) => Some((id, query)),
+            _ => None,
+        })
+        .next_back()
+}
+
+#[test]
+fn a_platform_tile_opens_its_page_and_back_returns() {
+    use crate::feeds::explore::Kind;
+    let mut state = platform_home();
+    assert!(state.feeds.platform_row(1) && !state.feeds.platform_row(0));
+    // The row's tiles are wide; it has no See all tile.
+    assert_eq!(
+        state
+            .feeds
+            .card_width(&Target::Feed(1, 0), state.preferences.reduced_motion),
+        crate::feeds::PLATFORM_WIDTH
+    );
+    assert!(
+        !controls(&state)
+            .iter()
+            .any(|c| c.target == Target::FeedMore(1))
+    );
+    let last = crate::feeds::platforms::PLATFORMS.len() - 1;
+    state.focus = Target::Feed(1, last);
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.focus, Target::Feed(1, last));
+    // OK on Netflix's tile: its page over Home, on its movies.
+    state.focus = Target::Feed(1, 0);
+    assert!(state.activate().is_empty());
+    assert_eq!(state.page, Page::Home);
+    let page = state.feeds.platform.as_ref().unwrap();
+    assert_eq!((page.platform, page.kind), (0, Kind::Movies));
+    assert_eq!(state.focus, Target::PlatformItem(0));
+    // One search for its movies, then none while it is looked for.
+    let (id, query) = platform_asked(&mut state).unwrap();
+    assert_eq!(
+        (query.kind, query.provider, query.genre),
+        (Kind::Movies, Some(0), None)
+    );
+    assert!(platform_asked(&mut state).is_none());
+    // Still loading: the pills hold focus.
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlatformKind(0));
+    state.discover_arrived(
+        id,
+        query,
+        Ok(found(&[
+            ("Dune", "nuvio://tmdb/movie/438631"),
+            ("Heat", "nuvio://tmdb/movie/949"),
+        ])),
+    );
+    state.platform_discovered(id, None);
+    assert!(
+        controls(&state)
+            .iter()
+            .any(|c| c.target == Target::PlatformPlay)
+    );
+    // Along the row, the title shown large follows.
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PlatformPlay);
+    state.direction(Direction::Down, &[]);
+    state.direction(Direction::Right, &[]);
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.focus, Target::PlatformItem(1));
+    assert_eq!(state.feeds.platform_hero().unwrap().title, "Heat");
+    // Play plays it.
+    state.direction(Direction::Up, &[]);
+    assert_eq!(state.focus, Target::PlatformPlay);
+    assert!(matches!(
+        state.activate().as_slice(),
+        [Effect::LaunchTitle(item)] if item.title == "Heat"
+    ));
+    // Details opens its page over this one; Back comes back here.
+    state.focus = Target::PlatformDetails;
+    state.activate();
+    assert_eq!(state.feeds.title.as_ref().unwrap().item.title, "Heat");
+    state.back();
+    assert!(state.feeds.title.is_none() && state.feeds.platform.is_some());
+    assert_eq!(state.focus, Target::PlatformDetails);
+    // Back again: Home, on the tile.
+    state.back();
+    assert!(state.feeds.platform.is_none());
+    assert_eq!(state.focus, Target::Feed(1, 0));
+}
+
+#[test]
+fn the_platform_pills_switch_to_shows() {
+    use crate::feeds::explore::Kind;
+    let mut state = platform_home();
+    state.focus = Target::Feed(1, 7);
+    state.activate();
+    let (id, query) = platform_asked(&mut state).unwrap();
+    state.discover_arrived(
+        id,
+        query,
+        Ok(found(&[("Bluey", "nuvio://tmdb/series/82728")])),
+    );
+    state.focus = Target::PlatformKind(0);
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.focus, Target::PlatformKind(1));
+    state.activate();
+    let page = state.feeds.platform.as_ref().unwrap();
+    assert_eq!((page.kind, page.hero), (Kind::Shows, 0));
+    let (_, shows) = platform_asked(&mut state).unwrap();
+    assert_eq!((shows.kind, shows.provider), (Kind::Shows, Some(7)));
+    // Nothing found yet for shows: an empty row.
+    assert!(state.feeds.platform_items().is_empty());
+    // A failed search says so, and is not asked again.
+    let (id, _) = state.feeds.platform.as_ref().unwrap().asked.unwrap();
+    state.platform_discovered(id, Some("offline".into()));
+    assert!(platform_asked(&mut state).is_none());
+}
+
+#[test]
+fn a_platform_tile_needs_tmdb() {
+    let mut state = platform_home();
+    state.feeds.can_search = false;
+    state.focus = Target::Feed(1, 0);
+    state.activate();
+    assert!(state.feeds.platform.is_none());
+}
+
+#[test]
+fn title_pages_list_directors_and_writers_first() {
+    let movie = serde_json::json!({"credits": {"crew": [
+        {"id": 1, "name": "Denis Villeneuve", "job": "Director", "profile_path": "/d.jpg"},
+        {"id": 1, "name": "Denis Villeneuve", "job": "Screenplay"},
+        {"id": 2, "name": "Jon Spaihts", "job": "Screenplay"},
+        {"id": 3, "name": "Frank Herbert", "job": "Novel"},
+        {"id": 4, "name": "Hans Zimmer", "job": "Original Music Composer"},
+        {"id": 5, "name": "Eric Roth", "job": "Writer"},
+        {"id": 6, "name": "Someone Else", "job": "Story"}
+    ]}});
+    let crew = crate::feeds_service::title_crew(false, &movie);
+    let names: Vec<(&str, &str)> = crew
+        .iter()
+        .map(|person| (person.name.as_str(), person.role.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("Denis Villeneuve", "Director, Writer"),
+            ("Jon Spaihts", "Writer"),
+            ("Eric Roth", "Writer"),
+            ("Someone Else", "Story"),
+        ]
+    );
+    assert!(crew.iter().all(|person| person.crew));
+    assert_eq!(
+        crew[0].image.as_deref(),
+        Some("https://image.tmdb.org/t/p/w185/d.jpg")
+    );
+    let show = serde_json::json!({"created_by": [{"id": 9, "name": "Vince Gilligan"}]});
+    let crew = crate::feeds_service::title_crew(true, &show);
+    assert_eq!((crew[0].id, crew[0].role.as_str()), (9, "Creator"));
+}
+
+#[test]
+fn a_person_page_groups_their_work() {
+    let person = serde_json::json!({
+        "name": "Greta Gerwig",
+        "known_for_department": "Directing",
+        "birthday": "1983-08-04",
+        "place_of_birth": "Sacramento, California, USA",
+        "biography": "An American filmmaker.",
+        "profile_path": "/g.jpg",
+        "combined_credits": {
+            "cast": [
+                {"id": 10, "media_type": "movie", "title": "Frances Ha", "vote_count": 900, "character": "Frances"},
+                {"id": 11, "media_type": "tv", "name": "Late Show", "vote_count": 5000, "genre_ids": [10767], "character": "Guest"},
+                {"id": 12, "media_type": "movie", "title": "Oscars", "vote_count": 10, "character": "Herself"},
+                {"id": 13, "media_type": "tv", "name": "Self Help", "vote_count": 10, "character": "Self - Host"}
+            ],
+            "crew": [
+                {"id": 20, "media_type": "movie", "title": "Lady Bird", "vote_count": 8000, "job": "Director", "department": "Directing"},
+                {"id": 20, "media_type": "movie", "title": "Lady Bird", "vote_count": 8000, "job": "Writer", "department": "Writing"},
+                {"id": 21, "media_type": "movie", "title": "Barbie", "vote_count": 9000, "job": "Director", "department": "Directing", "poster_path": "/b.jpg"},
+                {"id": 21, "media_type": "movie", "title": "Barbie", "vote_count": 9000, "job": "Director", "department": "Directing"}
+            ]
+        }
+    });
+    let info = crate::feeds_service::person_from(&person);
+    assert_eq!(info.name, "Greta Gerwig");
+    assert_eq!(info.born, "Born 1983  ·  Sacramento, California, USA");
+    let rows: Vec<(&str, Vec<&str>)> = info
+        .rows
+        .iter()
+        .map(|(name, items)| {
+            (
+                name.as_str(),
+                items.iter().map(|item| item.title.as_str()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("Directing", vec!["Barbie", "Lady Bird"]),
+            ("Writing", vec!["Lady Bird"]),
+            ("Acting", vec!["Frances Ha"]),
+        ]
+    );
+    assert_eq!(info.rows[0].1[0].link, "nuvio://tmdb/movie/21");
+}
+
+fn person_title(state: &mut State) {
+    let item = crate::feeds::Item {
+        title: "Dune".into(),
+        link: "nuvio://tmdb/movie/438631".into(),
+        ..crate::feeds::Item::default()
+    };
+    state.open_title(item, Target::Feed(0, 0));
+    let info = crate::feeds::TitleInfo {
+        cast: vec![crate::feeds::Person {
+            id: 7,
+            name: "Denis Villeneuve".into(),
+            role: "Director".into(),
+            image: None,
+            crew: true,
+        }],
+        ..crate::feeds::TitleInfo::default()
+    };
+    state
+        .feeds
+        .title_arrived("nuvio://tmdb/movie/438631".into(), Ok(info));
+    state.feeds.outbox.clear();
+}
+
+#[test]
+fn a_cast_and_crew_photo_opens_their_page_and_back_unwinds() {
+    let mut state = platform_home();
+    person_title(&mut state);
+    assert!(scene(&state).draw.iter().any(|draw| matches!(
+        draw,
+        crate::renderer::Draw::Text(words, ..) if words == "Cast & Crew"
+    )));
+    state.focus = Target::TitleCast(0);
+    state.activate();
+    assert!(state.feeds.title.is_none());
+    assert_eq!(state.feeds.person.as_ref().unwrap().person.id, 7);
+    assert!(
+        state
+            .feeds
+            .outbox
+            .contains(&crate::feeds::Outgoing::Person(7))
+    );
+    let rows = vec![
+        (
+            "Directing".to_owned(),
+            vec![
+                crate::feeds::Item {
+                    title: "Arrival".into(),
+                    link: "nuvio://tmdb/movie/329865".into(),
+                    ..crate::feeds::Item::default()
+                },
+                crate::feeds::Item {
+                    title: "Sicario".into(),
+                    link: "nuvio://tmdb/movie/273481".into(),
+                    ..crate::feeds::Item::default()
+                },
+            ],
+        ),
+        (
+            "Writing".to_owned(),
+            vec![crate::feeds::Item {
+                title: "Incendies".into(),
+                link: "nuvio://tmdb/movie/46738".into(),
+                ..crate::feeds::Item::default()
+            }],
+        ),
+    ];
+    state.person_arrived(
+        7,
+        Ok(crate::feeds::PersonInfo {
+            name: "Denis Villeneuve".into(),
+            rows,
+            ..crate::feeds::PersonInfo::default()
+        }),
+    );
+    assert!(
+        controls(&state)
+            .iter()
+            .any(|c| c.target == Target::PersonCredit(1, 0))
+    );
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.focus, Target::PersonCredit(0, 1));
+    state.direction(Direction::Down, &[]);
+    assert_eq!(state.focus, Target::PersonCredit(1, 0));
+    state.direction(Direction::Up, &[]);
+    state.direction(Direction::Right, &[]);
+    assert_eq!(state.focus, Target::PersonCredit(0, 1));
+    // OK on Sicario: its page; Back: the person, on Sicario; Back: Dune; Back: Home.
+    state.activate();
+    assert_eq!(state.feeds.title.as_ref().unwrap().item.title, "Sicario");
+    assert!(state.feeds.person.is_none());
+    state.back();
+    assert_eq!(state.feeds.person.as_ref().unwrap().person.id, 7);
+    assert_eq!(state.focus, Target::PersonCredit(0, 1));
+    state.back();
+    assert_eq!(state.feeds.title.as_ref().unwrap().item.title, "Dune");
+    state.back();
+    assert!(state.feeds.title.is_none() && state.feeds.person.is_none());
+    assert_eq!(state.focus, Target::Feed(0, 0));
+}
+
+#[test]
+fn discover_asks_for_the_service_in_its_region() {
+    use crate::feeds::explore::Query;
+    use crate::feeds::platforms::PLATFORMS;
+    let stan = PLATFORMS.iter().position(|p| p.key == "stan").unwrap();
+    let params = crate::feeds_service::provider_params(&Query {
+        provider: Some(stan),
+        ..Query::default()
+    });
+    let get = |name: &str| {
+        params
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(get("with_watch_providers"), Some("21"));
+    assert_eq!(get("watch_region"), Some("AU"));
+    assert_eq!(
+        get("with_watch_monetization_types"),
+        Some("flatrate|free|ads")
+    );
+    assert!(crate::feeds_service::provider_params(&Query::default()).is_empty());
+    let paramount = PLATFORMS
+        .iter()
+        .find(|p| p.key == "paramount-plus")
+        .unwrap();
+    assert_eq!(paramount.providers, "2303|2616");
 }

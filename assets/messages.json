@@ -2308,37 +2308,169 @@
     "pl": "Pokaż grę",
     "fr": "Afficher le jeu"
   },
-  "hiddenGames": {
-    "en": "Hidden games",
-    "de": "Ausgeblendet",
-    "zh": "已隐藏的游戏",
-    "es": "Juegos ocultos",
-    "pt": "Jogos ocultos",
-    "it": "Giochi nascosti",
-    "ru": "Скрытые игры",
-    "pl": "Ukryte gry",
-    "fr": "Jeux masqués"
+  "deleteGame": {
+    "en": "Delete game",
+    "de": "Spiel löschen",
+    "zh": "删除游戏",
+    "es": "Eliminar juego",
+    "pt": "Excluir jogo",
+    "it": "Elimina gioco",
+    "ru": "Удалить игру",
+    "pl": "Usuń grę",
+    "fr": "Supprimer le jeu"
   },
-  "hiddenShow": {
-    "en": "Show {count}",
-    "de": "{count} zeigen",
-    "zh": "显示 {count} 个",
-    "es": "Mostrar {count}",
-    "pt": "Mostrar {count}",
-    "it": "Mostra {count}",
-    "ru": "Показать: {count}",
-    "pl": "Pokaż {count}",
-    "fr": "Afficher {count}"
+  "deleteAsleep": {
+    "en": "PC asleep",
+    "de": "PC im Ruhezustand",
+    "zh": "电脑已休眠",
+    "es": "PC en reposo",
+    "pt": "PC em repouso",
+    "it": "PC in sospensione",
+    "ru": "ПК спит",
+    "pl": "PC uśpiony",
+    "fr": "PC en veille"
   },
-  "hiddenPutAway": {
-    "en": "Hide them again",
-    "de": "Wieder ausblenden",
-    "zh": "再次隐藏",
-    "es": "Ocultar de nuevo",
-    "pt": "Ocultar de novo",
-    "it": "Nascondi di nuovo",
-    "ru": "Снова скрыть",
-    "pl": "Ukryj ponownie",
-    "fr": "Masquer à nouveau"
+  "deleteBusy": {
+    "en": "Another game is being deleted",
+    "de": "Ein anderes Spiel wird gelöscht",
+    "zh": "正在删除另一个游戏",
+    "es": "Se está eliminando otro juego",
+    "pt": "Outro jogo está sendo excluído",
+    "it": "Un altro gioco è in eliminazione",
+    "ru": "Удаляется другая игра",
+    "pl": "Trwa usuwanie innej gry",
+    "fr": "Un autre jeu est en cours de suppression"
+  },
+  "deleteConfirmTitle": {
+    "en": "Delete {game}?",
+    "de": "{game} löschen?",
+    "zh": "删除 {game}？",
+    "es": "¿Eliminar {game}?",
+    "pt": "Excluir {game}?",
+    "it": "Eliminare {game}?",
+    "ru": "Удалить {game}?",
+    "pl": "Usunąć {game}?",
+    "fr": "Supprimer {game} ?"
+  },
+  "deleteFrees": {
+    "en": "Frees {size}",
+    "de": "Gibt {size} frei",
+    "zh": "释放 {size}",
+    "es": "Libera {size}",
+    "pt": "Libera {size}",
+    "it": "Libera {size}",
+    "ru": "Освободит {size}",
+    "pl": "Zwolni {size}",
+    "fr": "Libère {size}"
+  },
+  "deleteFromPc": {
+    "en": "Removes it from the PC",
+    "de": "Entfernt es vom PC",
+    "zh": "从电脑中移除",
+    "es": "Lo quita del PC",
+    "pt": "Remove do PC",
+    "it": "Lo rimuove dal PC",
+    "ru": "Удалит её с ПК",
+    "pl": "Usuwa ją z PC",
+    "fr": "Le retire du PC"
+  },
+  "deleteKeepSaves": {
+    "en": "Delete, keep save data",
+    "de": "Löschen, Spielstände behalten",
+    "zh": "删除，保留存档",
+    "es": "Eliminar y conservar partidas",
+    "pt": "Excluir e manter salvamentos",
+    "it": "Elimina, mantieni i salvataggi",
+    "ru": "Удалить, сохранить прогресс",
+    "pl": "Usuń, zachowaj zapisy",
+    "fr": "Supprimer, garder les sauvegardes"
+  },
+  "deleteAllData": {
+    "en": "Delete everything",
+    "de": "Alles löschen",
+    "zh": "全部删除",
+    "es": "Eliminar todo",
+    "pt": "Excluir tudo",
+    "it": "Elimina tutto",
+    "ru": "Удалить всё",
+    "pl": "Usuń wszystko",
+    "fr": "Tout supprimer"
+  },
+  "deleteDeleting": {
+    "en": "Deleting…",
+    "de": "Wird gelöscht…",
+    "zh": "正在删除…",
+    "es": "Eliminando…",
+    "pt": "Excluindo…",
+    "it": "Eliminazione…",
+    "ru": "Удаление…",
+    "pl": "Usuwanie…",
+    "fr": "Suppression…"
+  },
+  "deleteBackground": {
+    "en": "Back closes this; the PC carries on.",
+    "de": "Zurück schließt dies; der PC macht weiter.",
+    "zh": "按返回键关闭；电脑会继续。",
+    "es": "Atrás lo cierra; el PC continúa.",
+    "pt": "Voltar fecha isto; o PC continua.",
+    "it": "Indietro chiude; il PC continua.",
+    "ru": "«Назад» закроет окно, ПК продолжит.",
+    "pl": "Wstecz zamyka; PC kontynuuje.",
+    "fr": "Retour ferme ceci ; le PC continue."
+  },
+  "deleteFailedRunning": {
+    "en": "The game is running. Close it and try again.",
+    "de": "Das Spiel läuft. Beende es und versuche es erneut.",
+    "zh": "游戏正在运行。请关闭后重试。",
+    "es": "El juego está abierto. Ciérralo e inténtalo de nuevo.",
+    "pt": "O jogo está aberto. Feche-o e tente de novo.",
+    "it": "Il gioco è in esecuzione. Chiudilo e riprova.",
+    "ru": "Игра запущена. Закройте её и попробуйте снова.",
+    "pl": "Gra jest uruchomiona. Zamknij ją i spróbuj ponownie.",
+    "fr": "Le jeu est lancé. Fermez-le et réessayez."
+  },
+  "deleteFailed": {
+    "en": "Couldn't delete the game.",
+    "de": "Das Spiel konnte nicht gelöscht werden.",
+    "zh": "无法删除该游戏。",
+    "es": "No se pudo eliminar el juego.",
+    "pt": "Não foi possível excluir o jogo.",
+    "it": "Impossibile eliminare il gioco.",
+    "ru": "Не удалось удалить игру.",
+    "pl": "Nie udało się usunąć gry.",
+    "fr": "Impossible de supprimer le jeu."
+  },
+  "deleteFailedNoAnswer": {
+    "en": "The PC didn't answer.",
+    "de": "Der PC hat nicht geantwortet.",
+    "zh": "电脑没有响应。",
+    "es": "El PC no respondió.",
+    "pt": "O PC não respondeu.",
+    "it": "Il PC non ha risposto.",
+    "ru": "ПК не ответил.",
+    "pl": "PC nie odpowiedział.",
+    "fr": "Le PC n'a pas répondu."
+  },
+  "deleteDone": {
+    "en": "{game} deleted",
+    "de": "{game} gelöscht",
+    "zh": "已删除 {game}",
+    "es": "{game} eliminado",
+    "pt": "{game} excluído",
+    "it": "{game} eliminato",
+    "ru": "{game} удалена",
+    "pl": "Usunięto {game}",
+    "fr": "{game} supprimé"
+  },
+  "driveFree": {
+    "en": "{size} free",
+    "de": "{size} frei",
+    "zh": "可用 {size}",
+    "es": "{size} libres",
+    "pt": "{size} livres",
+    "it": "{size} liberi",
+    "ru": "свободно {size}",
+    "pl": "{size} wolne",
+    "fr": "{size} libres"
   }
 }

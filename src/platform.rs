@@ -165,6 +165,14 @@ pub enum Request {
         config: crate::console::Config,
         cache: Option<std::path::PathBuf>,
     },
+    /// Delete a game on the PC (through Hydra), keeping its saves or not; then the library
+    /// is fetched again.
+    ConsoleDelete {
+        config: crate::console::Config,
+        cache: Option<std::path::PathBuf>,
+        key: String,
+        keep_saves: bool,
+    },
     /// Games' art, from the cache or (when `online`) the PC, one after another.
     ConsoleArt {
         config: crate::console::Config,
@@ -191,6 +199,12 @@ pub enum Response {
     Console(u64, crate::console::Phase),
     ConsoleAwake(bool),
     ConsoleLibrary(crate::console::Library),
+    /// The PC's controllers and drives.
+    ConsoleSystem(crate::console::System),
+    ConsoleDeleted {
+        key: String,
+        result: Result<(), crate::console::DeleteError>,
+    },
     ConsoleArt {
         key: String,
         kind: crate::console::ArtKind,
@@ -359,6 +373,45 @@ impl Platform {
                             let _ = responses.send(Response::ConsoleAwake(awake));
                             if let Some(library) = library {
                                 let _ = responses.send(Response::ConsoleLibrary(library));
+                                let system = if webos {
+                                    crate::console::system(&config)
+                                } else {
+                                    Some(crate::console::demo_system())
+                                };
+                                if let Some(system) = system {
+                                    let _ = responses.send(Response::ConsoleSystem(system));
+                                }
+                            }
+                        });
+                        continue;
+                    }
+                    Request::ConsoleDelete {
+                        config,
+                        cache,
+                        key,
+                        keep_saves,
+                    } => {
+                        let responses = responses.clone();
+                        thread::spawn(move || {
+                            // The desktop preview pretends, after a moment.
+                            let result = if webos {
+                                crate::console::delete_and_wait(&config, &key, keep_saves)
+                            } else {
+                                thread::sleep(std::time::Duration::from_millis(1500));
+                                Ok(())
+                            };
+                            eprintln!("Luma console: delete {key}: {result:?}");
+                            let _ = responses.send(Response::ConsoleDeleted { key, result });
+                            if webos {
+                                // The library (and the drives' free space) as they are now.
+                                if let Some(library) =
+                                    crate::console::library(&config, cache.as_deref())
+                                {
+                                    let _ = responses.send(Response::ConsoleLibrary(library));
+                                }
+                                if let Some(system) = crate::console::system(&config) {
+                                    let _ = responses.send(Response::ConsoleSystem(system));
+                                }
                             }
                         });
                         continue;

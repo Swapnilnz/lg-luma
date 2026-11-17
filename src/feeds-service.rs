@@ -6,7 +6,8 @@
 use crate::app_artwork::Artwork;
 use crate::feeds::explore::{ANIME_GENRES, Found, GENRES, Genre, Query};
 use crate::feeds::{
-    Details, Episode, Item, Person, Row, Season, Status, TitleInfo, TraktAction, TraktTitle, Watch,
+    Details, Episode, Item, Person, PersonInfo, Row, Season, Status, TitleInfo, TraktAction,
+    TraktTitle, Watch,
 };
 use image::{ImageReader, Limits};
 use serde::{Deserialize, Serialize};
@@ -140,8 +141,8 @@ pub struct KeyConfig {
 pub struct RowConfig {
     pub title: String,
     /// `trakt:continue`, `trakt:playback`, `trakt:up_next`, `trakt:watchlist`,
-    /// `trakt:calendar`, `smart:because[:N]`, `smart:new_season`, `mdblist:USER/LIST` or
-    /// `mdblist:LIST_ID`.
+    /// `trakt:calendar`, `smart:because[:N]`, `smart:new_season`, `mdblist:USER/LIST`,
+    /// `mdblist:LIST_ID`, or `platforms:netflix,disney-plus,…` (Browse by Platform).
     pub source: String,
     /// Shown only in Explore: the Watchlist row added when feeds.json has none.
     #[serde(skip)]
@@ -378,6 +379,17 @@ pub fn initial_rows(config: &Config, saved: &Saved) -> Vec<Row> {
                 status: Status::Ready,
                 items: saved.items.clone(),
             },
+            // Browse by Platform is built here: ready at once.
+            None if crate::feeds::platforms::is_source(&row.source) => Row {
+                title: static_title(&row.title),
+                pinned: false,
+                hero: false,
+                extra: false,
+                source: row.source.clone(),
+                hidden: row.hidden,
+                status: Status::Ready,
+                items: crate::feeds::platforms::items(&row.source),
+            },
             None => Row {
                 title: static_title(&row.title),
                 pinned: !row.hidden && config.always_loaded(&row.source),
@@ -433,6 +445,8 @@ pub enum Command {
 pub enum TitleCommand {
     Open(String),
     Season(String, u32),
+    /// A person's page, by TMDB id.
+    Person(u64),
 }
 
 pub enum Response {
@@ -455,6 +469,11 @@ pub enum Response {
     Title {
         link: String,
         result: Result<TitleInfo, String>,
+    },
+    /// A person's page; their photo and posters follow as `Image`s.
+    Person {
+        id: u64,
+        result: Result<PersonInfo, String>,
     },
     /// One season of a show's page; its stills follow as `Image`s.
     Season {
@@ -1559,25 +1578,25 @@ fn title_info(
             }
         }
     };
-    let cast = value
-        .get("credits")
-        .and_then(|credits| credits.get("cast"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .take(15)
-        .filter_map(|person| {
-            Some(Person {
-                name: person.get("name").and_then(Value::as_str)?.to_owned(),
-                role: first_text(person, &["character"]),
-                image: person
-                    .get("profile_path")
-                    .and_then(Value::as_str)
-                    .filter(|path| path.starts_with('/'))
-                    .map(|path| format!("{TMDB_PROFILES}{path}")),
-            })
-        })
-        .collect();
+    let mut cast = title_crew(kind == Kind::Series, &value);
+    cast.extend(
+        value
+            .get("credits")
+            .and_then(|credits| credits.get("cast"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(15)
+            .filter_map(|person| {
+                Some(Person {
+                    id: person.get("id").and_then(Value::as_u64).unwrap_or(0),
+                    name: person.get("name").and_then(Value::as_str)?.to_owned(),
+                    role: first_text(person, &["character"]),
+                    image: profile(person),
+                    crew: false,
+                })
+            }),
+    );
     let seasons = match kind {
         Kind::Movie => vec![],
         Kind::Series => value
@@ -1635,6 +1654,235 @@ fn title_info(
             more,
         },
     ))
+}
+
+/// A person's photo, from a TMDB credit or person.
+fn profile(person: &Value) -> Option<String> {
+    person
+        .get("profile_path")
+        .and_then(Value::as_str)
+        .filter(|path| path.starts_with('/'))
+        .map(|path| format!("{TMDB_PROFILES}{path}"))
+}
+
+/// A text field of a TMDB object, or "".
+fn field<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Writing credits shown on a title page, in this order.
+const WRITING_JOBS: [&str; 6] = [
+    "Screenplay",
+    "Writer",
+    "Story",
+    "Novel",
+    "Teleplay",
+    "Author",
+];
+
+/// Who made a title, for its Cast & Crew row: a film's directors and writers, a show's
+/// creators. Each person once, their jobs joined; at most four.
+pub(crate) fn title_crew(series: bool, value: &Value) -> Vec<Person> {
+    let mut crew: Vec<Person> = Vec::new();
+    let mut add = |person: &Value, job: &str| {
+        let Some(name) = person.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        let id = person.get("id").and_then(Value::as_u64).unwrap_or(0);
+        if let Some(known) = crew.iter_mut().find(|known| known.id == id && id != 0) {
+            if !known.role.split(", ").any(|role| role == job) {
+                known.role = format!("{}, {job}", known.role);
+            }
+            return;
+        }
+        crew.push(Person {
+            id,
+            name: name.to_owned(),
+            role: job.to_owned(),
+            image: profile(person),
+            crew: true,
+        });
+    };
+    match series {
+        false => {
+            let people: Vec<&Value> = value
+                .get("credits")
+                .and_then(|credits| credits.get("crew"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .collect();
+            let job = |person: &&Value| field(person, "job").to_owned();
+            for person in people.iter().filter(|person| job(person) == "Director") {
+                add(person, "Director");
+            }
+            for wanted in WRITING_JOBS {
+                for person in people.iter().filter(|person| job(person) == wanted) {
+                    // Screenplay, Teleplay and Author read as "Writer" under a photo.
+                    let label = match wanted {
+                        "Story" | "Novel" => wanted,
+                        _ => "Writer",
+                    };
+                    add(person, label);
+                }
+            }
+        }
+        true => {
+            for person in value
+                .get("created_by")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                add(person, "Creator");
+            }
+        }
+    }
+    crew.truncate(4);
+    crew
+}
+
+/// Titles in a person's rows, at most.
+const PERSON_ROW_LIMIT: usize = 30;
+
+/// A person's page from TMDB: who they are, and their films and shows by department, the one
+/// they are known for first. Talk shows, news and appearances as themselves are left out.
+pub(crate) fn person_from(value: &Value) -> PersonInfo {
+    let credits = value.get("combined_credits");
+    let list = |key: &str| -> Vec<&Value> {
+        credits
+            .and_then(|credits| credits.get(key))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+    let talk = |credit: &Value| {
+        credit
+            .get("genre_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|genres| {
+                genres
+                    .iter()
+                    .any(|genre| matches!(genre.as_u64(), Some(10767 | 10763)))
+            })
+    };
+    let row = |credits: Vec<&Value>| -> Vec<Item> {
+        let mut credits: Vec<&Value> = credits.into_iter().filter(|c| !talk(c)).collect();
+        let votes = |credit: &Value| {
+            credit
+                .get("vote_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        let popularity = |credit: &Value| {
+            credit
+                .get("popularity")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.)
+        };
+        credits.sort_by(|a, b| {
+            votes(b)
+                .cmp(&votes(a))
+                .then(popularity(b).total_cmp(&popularity(a)))
+        });
+        let mut seen = HashSet::new();
+        credits
+            .into_iter()
+            .filter_map(|credit| {
+                let kind = credit
+                    .get("media_type")
+                    .and_then(Value::as_str)
+                    .and_then(Kind::from_text)?;
+                let id = credit.get("id").and_then(Value::as_u64)?;
+                let link = link(kind, None, Some(id))?;
+                seen.insert(link.clone()).then(|| Item {
+                    title: first_text(credit, &["title", "name"]),
+                    link,
+                    image: credit
+                        .get("poster_path")
+                        .and_then(Value::as_str)
+                        .filter(|path| path.starts_with('/'))
+                        .map(|path| format!("{TMDB_IMAGES}{path}")),
+                    ..Item::default()
+                })
+            })
+            .take(PERSON_ROW_LIMIT)
+            .collect()
+    };
+    let job = |credit: &&Value, key: &str| field(credit, key).to_owned();
+    let acting = row(list("cast")
+        .into_iter()
+        .filter(|credit| {
+            let character = job(credit, "character").to_lowercase();
+            !["self", "himself", "herself", "themselves"]
+                .iter()
+                .any(|word| character.trim() == *word || character.starts_with(&format!("{word} ")))
+        })
+        .collect());
+    let crew = list("crew");
+    let directing = row(crew
+        .iter()
+        .filter(|credit| job(credit, "job") == "Director")
+        .copied()
+        .collect());
+    let writing = row(crew
+        .iter()
+        .filter(|credit| job(credit, "department") == "Writing")
+        .copied()
+        .collect());
+    let creating = row(crew
+        .iter()
+        .filter(|credit| job(credit, "job") == "Creator")
+        .copied()
+        .collect());
+    let department = first_text(value, &["known_for_department"]);
+    let mut rows: Vec<(String, Vec<Item>)> = vec![
+        ("Acting".into(), acting),
+        ("Directing".into(), directing),
+        ("Writing".into(), writing),
+        ("Created".into(), creating),
+    ];
+    rows.retain(|(_, items)| !items.is_empty());
+    // Known for directing: Directing first. Known for writing: Writing, then Created.
+    let rank = |name: &str| match (department.as_str(), name) {
+        (known, row) if known == row => 0,
+        ("Writing", "Created") => 1,
+        ("Directing" | "Writing", "Acting") => 3,
+        _ => 2,
+    };
+    rows.sort_by_key(|(name, _)| rank(name));
+    let birthday = first_text(value, &["birthday"]);
+    let place = first_text(value, &["place_of_birth"]);
+    let mut born = Vec::new();
+    if let Some(year) = birthday
+        .get(..4)
+        .filter(|year| year.chars().all(|c| c.is_ascii_digit()))
+    {
+        born.push(format!("Born {year}"));
+    }
+    if !place.is_empty() {
+        born.push(place);
+    }
+    PersonInfo {
+        name: first_text(value, &["name"]),
+        department,
+        image: profile(value),
+        born: born.join("  ·  "),
+        bio: first_text(value, &["biography"]),
+        rows,
+    }
+}
+
+/// A person's page, from one TMDB request.
+fn person_info(http: &Http, key: &str, id: u64) -> Result<PersonInfo, String> {
+    let value = tmdb_request(
+        http,
+        key,
+        &format!("/person/{id}"),
+        &[("append_to_response", "combined_credits")],
+    )?;
+    Ok(person_from(&value))
 }
 
 /// One season's episodes, from TMDB.
@@ -1722,6 +1970,7 @@ fn title_worker(
     let http = Http::new();
     // Titles already looked up, so Back and returning to a page are instant.
     let mut known: HashMap<String, (Kind, u64, TitleInfo)> = HashMap::new();
+    let mut people: HashMap<u64, PersonInfo> = HashMap::new();
     let mut next: Option<TitleCommand> = None;
     loop {
         let command = match next.take() {
@@ -1760,6 +2009,39 @@ fn title_worker(
                 }
                 let result = result.map(|(_, _, info)| info);
                 if responses.send(Response::Title { link, result }).is_err() {
+                    return;
+                }
+                images
+            }
+            TitleCommand::Person(id) => {
+                let result = match people.get(&id) {
+                    Some(found) => Ok(found.clone()),
+                    None => person_info(&http, key, id),
+                };
+                let images = match &result {
+                    Ok(info) => {
+                        if people.len() > 20 {
+                            people.clear();
+                        }
+                        people.insert(id, info.clone());
+                        let mut images: Vec<_> = info
+                            .image
+                            .iter()
+                            .map(|url| {
+                                (format!("feed:{url}"), url.clone(), (180, 270), IMAGE_LIMIT)
+                            })
+                            .collect();
+                        images.extend(info.rows.iter().flat_map(|(_, items)| items).filter_map(
+                            |item| {
+                                let url = item.image.clone()?;
+                                Some((format!("feed:{url}"), url, (240, 360), IMAGE_LIMIT))
+                            },
+                        ));
+                        images
+                    }
+                    Err(_) => vec![],
+                };
+                if responses.send(Response::Person { id, result }).is_err() {
                     return;
                 }
                 images
@@ -1890,6 +2172,22 @@ fn discover_worker(
 /// Pages of TMDB Discover asked for per kind: about 60 titles of each.
 const DISCOVER_PAGES: u64 = 3;
 
+/// Discover's parameters for a search limited to one streaming service: its TMDB providers
+/// in its region, on its subscription (or free, with ads) rather than to rent or buy.
+pub fn provider_params(query: &Query) -> Vec<(&'static str, String)> {
+    match query.platform() {
+        Some(platform) => vec![
+            ("with_watch_providers", platform.providers.to_owned()),
+            ("watch_region", platform.region.to_owned()),
+            (
+                "with_watch_monetization_types",
+                "flatrate|free|ads".to_owned(),
+            ),
+        ],
+        None => Vec::new(),
+    }
+}
+
 /// TMDB Discover for Explore's filters: movies, shows or both (anime is Japanese animation
 /// of either), in the chosen genre and order, interleaved and each title once.
 fn discover(
@@ -1920,6 +2218,7 @@ fn discover(
             ("include_adult", "false".into()),
             ("include_null_first_air_dates", "false".into()),
         ];
+        params.extend(provider_params(query));
         let mut genres: Vec<String> = Vec::new();
         if anime {
             genres.push("16".into());
@@ -2615,6 +2914,13 @@ impl Worker {
     }
 
     fn fetch(&mut self, source: &str) -> Result<Fetched, String> {
+        // Browse by Platform: its tiles come from the table, with nothing to ask for.
+        if crate::feeds::platforms::is_source(source) {
+            return Ok(Fetched {
+                items: crate::feeds::platforms::items(source),
+                title: None,
+            });
+        }
         let (mut entries, title) = self.entries(source, self.config.limit)?;
         entries.truncate(self.config.limit);
         let mut items = Vec::new();
@@ -3943,6 +4249,23 @@ mod tests {
         let before = config.rows.len();
         apply_lists(&mut config, None);
         assert_eq!(config.rows.len(), before);
+    }
+
+    #[test]
+    fn a_platform_row_is_built_without_a_fetch() {
+        let config: Config = serde_json::from_str(
+            r#"{"rows":[{"title":"Browse by Platform","source":"platforms:netflix,nope,binge"}]}"#,
+        )
+        .unwrap();
+        let rows = initial_rows(&config.normalized(), &Saved::default());
+        assert_eq!(rows[0].status, Status::Ready);
+        let titles: Vec<&str> = rows[0]
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Netflix", "Binge"]);
+        assert!(!rows[0].hero && !rows[0].extra && !rows[0].pinned);
     }
 
     #[test]

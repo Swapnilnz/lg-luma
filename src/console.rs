@@ -44,6 +44,8 @@ const REPLY_LIMIT: u64 = 1024;
 const LIBRARY_LIMIT: u64 = 256 * 1024;
 const ART_LIMIT: u64 = 8 * 1024 * 1024;
 const PHOTO_LIMIT: u64 = 4 * 1024 * 1024;
+/// How long a game's delete may take on the PC (Steam shuts down and restarts).
+const DELETE_TIMEOUT: Duration = Duration::from_secs(180);
 /// At most this many games are kept from the library.
 pub const GAMES: usize = 12;
 /// Screenshots per game, for the Play page's moving backdrop.
@@ -233,6 +235,234 @@ impl Library {
 
 pub fn parse_time(text: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// A controller connected to the PC (a Bluetooth DualSense), as `/system` lists it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct Pad {
+    pub name: String,
+    /// Percent, 0 to 100.
+    pub battery: u8,
+    pub charging: bool,
+}
+
+/// One of the PC's fixed drives: its letter, label, and free and total bytes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct Drive {
+    pub letter: String,
+    pub label: String,
+    pub free: f64,
+    pub total: f64,
+}
+
+impl Drive {
+    /// The share in use, 0 to 1.
+    pub fn used(&self) -> f32 {
+        if self.total > 0. {
+            (1. - self.free / self.total).clamp(0., 1.) as f32
+        } else {
+            0.
+        }
+    }
+}
+
+/// The PC's controllers and drives (`GET /system`), for the Play page's status strip.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct System {
+    pub controllers: Vec<Pad>,
+    pub drives: Vec<Drive>,
+}
+
+/// At most this many controllers and drives are kept.
+pub const SYSTEM_ITEMS: usize = 8;
+
+impl System {
+    /// Bounds everything from the PC: short names, sane percentages and byte counts.
+    pub fn sanitize(mut self) -> Self {
+        self.controllers.truncate(SYSTEM_ITEMS);
+        for pad in &mut self.controllers {
+            pad.name = clean(&pad.name, 32);
+            if pad.name.is_empty() {
+                pad.name = "Controller".into();
+            }
+            pad.battery = pad.battery.min(100);
+        }
+        self.drives
+            .retain(|drive| drive.total.is_finite() && drive.total > 0. && drive.free.is_finite());
+        self.drives.truncate(SYSTEM_ITEMS);
+        for drive in &mut self.drives {
+            drive.letter = drive
+                .letter
+                .chars()
+                .find(char::is_ascii_alphabetic)
+                .map(|letter| letter.to_ascii_uppercase().to_string())
+                .unwrap_or_default();
+            drive.label = clean(&drive.label, 32);
+            drive.free = drive.free.clamp(0., drive.total);
+        }
+        self
+    }
+
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice::<Self>(bytes)
+            .ok()
+            .map(Self::sanitize)
+    }
+}
+
+/// The desktop preview's controllers and drives.
+pub fn demo_system() -> System {
+    System {
+        controllers: vec![
+            Pad {
+                name: "DualSense".into(),
+                battery: 65,
+                charging: false,
+            },
+            Pad {
+                name: "DualSense Edge".into(),
+                battery: 15,
+                charging: true,
+            },
+        ],
+        drives: vec![
+            Drive {
+                letter: "C".into(),
+                label: String::new(),
+                free: 182e9,
+                total: 1000e9,
+            },
+            Drive {
+                letter: "E".into(),
+                label: "Games".into(),
+                free: 41e9,
+                total: 2000e9,
+            },
+        ],
+    }
+}
+
+/// Why deleting a game did not work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteError {
+    /// The game is running on the PC.
+    Running,
+    /// Hydra could not delete it (or it was not installed).
+    Failed,
+    /// The PC did not answer, or the job did not finish in time.
+    NoAnswer,
+}
+
+/// A delete job on the PC (`GET /job`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobState {
+    Pending,
+    Working,
+    Done,
+    Failed(DeleteError),
+}
+
+impl JobState {
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let reply: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        Some(
+            match reply.get("state").and_then(serde_json::Value::as_str)? {
+                "pending" => Self::Pending,
+                "working" => Self::Working,
+                "done" => Self::Done,
+                "failed" => Self::Failed(
+                    match reply.get("error").and_then(serde_json::Value::as_str) {
+                        Some("running") => DeleteError::Running,
+                        _ => DeleteError::Failed,
+                    },
+                ),
+                _ => return None,
+            },
+        )
+    }
+}
+
+/// A job id from the agent: a lowercase GUID.
+pub fn valid_job_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, b)| match index {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
+}
+
+/// The PC's controllers and drives. None when the agent does not answer.
+pub fn system(config: &Config) -> Option<System> {
+    System::parse(&get(&agent(), config, "/system", REPLY_LIMIT * 8)?)
+}
+
+/// Asks the PC to delete a game (through Hydra), keeping its saves or not. The job's id.
+pub fn delete(config: &Config, key: &str, keep_saves: bool) -> Option<String> {
+    if !valid_key(key) {
+        return None;
+    }
+    let saves = if keep_saves { "keep" } else { "delete" };
+    let mut response = agent()
+        .post(format!("{}/delete?key={key}&saves={saves}", config.base()))
+        .header("X-Console-Token", &config.token)
+        .send_empty()
+        .ok()?;
+    if response.status().as_u16() != 202 {
+        eprintln!("Luma console: delete {}", response.status().as_u16());
+        return None;
+    }
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(REPLY_LIMIT)
+        .read_to_end(&mut body)
+        .ok()?;
+    let reply: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    reply
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| valid_job_id(id))
+        .map(str::to_owned)
+}
+
+/// Where a delete job stands. None when the agent does not answer.
+pub fn job(config: &Config, id: &str) -> Option<JobState> {
+    if !valid_job_id(id) {
+        return None;
+    }
+    JobState::parse(&get(
+        &agent(),
+        config,
+        &format!("/job?id={id}"),
+        REPLY_LIMIT,
+    )?)
+}
+
+/// Deletes a game and waits for Hydra to finish: the job is polled every second for up
+/// to three minutes.
+pub fn delete_and_wait(config: &Config, key: &str, keep_saves: bool) -> Result<(), DeleteError> {
+    let id = delete(config, key, keep_saves).ok_or(DeleteError::NoAnswer)?;
+    let deadline = Instant::now() + DELETE_TIMEOUT;
+    let mut misses = 0;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(1));
+        match job(config, &id) {
+            Some(JobState::Done) => return Ok(()),
+            Some(JobState::Failed(error)) => return Err(error),
+            Some(_) => misses = 0,
+            None => {
+                misses += 1;
+                if misses >= 10 {
+                    break;
+                }
+            }
+        }
+    }
+    Err(DeleteError::NoAnswer)
 }
 
 /// The desktop preview's library: no PC, no art (the posters are generated).

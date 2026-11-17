@@ -110,7 +110,7 @@ impl Options {
         while let Some(arg) = args.next() {
             if arg == "--help" {
                 println!(
-                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
+                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/explore/play/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
                 );
                 println!(
                     "\n  --test-extra-apps N  Explicit scroll preview with up to 300 non-launchable extra cards; separate preferences"
@@ -430,6 +430,17 @@ fn effects(
                     });
                 }
             }
+            Effect::ConsoleDelete { key, keep_saves } => {
+                if let Some(config) = &state.preferences.console {
+                    eprintln!("Luma console: deleting {key} (keep saves: {keep_saves})");
+                    platform.send(Request::ConsoleDelete {
+                        config: config.clone(),
+                        cache: Some(preferences.with_file_name("console")),
+                        key,
+                        keep_saves,
+                    });
+                }
+            }
         }
     }
     true
@@ -505,6 +516,14 @@ fn script(
         }
         "settings" => {
             state.open(2);
+            vec![]
+        }
+        "explore" => {
+            state.open(state::EXPLORE_PAGE);
+            vec![]
+        }
+        "play" => {
+            state.open(play::PLAY_PAGE);
             vec![]
         }
         "up" => state.direction(Direction::Up, controls),
@@ -755,6 +774,7 @@ fn feeds_tick(
     let keep = state.preferences.feed_keep_posters;
     // Explore: its list, the search or full row it wants, and the posters in its grid.
     state.explore_tick();
+    state.platform_tick();
     let near = if home {
         let ahead = usize::from(state.preferences.feed_preload_rows);
         let near = state.feeds.near_rows(controls, ahead);
@@ -766,7 +786,8 @@ fn feeds_tick(
     } else {
         state.feeds.near.clone()
     };
-    let extra = state.feeds.explore.images.clone();
+    let mut extra = state.feeds.explore.images.clone();
+    extra.extend(state.feeds.platform_posters());
     if near != state.feeds.near || keep != state.feeds.keep || extra != state.feeds.extra_sent {
         service.near(near.iter().copied().collect(), keep, extra.clone());
         state.feeds.near = near;
@@ -800,6 +821,7 @@ fn feeds_tick(
             feeds::Outgoing::Lists(query) => service.lists(query),
             feeds::Outgoing::Expand(row) => service.expand(row),
             feeds::Outgoing::Discover(id, query) => service.discover(id, query),
+            feeds::Outgoing::Person(id) => service.title(feeds_service::TitleCommand::Person(id)),
         }
     }
     while let Ok(response) = service.receiver.try_recv() {
@@ -841,8 +863,11 @@ fn feeds_tick(
                 state.expanded_arrived(row, result)
             }
             feeds_service::Response::Discover { id, query, result } => {
-                state.discover_arrived(id, query, result)
+                let error = result.as_ref().err().cloned();
+                state.discover_arrived(id, query, result);
+                state.platform_discovered(id, error);
             }
+            feeds_service::Response::Person { id, result } => state.person_arrived(id, result),
             feeds_service::Response::Marks { watched, watchlist } => {
                 state.marks_arrived(watched, watchlist)
             }
@@ -1451,10 +1476,23 @@ fn run() -> Result<(), String> {
                             state.photos.reset_failures();
                         }
                         state.console_awake = Some(awake);
+                        if !awake {
+                            // The strip shows only while the PC answers.
+                            state.play.system = None;
+                        }
                         state.dirty = true;
                     }
                 }
                 Response::ConsoleLibrary(library) => state.set_console_library(library),
+                Response::ConsoleSystem(system) => {
+                    if state.console_awake == Some(true)
+                        && state.play.system.as_ref() != Some(&system)
+                    {
+                        state.play.system = Some(system);
+                        state.dirty = true;
+                    }
+                }
+                Response::ConsoleDeleted { key, result } => state.console_deleted(&key, result),
                 Response::Photo(photo) => state.photo_received(photo),
                 Response::ConsoleArt { key, kind, image } => {
                     state.set_console_art(key, kind, image);

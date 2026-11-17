@@ -180,12 +180,14 @@ pub const ANIME_GENRES: [Genre; 19] = [
 ];
 
 /// Explore's filters for a search of all of TMDB. `genre` indexes GENRES (ANIME_GENRES for
-/// anime).
+/// anime); `provider` indexes `platforms::PLATFORMS` (what one service streams, for a
+/// Browse by Platform page).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Query {
     pub kind: Kind,
     pub genre: Option<usize>,
     pub sort: Sort,
+    pub provider: Option<usize>,
 }
 
 impl Query {
@@ -210,6 +212,11 @@ impl Query {
             Kind::Shows => genre.tv.is_some() || genre.keyword.is_some(),
             Kind::All | Kind::Anime => true,
         }
+    }
+
+    /// The streaming service the search is limited to.
+    pub fn platform(&self) -> Option<&'static super::platforms::Platform> {
+        self.provider.and_then(super::platforms::get)
     }
 
     /// "Popular anime · Isekai", for the line under the page's name.
